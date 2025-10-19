@@ -72,7 +72,7 @@ mise trust
 mise install
 ```
 
-This project targets Rust edition 2024. The toolchain is pinned to 1.85.1 in `rust-toolchain.toml`, which satisfies the 1.85 minimum for the edition.
+This project targets Rust edition 2024. The toolchain is pinned to 1.90.0 in `rust-toolchain.toml`, comfortably above the edition's 1.85 minimum.
 
 ### Common Tasks
 

@@ -7,7 +7,7 @@ ignore = []
 [licenses]
 allow = [
   "Apache-2.0",
-  "BSD-2-Clause",
+  "CDLA-Permissive-2.0",
   "BSD-3-Clause",
   "ISC",
   "MIT",
@@ -20,3 +20,28 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
+skip = [
+  { name = "getrandom", version = "=0.2.16" },
+  { name = "windows-sys", version = "=0.52.0" },
+  { name = "windows-sys", version = "=0.59.0" },
+  { name = "windows-sys", version = "=0.60.2" },
+  { name = "windows-sys", version = "=0.61.2" },
+  { name = "windows_x86_64_msvc", version = "=0.52.6" },
+  { name = "windows_x86_64_msvc", version = "=0.53.1" },
+  { name = "windows-targets", version = "=0.52.6" },
+  { name = "windows-targets", version = "=0.53.5" },
+  { name = "windows_aarch64_gnullvm", version = "=0.52.6" },
+  { name = "windows_aarch64_gnullvm", version = "=0.53.1" },
+  { name = "windows_x86_64_gnullvm", version = "=0.52.6" },
+  { name = "windows_x86_64_gnullvm", version = "=0.53.1" },
+  { name = "windows_aarch64_msvc", version = "=0.52.6" },
+  { name = "windows_aarch64_msvc", version = "=0.53.1" },
+  { name = "windows_i686_gnu", version = "=0.52.6" },
+  { name = "windows_i686_gnu", version = "=0.53.1" },
+  { name = "windows_x86_64_gnu", version = "=0.52.6" },
+  { name = "windows_x86_64_gnu", version = "=0.53.1" },
+  { name = "windows_i686_gnullvm", version = "=0.52.6" },
+  { name = "windows_i686_gnullvm", version = "=0.53.1" },
+  { name = "windows_i686_msvc", version = "=0.52.6" },
+  { name = "windows_i686_msvc", version = "=0.53.1" },
+]

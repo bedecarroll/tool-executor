@@ -110,16 +110,18 @@ fn locate_config_dir(dir_override: Option<&Path>) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
 
-    if let Ok(raw) = std::env::var(ENV_CONFIG_DIR) {
-        if !raw.trim().is_empty() {
-            return Some(PathBuf::from(raw));
-        }
+    if let Some(raw) = std::env::var(ENV_CONFIG_DIR)
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        return Some(PathBuf::from(raw));
     }
 
-    if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg_home.trim().is_empty() {
-            return Some(Path::new(&xdg_home).join(APP_CONFIG_DIR));
-        }
+    if let Some(xdg_home) = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+    {
+        return Some(Path::new(&xdg_home).join(APP_CONFIG_DIR));
     }
 
     let base_dirs = BaseDirs::new()?;

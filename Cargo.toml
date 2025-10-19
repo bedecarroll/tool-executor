@@ -2,7 +2,7 @@
 name = "llml"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 authors = ["Bede Carroll <bedecarroll@users.noreply.github.com>"]
 description = "The LLM launching tool"
 homepage = "https://github.com/bedecarroll/llml"
@@ -30,12 +30,12 @@ clap = { version = "4.5.4", features = ["derive"] }
 clap_complete = "4.5"
 clap_mangen = "0.2"
 color-eyre = "0.6"
-directories = "5.0"
+directories = "6.0.0"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "0.9.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-self_update = { version = "0.39", optional = true, default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }
+self_update = { version = "0.42.0", optional = true, default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"

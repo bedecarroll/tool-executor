@@ -11,12 +11,12 @@ This document describes how automated agents should interact with this repositor
 2. Use `mise run fmt`, `mise run lint`, and `mise run test` before opening a pull request.
 3. Execute work in a red–green–refactor loop: write a failing test, make it pass, then tidy the code.
 4. Never commit generated artefacts from `coverage/` or `target/`.
-5. Stay on the pinned Rust toolchain (`rust-toolchain.toml`) to guarantee edition 2024 compatibility and MSRV 1.85 features.
+5. Stay on the pinned Rust toolchain (`rust-toolchain.toml`) to guarantee edition 2024 compatibility and MSRV 1.90 features.
 
 ## Tooling
 
 - Tool versions are pinned in `mise.toml`. Do not install tools globally.
-- `rust-toolchain.toml` keeps `rustfmt`, `clippy`, and `llvm-tools-preview` aligned at Rust 1.85.1 (edition 2024). Avoid overriding the toolchain without discussion.
+- `rust-toolchain.toml` keeps `rustfmt`, `clippy`, and `llvm-tools-preview` aligned at Rust 1.90.0 (edition 2024). Avoid overriding the toolchain without discussion.
 - `cargo-nextest` powers the primary test task. Prefer it over `cargo test` unless you need doctests.
 - `cargo-llvm-cov` generates coverage metrics. Output lives in `coverage/`.
 - `cargo-insta` streamlines snapshot updates (`mise run snapshot-review`).
