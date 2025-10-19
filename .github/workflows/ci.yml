@@ -27,14 +27,8 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
-        with:
-          install: true
-
-      - name: Trust workspace
-        run: mise trust
-
-      - name: Install toolchain
-        run: mise install
+        env:
+          MISE_JOBS: 1
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
@@ -64,14 +58,8 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
-        with:
-          install: true
-
-      - name: Trust workspace
-        run: mise trust
-
-      - name: Install toolchain
-        run: mise install
+        env:
+          MISE_JOBS: 1
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
