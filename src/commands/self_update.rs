@@ -12,8 +12,8 @@ pub fn run(cmd: SelfUpdateCommand) -> color_eyre::Result<()> {
     let mut builder = self_update::backends::github::Update::configure();
     builder
         .repo_owner("bedecarroll")
-        .repo_name("llml")
-        .bin_name("llml")
+        .repo_name("tool-executor")
+        .bin_name("tx")
         .show_download_progress(true)
         .current_version(env!("CARGO_PKG_VERSION"));
 

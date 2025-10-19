@@ -50,8 +50,8 @@ Run tasks with `mise run <task>`:
 
 ## Configuration
 
-- User configuration lives in `$XDG_CONFIG_HOME/llml/config.toml` (falling back to `~/.config/...`). Additional overrides load from the `conf.d/` directory in lexical order.
-- Honour the `--config-dir` flag or `LLML_CONFIG_DIR` when scripting automated workflows.
+- User configuration lives in `$XDG_CONFIG_HOME/tx/config.toml` (falling back to `~/.config/...`). Additional overrides load from the `conf.d/` directory in lexical order.
+- Honour the `--config-dir` flag or `TX_CONFIG_DIR` when scripting automated workflows.
 
 ## Logging
 
