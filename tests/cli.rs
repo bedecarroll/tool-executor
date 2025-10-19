@@ -1,181 +1,120 @@
 use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
-use predicates::prelude::*;
+use predicates::str::contains;
+use toml;
 
-#[test]
-fn prints_help_when_no_command_is_given() -> color_eyre::Result<()> {
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Usage"));
+fn base_command(temp: &TempDir) -> Command {
+    let mut cmd = Command::cargo_bin("tx").expect("binary exists");
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all().unwrap();
+    cmd.env("TX_CONFIG_DIR", config_dir.path());
 
-    Ok(())
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all().unwrap();
+    cmd.env("XDG_DATA_HOME", data_dir.path());
+
+    let cache_dir = temp.child("cache-root");
+    cache_dir.create_dir_all().unwrap();
+    cmd.env("XDG_CACHE_HOME", cache_dir.path());
+    cmd
 }
 
 #[test]
-fn greet_command_prints_custom_name() -> color_eyre::Result<()> {
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.args(["greet", "--name", "Agent"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Agent"));
-
-    Ok(())
-}
-
-#[test]
-fn greet_command_uses_config_default_when_name_missing() -> color_eyre::Result<()> {
+fn sessions_reports_empty_when_no_data() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
-    let xdg_config = temp.child("config");
-    xdg_config.create_dir_all()?;
-
-    let project_dir = xdg_config.child("tx");
-    project_dir.create_dir_all()?;
-    project_dir.child("config.toml").write_str(
-        r#"
-[greet]
-default_name = "Config User"
-"#,
-    )?;
-
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.env("XDG_CONFIG_HOME", xdg_config.path())
-        .arg("greet")
+    let mut cmd = base_command(&temp);
+    cmd.arg("sessions")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Config User"));
-
+        .stdout(contains("No sessions found."));
     temp.close()?;
     Ok(())
 }
 
 #[test]
-fn completions_command_writes_script() -> color_eyre::Result<()> {
+fn search_reports_empty_when_no_matches() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
-    let output_dir = temp.child("completions");
-    output_dir.create_dir_all()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["search", "missing"])
+        .assert()
+        .success()
+        .stdout(contains("No matches found."));
+    temp.close()?;
+    Ok(())
+}
 
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.args([
-        "completions",
-        "bash",
-        "--dir",
-        output_dir.path().to_str().unwrap(),
-    ])
-    .assert()
-    .success();
-
-    output_dir.assert(predicate::path::exists());
-    let entries = std::fs::read_dir(output_dir.path())?
-        .filter_map(std::result::Result::ok)
-        .count();
-    assert!(
-        entries > 0,
-        "expected at least one completion file to be generated"
+#[test]
+fn launch_dry_run_prints_pipeline() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let sessions_dir = temp.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_contents = format!(
+        "[providers.echo]\nbin = \"echo\"\nflags = []\nenv = []\nsession_roots = [\"{}\"]\n",
+        sessions_dir.path().display()
     );
+    let config_path = config_dir.child("config.toml");
+    std::fs::write(config_path.path(), config_contents)?;
+    let written = std::fs::read_to_string(config_path.path())?;
+    toml::from_str::<toml::Value>(&written).expect("valid launch config");
 
-    temp.close()?;
-    Ok(())
-}
-
-#[test]
-fn manpage_command_writes_file() -> color_eyre::Result<()> {
-    let temp = TempDir::new()?;
-    let output_dir = temp.child("man");
-    output_dir.create_dir_all()?;
-
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.args(["manpage", "--dir", output_dir.path().to_str().unwrap()])
+    let mut cmd = base_command(&temp);
+    cmd.arg("launch")
+        .arg("echo")
+        .arg("--dry-run")
         .assert()
-        .success();
-
-    let man_file = output_dir.child("tx.1");
-    man_file.assert(predicate::path::exists());
-    man_file.assert(predicate::str::contains(".TH"));
+        .success()
+        .stdout(contains("echo"));
 
     temp.close()?;
     Ok(())
 }
 
 #[test]
-fn conf_d_overrides_base_config_in_lexical_order() -> color_eyre::Result<()> {
+fn config_dump_outputs_merged_toml() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
-    let xdg_config = temp.child("config");
-    xdg_config.create_dir_all()?;
-    let project_dir = xdg_config.child("tx");
-    project_dir.create_dir_all()?;
-
-    project_dir.child("config.toml").write_str(
-        r#"
-[greet]
-default_name = "Base"
-"#,
-    )?;
-
-    let conf_d = project_dir.child("conf.d");
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_path = config_dir.child("config.toml");
+    std::fs::write(config_path.path(), "[defaults]\nprovider = \"echo\"\n")?;
+    let written = std::fs::read_to_string(config_path.path())?;
+    toml::from_str::<toml::Value>(&written).expect("valid defaults config");
+    let conf_d = config_dir.child("conf.d");
     conf_d.create_dir_all()?;
-    conf_d.child("10-early.toml").write_str(
-        r#"
-[greet]
-default_name = "Early"
-"#,
-    )?;
-    conf_d.child("20-final.toml").write_str(
-        r#"
-[greet]
-default_name = "Final"
-"#,
+    std::fs::write(
+        conf_d.child("00-extra.toml").path(),
+        "[defaults]\nactionable_only = false\n",
     )?;
 
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.env("XDG_CONFIG_HOME", xdg_config.path())
-        .arg("greet")
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("config")
+        .arg("dump")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Final"));
+        .stdout(contains("[defaults]"));
 
     temp.close()?;
     Ok(())
 }
 
 #[test]
-fn config_dir_flag_overrides_default_location() -> color_eyre::Result<()> {
+fn config_lint_reports_errors_for_bad_config() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
-    let custom_dir = temp.child("custom");
-    custom_dir.create_dir_all()?;
-    custom_dir.child("config.toml").write_str(
-        r#"
-[greet]
-default_name = "Flag User"
-"#,
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    std::fs::write(
+        config_dir.child("config.toml").path(),
+        "[providers.bad]\nflags = []\n",
     )?;
 
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.args(["--config-dir", custom_dir.path().to_str().unwrap(), "greet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Flag User"));
-
-    temp.close()?;
-    Ok(())
-}
-
-#[test]
-fn fails_when_config_contains_invalid_toml() -> color_eyre::Result<()> {
-    let temp = TempDir::new()?;
-    let xdg_config = temp.child("config");
-    xdg_config.create_dir_all()?;
-    let project_dir = xdg_config.child("tx");
-    project_dir.create_dir_all()?;
-    project_dir.child("config.toml").write_str("invalid = [")?;
-
-    let mut cmd = Command::cargo_bin("tx")?;
-    cmd.env("XDG_CONFIG_HOME", xdg_config.path())
-        .arg("greet")
+    let mut cmd = base_command(&temp);
+    cmd.args(["config", "lint"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("failed to parse"));
+        .stderr(contains("missing required field 'bin'"));
 
     temp.close()?;
     Ok(())

@@ -1,0 +1,544 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
+use color_eyre::Result;
+use color_eyre::eyre::{WrapErr, eyre};
+use indexmap::IndexMap;
+use serde::Deserialize;
+use shellexpand::full;
+use toml::Value;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub defaults: Defaults,
+    pub providers: IndexMap<String, ProviderConfig>,
+    pub snippets: SnippetConfig,
+    pub wrappers: IndexMap<String, WrapperConfig>,
+    pub profiles: IndexMap<String, ProfileConfig>,
+    pub features: FeatureConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct Defaults {
+    pub provider: Option<String>,
+    pub profile: Option<String>,
+    pub search_mode: SearchMode,
+    pub actionable_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    FirstPrompt,
+    FullText,
+}
+
+impl SearchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchMode::FirstPrompt => "first_prompt",
+            SearchMode::FullText => "full_text",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub name: String,
+    pub bin: String,
+    pub flags: Vec<String>,
+    pub env: Vec<EnvVar>,
+    pub session_roots: Vec<PathBuf>,
+    pub stdin: Option<StdinMapping>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvVar {
+    pub key: String,
+    pub value_template: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StdinMapping {
+    pub provider: String,
+    pub arg: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnippetConfig {
+    pub pre: IndexMap<String, Snippet>,
+    pub post: IndexMap<String, Snippet>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Snippet {
+    pub name: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WrapperConfig {
+    pub name: String,
+    pub mode: WrapperMode,
+}
+
+#[derive(Debug, Clone)]
+pub enum WrapperMode {
+    Shell { command: String },
+    Exec { argv: Vec<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileConfig {
+    pub name: String,
+    pub provider: String,
+    pub pre: Vec<String>,
+    pub post: Vec<String>,
+    pub wrap: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeatureConfig {
+    pub prompt_assembler: Option<PromptAssemblerConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptAssemblerConfig {
+    pub strategy: PromptAssemblerStrategy,
+    pub namespace: String,
+    pub cache_ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblerStrategy {
+    ExecOnly,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigDiagnostic {
+    pub level: DiagnosticLevel,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    Warning,
+    Error,
+}
+
+impl Config {
+    pub fn from_value(value: &Value) -> Result<Self> {
+        let raw: RawConfig = value
+            .clone()
+            .try_into()
+            .map_err(|err: toml::de::Error| eyre!("failed to decode configuration: {err}"))?;
+        raw.into_config()
+    }
+
+    pub fn lint(&self) -> Vec<ConfigDiagnostic> {
+        let mut diags = Vec::new();
+        if let Some(default_provider) = &self.defaults.provider {
+            if !self.providers.contains_key(default_provider) {
+                diags.push(ConfigDiagnostic {
+                    level: DiagnosticLevel::Error,
+                    message: format!(
+                        "default provider '{default_provider}' is not defined in [providers]"
+                    ),
+                });
+            }
+        }
+
+        if let Some(default_profile) = &self.defaults.profile {
+            if !self.profiles.contains_key(default_profile) {
+                diags.push(ConfigDiagnostic {
+                    level: DiagnosticLevel::Error,
+                    message: format!(
+                        "default profile '{default_profile}' is not defined in [profiles]"
+                    ),
+                });
+            }
+        }
+
+        for profile in self.profiles.values() {
+            if !self.providers.contains_key(&profile.provider) {
+                diags.push(ConfigDiagnostic {
+                    level: DiagnosticLevel::Error,
+                    message: format!(
+                        "profile '{}' references unknown provider '{}'",
+                        profile.name, profile.provider
+                    ),
+                });
+            }
+
+            for snippet in &profile.pre {
+                if !self.snippets.pre.contains_key(snippet) {
+                    diags.push(ConfigDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        message: format!(
+                            "profile '{}' references unknown pre snippet '{}'",
+                            profile.name, snippet
+                        ),
+                    });
+                }
+            }
+
+            for snippet in &profile.post {
+                if !self.snippets.post.contains_key(snippet) {
+                    diags.push(ConfigDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        message: format!(
+                            "profile '{}' references unknown post snippet '{}'",
+                            profile.name, snippet
+                        ),
+                    });
+                }
+            }
+
+            if let Some(wrapper) = &profile.wrap {
+                if !self.wrappers.contains_key(wrapper) {
+                    diags.push(ConfigDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        message: format!(
+                            "profile '{}' references unknown wrapper '{}'",
+                            profile.name, wrapper
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(pa) = &self.features.prompt_assembler {
+            if !matches!(pa.strategy, PromptAssemblerStrategy::ExecOnly) {
+                diags.push(ConfigDiagnostic {
+                    level: DiagnosticLevel::Error,
+                    message: "unsupported prompt-assembler strategy".to_string(),
+                });
+            }
+        }
+
+        diags
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    defaults: RawDefaults,
+    #[serde(default)]
+    providers: IndexMap<String, RawProvider>,
+    #[serde(default)]
+    snippets: RawSnippets,
+    #[serde(default)]
+    wrappers: IndexMap<String, RawWrapper>,
+    #[serde(default)]
+    profiles: IndexMap<String, RawProfile>,
+    #[serde(default)]
+    features: RawFeatures,
+}
+
+impl RawConfig {
+    fn into_config(self) -> Result<Config> {
+        let defaults = self.defaults.into_defaults()?;
+        let mut providers = IndexMap::new();
+        for (name, provider) in self.providers {
+            providers.insert(name.clone(), provider.into_provider(name)?);
+        }
+
+        let snippets = self.snippets.into_snippets();
+
+        let mut wrappers = IndexMap::new();
+        for (name, wrapper) in self.wrappers {
+            wrappers.insert(name.clone(), wrapper.into_wrapper(name)?);
+        }
+
+        let mut profiles = IndexMap::new();
+        for (name, profile) in self.profiles {
+            profiles.insert(name.clone(), profile.into_profile(name));
+        }
+
+        let features = self.features.into_features()?;
+
+        Ok(Config {
+            defaults,
+            providers,
+            snippets,
+            wrappers,
+            profiles,
+            features,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawDefaults {
+    provider: Option<String>,
+    profile: Option<String>,
+    #[serde(default = "RawDefaults::default_search_mode")]
+    search_mode: String,
+    #[serde(default = "RawDefaults::default_actionable")]
+    actionable_only: bool,
+}
+
+impl RawDefaults {
+    fn default_search_mode() -> String {
+        "first_prompt".to_string()
+    }
+
+    fn default_actionable() -> bool {
+        true
+    }
+
+    fn into_defaults(self) -> Result<Defaults> {
+        let mode_key = self.search_mode.trim();
+        let search_mode = match mode_key {
+            "" => SearchMode::FirstPrompt,
+            "first_prompt" => SearchMode::FirstPrompt,
+            "full_text" => SearchMode::FullText,
+            other => {
+                return Err(eyre!("unknown search_mode '{other}'"));
+            }
+        };
+
+        Ok(Defaults {
+            provider: self.provider,
+            profile: self.profile,
+            search_mode,
+            actionable_only: self.actionable_only,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProvider {
+    bin: Option<String>,
+    #[serde(default)]
+    flags: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default)]
+    session_roots: Vec<String>,
+    #[serde(default)]
+    stdin_to: Option<String>,
+}
+
+impl RawProvider {
+    fn into_provider(self, name: String) -> Result<ProviderConfig> {
+        let bin = self
+            .bin
+            .ok_or_else(|| eyre!("provider '{name}' is missing required field 'bin'"))?;
+        let session_roots = self
+            .session_roots
+            .into_iter()
+            .map(|entry| {
+                expand_path(&entry).wrap_err_with(|| {
+                    format!("while expanding session_roots for provider '{name}'")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let stdin = match self.stdin_to {
+            Some(raw) => Some(parse_stdin(&raw, &name)?),
+            None => None,
+        };
+
+        Ok(ProviderConfig {
+            name,
+            bin,
+            flags: self.flags,
+            env: self
+                .env
+                .into_iter()
+                .map(parse_env_var)
+                .collect::<Result<Vec<_>>>()?,
+            session_roots,
+            stdin,
+        })
+    }
+}
+
+fn parse_env_var(raw: String) -> Result<EnvVar> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| eyre!("environment entry '{raw}' must be in KEY=VALUE form"))?;
+    if key.trim().is_empty() {
+        return Err(eyre!("environment entry '{raw}' is missing a key"));
+    }
+    Ok(EnvVar {
+        key: key.trim().to_string(),
+        value_template: value.trim().to_string(),
+    })
+}
+
+fn parse_stdin(raw: &str, provider: &str) -> Result<StdinMapping> {
+    if let Some((prefix, rest)) = raw.split_once(':') {
+        if !prefix.trim().is_empty() && prefix.trim() != provider {
+            return Err(eyre!(
+                "stdin_to refers to provider '{prefix}' but is declared under provider '{provider}'"
+            ));
+        }
+        Ok(StdinMapping {
+            provider: provider.to_string(),
+            arg: rest.trim().to_string(),
+        })
+    } else {
+        Ok(StdinMapping {
+            provider: provider.to_string(),
+            arg: raw.trim().to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawSnippets {
+    #[serde(default)]
+    pre: IndexMap<String, String>,
+    #[serde(default)]
+    post: IndexMap<String, String>,
+}
+
+impl RawSnippets {
+    fn into_snippets(self) -> SnippetConfig {
+        let pre = self
+            .pre
+            .into_iter()
+            .map(|(name, command)| (name.clone(), Snippet { name, command }))
+            .collect();
+
+        let post = self
+            .post
+            .into_iter()
+            .map(|(name, command)| (name.clone(), Snippet { name, command }))
+            .collect();
+
+        SnippetConfig { pre, post }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWrapper {
+    #[serde(default)]
+    shell: Option<bool>,
+    cmd: Value,
+}
+
+impl RawWrapper {
+    fn into_wrapper(self, name: String) -> Result<WrapperConfig> {
+        let shell = self.shell.unwrap_or(false);
+        let mode = if shell {
+            let command = self
+                .cmd
+                .as_str()
+                .ok_or_else(|| eyre!("wrapper '{name}' sets shell=true but cmd is not a string"))?
+                .to_string();
+            WrapperMode::Shell { command }
+        } else {
+            let array = self
+                .cmd
+                .as_array()
+                .ok_or_else(|| {
+                    eyre!("wrapper '{name}' expects cmd to be an array when shell=false")
+                })?
+                .iter()
+                .map(|value| {
+                    value.as_str().map(ToString::to_string).ok_or_else(|| {
+                        eyre!("wrapper '{name}' cmd array must contain only strings")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            WrapperMode::Exec { argv: array }
+        };
+
+        Ok(WrapperConfig { name, mode })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProfile {
+    provider: String,
+    #[serde(default)]
+    pre: Vec<String>,
+    #[serde(default)]
+    post: Vec<String>,
+    #[serde(default)]
+    wrap: Option<String>,
+}
+
+impl RawProfile {
+    fn into_profile(self, name: String) -> ProfileConfig {
+        ProfileConfig {
+            name,
+            provider: self.provider,
+            pre: self.pre,
+            post: self.post,
+            wrap: self.wrap,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawFeatures {
+    #[serde(default)]
+    pa: Option<RawPromptAssembler>,
+}
+
+impl RawFeatures {
+    fn into_features(self) -> Result<FeatureConfig> {
+        let prompt_assembler = match self.pa {
+            Some(raw) if raw.enabled.unwrap_or(false) => Some(raw.into_config()?),
+            _ => None,
+        };
+
+        Ok(FeatureConfig { prompt_assembler })
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawPromptAssembler {
+    enabled: Option<bool>,
+    #[serde(default = "RawPromptAssembler::default_strategy")]
+    strategy: String,
+    #[serde(default = "RawPromptAssembler::default_namespace")]
+    namespace: String,
+    #[serde(default = "RawPromptAssembler::default_cache_ttl")]
+    cache_ttl_ms: u64,
+}
+
+impl RawPromptAssembler {
+    fn default_strategy() -> String {
+        "exec_only".to_string()
+    }
+
+    fn default_namespace() -> String {
+        "pa".to_string()
+    }
+
+    fn default_cache_ttl() -> u64 {
+        5_000
+    }
+
+    fn into_config(self) -> Result<PromptAssemblerConfig> {
+        let strategy = match self.strategy.as_str() {
+            "exec_only" => PromptAssemblerStrategy::ExecOnly,
+            other => {
+                return Err(eyre!("unsupported prompt assembler strategy '{other}'"));
+            }
+        };
+
+        let ttl = Duration::from_millis(self.cache_ttl_ms);
+
+        Ok(PromptAssemblerConfig {
+            strategy,
+            namespace: self.namespace,
+            cache_ttl: ttl,
+        })
+    }
+}
+
+fn expand_path(raw: &str) -> Result<PathBuf> {
+    let expanded = full(raw).with_context(|| {
+        format!(
+            "failed to expand path '{}': environment variable missing",
+            raw
+        )
+    })?;
+    Ok(PathBuf::from(expanded.into_owned()))
+}
