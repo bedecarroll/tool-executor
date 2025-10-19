@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 const CONFIG_FILE: &str = "config.toml";
 const CONF_D_DIR: &str = "conf.d";
-const APP_CONFIG_DIR: &str = "llml";
-const ENV_CONFIG_DIR: &str = "LLML_CONFIG_DIR";
+const APP_CONFIG_DIR: &str = "tx";
+const ENV_CONFIG_DIR: &str = "TX_CONFIG_DIR";
 
 #[derive(Debug, Clone, Default)]
 pub struct Config {

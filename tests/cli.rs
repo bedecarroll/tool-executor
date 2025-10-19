@@ -5,7 +5,7 @@ use predicates::prelude::*;
 
 #[test]
 fn prints_help_when_no_command_is_given() -> color_eyre::Result<()> {
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("Usage"));
@@ -15,7 +15,7 @@ fn prints_help_when_no_command_is_given() -> color_eyre::Result<()> {
 
 #[test]
 fn greet_command_prints_custom_name() -> color_eyre::Result<()> {
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.args(["greet", "--name", "Agent"])
         .assert()
         .success()
@@ -30,7 +30,7 @@ fn greet_command_uses_config_default_when_name_missing() -> color_eyre::Result<(
     let xdg_config = temp.child("config");
     xdg_config.create_dir_all()?;
 
-    let project_dir = xdg_config.child("llml");
+    let project_dir = xdg_config.child("tx");
     project_dir.create_dir_all()?;
     project_dir.child("config.toml").write_str(
         r#"
@@ -39,7 +39,7 @@ default_name = "Config User"
 "#,
     )?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.env("XDG_CONFIG_HOME", xdg_config.path())
         .arg("greet")
         .assert()
@@ -56,7 +56,7 @@ fn completions_command_writes_script() -> color_eyre::Result<()> {
     let output_dir = temp.child("completions");
     output_dir.create_dir_all()?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.args([
         "completions",
         "bash",
@@ -85,12 +85,12 @@ fn manpage_command_writes_file() -> color_eyre::Result<()> {
     let output_dir = temp.child("man");
     output_dir.create_dir_all()?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.args(["manpage", "--dir", output_dir.path().to_str().unwrap()])
         .assert()
         .success();
 
-    let man_file = output_dir.child("llml.1");
+    let man_file = output_dir.child("tx.1");
     man_file.assert(predicate::path::exists());
     man_file.assert(predicate::str::contains(".TH"));
 
@@ -103,7 +103,7 @@ fn conf_d_overrides_base_config_in_lexical_order() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let xdg_config = temp.child("config");
     xdg_config.create_dir_all()?;
-    let project_dir = xdg_config.child("llml");
+    let project_dir = xdg_config.child("tx");
     project_dir.create_dir_all()?;
 
     project_dir.child("config.toml").write_str(
@@ -128,7 +128,7 @@ default_name = "Final"
 "#,
     )?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.env("XDG_CONFIG_HOME", xdg_config.path())
         .arg("greet")
         .assert()
@@ -151,7 +151,7 @@ default_name = "Flag User"
 "#,
     )?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.args(["--config-dir", custom_dir.path().to_str().unwrap(), "greet"])
         .assert()
         .success()
@@ -166,11 +166,11 @@ fn fails_when_config_contains_invalid_toml() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let xdg_config = temp.child("config");
     xdg_config.create_dir_all()?;
-    let project_dir = xdg_config.child("llml");
+    let project_dir = xdg_config.child("tx");
     project_dir.create_dir_all()?;
     project_dir.child("config.toml").write_str("invalid = [")?;
 
-    let mut cmd = Command::cargo_bin("llml")?;
+    let mut cmd = Command::cargo_bin("tx")?;
     cmd.env("XDG_CONFIG_HOME", xdg_config.path())
         .arg("greet")
         .assert()

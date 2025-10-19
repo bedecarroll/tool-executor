@@ -1,7 +1,7 @@
 min_version = "2025.9.10"
 
 [tools]
-rust = "1.90.0"
+rust = { version = "1.90.0", components = "rustfmt,clippy,llvm-tools-preview" }
 "cargo:cargo-binstall" = "latest"
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
@@ -56,16 +56,16 @@ run = ["cargo install --path . --force"]
 [tasks.generate-completions]
 description = "Generate shell completions into docs/completions"
 run = [
-  "cargo run --bin llml -- completions bash --dir docs/completions",
-  "cargo run --bin llml -- completions zsh --dir docs/completions",
-  "cargo run --bin llml -- completions fish --dir docs/completions",
-  "cargo run --bin llml -- completions powershell --dir docs/completions",
-  "cargo run --bin llml -- completions elvish --dir docs/completions",
+  "cargo run --bin tx -- completions bash --dir docs/completions",
+  "cargo run --bin tx -- completions zsh --dir docs/completions",
+  "cargo run --bin tx -- completions fish --dir docs/completions",
+  "cargo run --bin tx -- completions powershell --dir docs/completions",
+  "cargo run --bin tx -- completions elvish --dir docs/completions",
 ]
 
 [tasks.generate-manpage]
 description = "Render the CLI man page into docs/man"
-run = ["cargo run --bin llml -- manpage --dir docs/man"]
+run = ["cargo run --bin tx -- manpage --dir docs/man"]
 
 [tasks.doc]
 description = "Build API docs and open them in a browser"

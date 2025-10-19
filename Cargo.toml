@@ -1,24 +1,24 @@
 [package]
-name = "llml"
+name = "tool-executor"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Bede Carroll <bedecarroll@users.noreply.github.com>"]
-description = "The LLM launching tool"
-homepage = "https://github.com/bedecarroll/llml"
-repository = "https://github.com/bedecarroll/llml"
+description = "A thin, configurable launcher for AI code-assistant sessions"
+homepage = "https://github.com/bedecarroll/tool-executor"
+repository = "https://github.com/bedecarroll/tool-executor"
 license = "MIT"
 readme = "README.md"
 keywords = ["cli"]
 categories = ["command-line-utilities"]
-default-run = "llml"
+default-run = "tx"
 
 [features]
 default = []
 self-update = ["dep:self_update"]
 
 [[bin]]
-name = "llml"
+name = "tx"
 path = "src/main.rs"
 
 [lints.clippy]
@@ -42,6 +42,26 @@ assert_cmd = "2.0"
 assert_fs = "1.1"
 predicates = "3.1"
 insta = { version = "1.39", features = ["glob"] }
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.29.0"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+install-path = ["CARGO_HOME"]
+install-updater = false
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [package.metadata.dist]
 unix-archive = ".tar.gz"
