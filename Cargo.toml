@@ -32,7 +32,7 @@ clap_mangen = "0.2"
 color-eyre = "0.6"
 directories = "5.0"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 self_update = { version = "0.39", optional = true, default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }
