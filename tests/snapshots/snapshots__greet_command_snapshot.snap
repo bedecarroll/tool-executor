@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+assertion_line: 9
+expression: stdout
+---
+Hello, snapshot!

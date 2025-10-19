@@ -1,0 +1,48 @@
+[package]
+name = "llml"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Bede Carroll <bedecarroll@users.noreply.github.com>"]
+description = "The LLM launching tool"
+homepage = "https://github.com/bedecarroll/llml"
+repository = "https://github.com/bedecarroll/llml"
+license = "MIT"
+readme = "README.md"
+keywords = ["cli"]
+categories = ["command-line-utilities"]
+default-run = "llml"
+
+[features]
+default = []
+self-update = ["dep:self_update"]
+
+[[bin]]
+name = "llml"
+path = "src/main.rs"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[dependencies]
+clap = { version = "4.5.4", features = ["derive"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
+color-eyre = "0.6"
+directories = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+self_update = { version = "0.39", optional = true, default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+assert_fs = "1.1"
+predicates = "3.1"
+insta = { version = "1.39", features = ["glob"] }
+
+[package.metadata.dist]
+unix-archive = ".tar.gz"
+windows-archive = ".zip"

@@ -1,0 +1,93 @@
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          version: v2024.11.1
+          install: true
+
+      - name: Trust workspace
+        run: mise trust
+
+      - name: Install toolchain
+        run: mise install
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Format
+        run: mise run fmt
+
+      - name: Lint
+        run: mise run lint
+
+      - name: Tests (nextest)
+        run: mise run test
+
+      - name: Doctests
+        run: mise run test-doc
+
+  coverage:
+    name: Coverage (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          version: v2024.11.1
+          install: true
+
+      - name: Trust workspace
+        run: mise trust
+
+      - name: Install toolchain
+        run: mise install
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Coverage
+        run: mise run coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/html
+          if-no-files-found: error
+
