@@ -2,11 +2,12 @@ min_version = "2025.9.10"
 
 [tools]
 rust = "1.90.0"
-"ubi:nextest-rs/nextest" = { version = "latest", exe = "cargo-nextest" }
-"ubi:taiki-e/cargo-llvm-cov" = "latest"
-"ubi:crate-ci/typos" = "latest"
-"ubi:mitsuhiko/insta" = { version = "latest", exe = "cargo-insta" }
-"ubi:EmbarkStudios/cargo-deny" = "latest"
+"cargo:cargo-binstall" = "latest"
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
+"cargo:typos-cli" = "latest"
+"cargo:cargo-insta" = "latest"
+"cargo:cargo-deny" = "latest"
 node = "lts"
 "npm:markdownlint-cli2" = "latest"
 
