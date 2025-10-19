@@ -27,8 +27,6 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
-        env:
-          MISE_JOBS: 1
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
@@ -58,8 +56,6 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
-        env:
-          MISE_JOBS: 1
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
