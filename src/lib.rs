@@ -17,7 +17,7 @@ use commands::CommandContext;
 pub use config::Config;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, name = "tx", bin_name = "tx")]
 pub struct Cli {
     /// Override the configuration directory.
     #[arg(long, value_name = "DIR")]
