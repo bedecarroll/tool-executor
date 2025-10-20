@@ -29,6 +29,8 @@ pub struct PipelineRequest<'a> {
 pub struct SessionContext {
     pub id: Option<String>,
     pub label: Option<String>,
+    pub path: Option<String>,
+    pub resume_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,8 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         provider: &provider.name,
         session_id: request.session.id.as_deref(),
         session_label: request.session.label.as_deref(),
+        session_path: request.session.path.as_deref(),
+        session_resume_token: request.session.resume_token.as_deref(),
         cwd: &cwd_str,
         vars: &request.vars,
     };
@@ -216,6 +220,8 @@ struct TemplateContext<'a> {
     provider: &'a str,
     session_id: Option<&'a str>,
     session_label: Option<&'a str>,
+    session_path: Option<&'a str>,
+    session_resume_token: Option<&'a str>,
     cwd: &'a str,
     vars: &'a HashMap<String, String>,
 }
@@ -266,6 +272,8 @@ fn resolve_placeholder(key: &str, ctx: &TemplateContext<'_>, mode: CmdMode) -> R
         "provider" => Ok(ctx.provider.to_string()),
         "session.id" => Ok(ctx.session_id.unwrap_or("").to_string()),
         "session.label" => Ok(ctx.session_label.unwrap_or("").to_string()),
+        "session.path" => Ok(ctx.session_path.unwrap_or("").to_string()),
+        "session.resume_token" => Ok(ctx.session_resume_token.unwrap_or("").to_string()),
         "cwd" => Ok(ctx.cwd.to_string()),
         other if other.starts_with("var:") => {
             let name = &other[4..];

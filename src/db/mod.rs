@@ -10,6 +10,8 @@ use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, Transcript,
 };
 
+const SCHEMA_VERSION: i32 = 3;
+
 pub struct Database {
     conn: Connection,
 }
@@ -45,6 +47,26 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
+        let current: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if current != SCHEMA_VERSION {
+            self.conn.execute_batch(
+                r"
+                DROP TABLE IF EXISTS messages_fts;
+                DROP TABLE IF EXISTS messages;
+                DROP TABLE IF EXISTS sessions;
+                ",
+            )?;
+            self.create_schema()?;
+        }
+
+        Ok(())
+    }
+
+    fn create_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -52,9 +74,11 @@ impl Database {
                 provider TEXT NOT NULL,
                 label TEXT,
                 path TEXT NOT NULL,
+                uuid TEXT,
                 first_prompt TEXT,
                 actionable INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER,
+                started_at INTEGER,
                 last_active INTEGER,
                 size INTEGER NOT NULL DEFAULT 0,
                 mtime INTEGER NOT NULL DEFAULT 0
@@ -65,6 +89,9 @@ impl Database {
                 idx INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                source TEXT,
+                timestamp INTEGER,
+                is_first INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, idx),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -78,8 +105,13 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
             CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
+            CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
+            CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
             ",
         )?;
+
+        let pragma = format!("PRAGMA user_version = {SCHEMA_VERSION}");
+        self.conn.execute(&pragma, [])?;
         Ok(())
     }
 
@@ -92,7 +124,19 @@ impl Database {
         self.conn
             .prepare(
                 r"
-                SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
+                SELECT
+                    id,
+                    provider,
+                    label,
+                    path,
+                    uuid,
+                    first_prompt,
+                    actionable,
+                    created_at,
+                    started_at,
+                    last_active,
+                    size,
+                    mtime
                 FROM sessions
                 WHERE path = ?1
                 ",
@@ -113,15 +157,30 @@ impl Database {
         let s = &ingest.summary;
         tx.execute(
             r"
-            INSERT INTO sessions (id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO sessions (
+                id,
+                provider,
+                label,
+                path,
+                uuid,
+                first_prompt,
+                actionable,
+                created_at,
+                started_at,
+                last_active,
+                size,
+                mtime
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 label = excluded.label,
                 path = excluded.path,
+                uuid = excluded.uuid,
                 first_prompt = excluded.first_prompt,
                 actionable = excluded.actionable,
                 created_at = excluded.created_at,
+                started_at = excluded.started_at,
                 last_active = excluded.last_active,
                 size = excluded.size,
                 mtime = excluded.mtime
@@ -129,11 +188,13 @@ impl Database {
             params![
                 s.id,
                 s.provider,
-                s.label,
+                s.label.as_deref(),
                 s.path.to_string_lossy(),
-                s.first_prompt,
+                s.uuid.as_deref(),
+                s.first_prompt.as_deref(),
                 i64::from(s.actionable),
                 s.created_at,
+                s.started_at,
                 s.last_active,
                 s.size,
                 s.mtime,
@@ -148,7 +209,7 @@ impl Database {
 
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO messages (session_id, idx, role, content) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO messages (session_id, idx, role, content, source, timestamp, is_first) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for message in &ingest.messages {
                 stmt.execute(params![
@@ -156,6 +217,9 @@ impl Database {
                     message.index,
                     message.role,
                     message.content,
+                    message.source.as_deref(),
+                    message.timestamp,
+                    i64::from(message.is_first),
                 ])?;
             }
         }
@@ -186,7 +250,19 @@ impl Database {
     pub fn sessions_for_provider(&self, provider: &str) -> Result<Vec<SessionSummary>> {
         let mut stmt = self.conn.prepare(
             r"
-            SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
+            SELECT
+                id,
+                provider,
+                label,
+                path,
+                uuid,
+                first_prompt,
+                actionable,
+                created_at,
+                started_at,
+                last_active,
+                size,
+                mtime
             FROM sessions
             WHERE provider = ?1
             ",
@@ -288,7 +364,7 @@ impl Database {
         actionable_only: bool,
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
-            "SELECT id, provider, label, first_prompt, last_active FROM sessions WHERE first_prompt LIKE ?",
+            "SELECT id, provider, label, first_prompt, last_active, actionable FROM sessions WHERE first_prompt LIKE ?",
         );
         let mut params: Vec<SqlValue> = vec![SqlValue::from(format!("%{term}%"))];
 
@@ -325,7 +401,7 @@ impl Database {
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
             r"
-            SELECT s.id, s.provider, s.label, snippet(messages_fts, -1, '[', ']', '…', 10), s.last_active
+            SELECT s.id, s.provider, s.label, snippet(messages_fts, -1, '[', ']', '…', 10), s.last_active, s.actionable
             FROM messages_fts
             JOIN sessions s ON s.id = messages_fts.session_id
             WHERE messages_fts MATCH ?
@@ -358,28 +434,30 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error if any SQL query fails during retrieval.
-    pub fn fetch_transcript(&self, id: &str) -> Result<Option<Transcript>> {
-        let mut session_stmt = self.conn.prepare(
-            r"
-            SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
-            FROM sessions
-            WHERE id = ?1
-            ",
-        )?;
-        let summary = session_stmt.query_row([id], map_summary).optional()?;
-        let Some(summary) = summary else {
-            return Ok(None);
+    pub fn fetch_transcript(&self, identifier: &str) -> Result<Option<Transcript>> {
+        let summary = if let Some(summary) = self.session_summary(identifier)? {
+            summary
+        } else {
+            let fallback = self.session_summary_by_uuid(identifier)?;
+            let Some(summary) = fallback else {
+                return Ok(None);
+            };
+            summary
         };
+        let session_id = summary.id.clone();
 
         let mut messages_stmt = self.conn.prepare(
-            "SELECT idx, role, content FROM messages WHERE session_id = ?1 ORDER BY idx",
+            "SELECT idx, role, content, source, timestamp, is_first FROM messages WHERE session_id = ?1 ORDER BY idx",
         )?;
-        let message_rows = messages_stmt.query_map([id], |row| {
+        let message_rows = messages_stmt.query_map([session_id.clone()], |row| {
             Ok(MessageRecord {
-                session_id: summary.id.clone(),
+                session_id: session_id.clone(),
                 index: row.get(0)?,
                 role: row.get(1)?,
                 content: row.get(2)?,
+                source: row.get(3)?,
+                timestamp: row.get(4)?,
+                is_first: row.get::<_, i64>(5)? != 0,
             })
         })?;
         let mut messages = Vec::new();
@@ -393,6 +471,31 @@ impl Database {
         }))
     }
 
+    fn session_summary_by_uuid(&self, uuid: &str) -> Result<Option<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT
+                id,
+                provider,
+                label,
+                path,
+                uuid,
+                first_prompt,
+                actionable,
+                created_at,
+                started_at,
+                last_active,
+                size,
+                mtime
+            FROM sessions
+            WHERE uuid = ?1
+            ",
+        )?;
+        stmt.query_row([uuid], map_summary)
+            .optional()
+            .map_err(|err| eyre!("failed to fetch session summary for uuid {uuid}: {err}"))
+    }
+
     /// Retrieve a session summary by identifier.
     ///
     /// # Errors
@@ -401,7 +504,19 @@ impl Database {
     pub fn session_summary(&self, id: &str) -> Result<Option<SessionSummary>> {
         let mut stmt = self.conn.prepare(
             r"
-            SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
+            SELECT
+                id,
+                provider,
+                label,
+                path,
+                uuid,
+                first_prompt,
+                actionable,
+                created_at,
+                started_at,
+                last_active,
+                size,
+                mtime
             FROM sessions
             WHERE id = ?1
             ",
@@ -427,18 +542,20 @@ impl Database {
 }
 
 fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
-    let path: String = row.get(3)?;
+    let path: String = row.get("path")?;
     Ok(SessionSummary {
-        id: row.get(0)?,
-        provider: row.get(1)?,
-        label: row.get::<_, Option<String>>(2)?,
+        id: row.get("id")?,
+        provider: row.get("provider")?,
+        label: row.get::<_, Option<String>>("label")?,
         path: PathBuf::from(path),
-        first_prompt: row.get(4)?,
-        actionable: row.get::<_, i64>(5)? != 0,
-        created_at: row.get(6)?,
-        last_active: row.get(7)?,
-        size: row.get(8)?,
-        mtime: row.get(9)?,
+        uuid: row.get::<_, Option<String>>("uuid")?,
+        first_prompt: row.get::<_, Option<String>>("first_prompt")?,
+        actionable: row.get::<_, i64>("actionable")? != 0,
+        created_at: row.get::<_, Option<i64>>("created_at")?,
+        started_at: row.get::<_, Option<i64>>("started_at")?,
+        last_active: row.get::<_, Option<i64>>("last_active")?,
+        size: row.get("size")?,
+        mtime: row.get("mtime")?,
     })
 }
 
@@ -460,5 +577,6 @@ fn map_search_hit(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
         label: row.get(2)?,
         snippet: row.get(3)?,
         last_active: row.get(4)?,
+        actionable: row.get::<_, i64>(5)? != 0,
     })
 }

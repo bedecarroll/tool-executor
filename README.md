@@ -77,13 +77,13 @@ mkdir -p ~/.config/tx/conf.d ~/.local/share/tx ~/.cache/tx
 bin = "codex"
 flags = ["--search"]
 env = ["CODEX_TOKEN=${env:CODEX_TOKEN}"]
-session_roots = ["~/.codex/session"]
+# Session logs are discovered automatically from $CODEX_HOME (defaults to ~/.codex).
 
 [providers.claude]
 bin = "claude-code"
 flags = []
 env = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"]
-session_roots = ["~/.claude/sessions"]
+# Session discovery is not yet implemented.
 ```
 
 1. (Optional) Add wrappers and a profile:
@@ -112,15 +112,16 @@ wrap = "tmux_simple"
 tx                     # open UI: recent sessions + profiles (new sessions)
 
 # Search
-tx search <term>       # first user-prompt only
-tx search --full-text <term>
+tx search              # list recent sessions (archived entries stay hidden)
+tx search asset        # first user-prompt only
+tx search asset --full-text --json
 
 # Launch / resume (non-TUI paths also supported)
 tx launch <provider> [--profile NAME] [--pre NAME...] [--post NAME...] [--wrap NAME] [--] [provider-args...]
 tx resume <session-id> [--profile NAME] [--pre ...] [--post ...] [--wrap NAME] [--] [provider-args...]
 
 # Export transcript
-tx export <session-id> --md
+tx export <session-id>
 
 # Config helpers
 tx config list|dump|where|lint
@@ -140,7 +141,6 @@ tx self-update [--version TAG]
 * `Enter` run
 * `Ctrl-F` toggle full-text
 * `p` provider filter
-* `Alt-A` actionable toggle
 * `R` reindex
 * `e` export
 * `?` help
@@ -167,17 +167,17 @@ tx self-update [--version TAG]
 ### Schema overview
 
 ```toml
-[defaults]
 provider = "codex"
 profile  = "kickoff"           # default profile for new sessions
 search_mode = "first_prompt"   # or "full_text"
-actionable_only = true
+# preview_filter = "glow -s dark"  # optional: pipe the preview pane through an external formatter
+# preview_filter = ["glow", "-p"]  # array form also accepted
 
 [providers.<name>]
 bin = "codex"                  # executable name or path
 flags = ["--search"]           # ordered default flags
 env = ["KEY=${env:KEY}"]      # per-provider env vars (expanded)
-session_roots = ["~/.codex/session"]
+# Session logs for Codex are discovered automatically from $CODEX_HOME.
 stdin_to = "codex:--prompt -"  # (optional) map stdin into a provider flag
 
 [snippets.pre]
@@ -243,7 +243,7 @@ cargo install --path . --features self-update
 ## Export
 
 ```bash
-tx export <session-id> --md   # prints Markdown to stdout
+tx export <session-id>   # prints Markdown to stdout
 ```
 
 ---

@@ -9,6 +9,8 @@ use directories::ProjectDirs;
 use itertools::Itertools;
 use toml::Value;
 
+const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../assets/default_config.toml");
+
 mod merge;
 pub mod model;
 
@@ -77,6 +79,7 @@ pub struct ConfigSource {
 pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
     let dirs = resolve_directories(dir_override)?;
     dirs.ensure_all()?;
+    ensure_default_layout(&dirs)?;
 
     let mut sources = gather_sources(&dirs.config_dir)?;
     sources.extend(gather_project_sources()?);
@@ -129,6 +132,50 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
         data_dir,
         cache_dir,
     })
+}
+
+fn ensure_default_layout(dirs: &AppDirectories) -> Result<()> {
+    if dirs.config_dir.is_file() {
+        return Ok(());
+    }
+
+    let conf_d = dirs.config_dir.join(DROPIN_DIR);
+    if !conf_d.exists() {
+        fs::create_dir_all(&conf_d)
+            .with_context(|| format!("failed to create directory {}", conf_d.display()))?;
+    }
+
+    let main = dirs.config_dir.join(MAIN_CONFIG);
+    if main.exists() {
+        return Ok(());
+    }
+
+    let contents = default_config_contents(dirs);
+
+    fs::write(&main, contents).with_context(|| {
+        format!(
+            "failed to write default configuration to {}",
+            main.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn default_config_contents(_dirs: &AppDirectories) -> String {
+    DEFAULT_CONFIG_TEMPLATE.to_string()
+}
+
+/// Return the bundled default configuration template.
+#[must_use]
+pub fn default_template() -> &'static str {
+    DEFAULT_CONFIG_TEMPLATE
+}
+
+/// Render the bundled default configuration using resolved application directories.
+#[must_use]
+pub fn bundled_default_config(dirs: &AppDirectories) -> String {
+    default_config_contents(dirs)
 }
 
 fn gather_sources(root: &Path) -> Result<Vec<ConfigSource>> {

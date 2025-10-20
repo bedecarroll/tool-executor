@@ -1,10 +1,12 @@
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -13,18 +15,33 @@ use crossterm::{ExecutableCommand, execute};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use crate::app::{self, UiContext};
+use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
 use crate::indexer::Indexer;
 use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::PromptStatus;
+use crate::providers;
 use crate::session::{SearchHit, SessionQuery};
+use time::format_description::FormatItem;
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
+use tracing::warn;
+use unicode_width::UnicodeWidthStr;
 
 const SESSION_LIMIT: usize = 200;
+const PREVIEW_MESSAGE_LIMIT: usize = 8;
+const MESSAGE_FILTER_MODE: &str = "Filter mode: type to narrow results, Enter to apply, Esc to stop editing (Esc again from the list to quit).";
+const MESSAGE_PROVIDER_MODE: &str = "Provider filter mode: type a provider name, Enter to apply, Esc to clear (Esc again from the list to quit).";
+const MESSAGE_SEARCH_PROMPT: &str =
+    "Search mode: prompt-only search enabled. Press Ctrl-F for full-text.";
+const MESSAGE_SEARCH_FULL_TEXT: &str =
+    "Search mode: full-text enabled. Press Ctrl-F to return to prompt-only.";
+const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  type to filter  •  / focus filter  •  Ctrl-P provider filter  •  Ctrl-F toggle search mode  •  ? help  •  q/Esc quit";
+const RELATIVE_TIME_WIDTH: usize = 8;
 
 /// Run the TUI event loop until the user selects an action or exits.
 ///
@@ -50,7 +67,14 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     terminal.show_cursor()?;
 
     match result? {
-        Some(Outcome::Emit(plan)) => app::emit_command(&plan, json_mode),
+        Some(Outcome::Emit(plan)) => {
+            let mode = if json_mode {
+                EmitMode::Json
+            } else {
+                EmitMode::Plain { newline: true }
+            };
+            app::emit_command(&plan, mode)
+        }
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
         None => Ok(()),
     }
@@ -89,7 +113,6 @@ struct AppState<'ctx> {
     index: usize,
     filter: String,
     provider_filter: Option<String>,
-    actionable_only: bool,
     full_text: bool,
     input_mode: InputMode,
     message: Option<String>,
@@ -102,6 +125,7 @@ struct AppState<'ctx> {
 enum Entry {
     Session(SessionEntry),
     Profile(ProfileEntry),
+    Empty(EmptyEntry),
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +138,15 @@ struct SessionEntry {
     last_active: Option<i64>,
     snippet: Option<String>,
 }
+
+static TIMESTAMP_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+static LOCAL_TIMESTAMP_FORMAT: &[FormatItem<'static>] = format_description!(
+    "[year]-[month]-[day] [hour]:[minute] [offset_hour sign:mandatory]:[offset_minute]"
+);
+static MONTH_DAY_FORMAT: &[FormatItem<'static>] =
+    format_description!("[month repr:short] [day padding:none]");
+static FULL_DATE_FORMAT: &[FormatItem<'static>] = format_description!("[year]-[month]-[day]");
 
 #[derive(Debug, Clone)]
 struct ProfileEntry {
@@ -128,9 +161,17 @@ struct ProfileEntry {
 }
 
 #[derive(Debug, Clone)]
+struct EmptyEntry {
+    title: String,
+    preview: Vec<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 enum ProfileKind {
     Config { name: String },
     Virtual,
+    Provider,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +185,9 @@ enum InputMode {
 #[derive(Debug, Clone)]
 struct Preview {
     lines: Vec<String>,
+    styled: Option<Text<'static>>,
+    title: Option<String>,
+    timestamp: Option<String>,
     updated_at: Instant,
 }
 
@@ -165,8 +209,8 @@ impl SessionEntry {
             id: hit.session_id,
             provider: hit.provider,
             label: hit.label,
-            first_prompt: None,
-            actionable: true,
+            first_prompt: hit.snippet.clone(),
+            actionable: hit.actionable,
             last_active: hit.last_active,
             snippet: hit.snippet,
         }
@@ -174,20 +218,200 @@ impl SessionEntry {
 
     fn matches(&self, needle: &str) -> bool {
         let needle = needle.to_ascii_lowercase();
-        self.id.to_ascii_lowercase().contains(&needle)
-            || self
-                .label
-                .as_ref()
-                .is_some_and(|label| label.to_ascii_lowercase().contains(&needle))
-            || self
-                .first_prompt
-                .as_ref()
-                .is_some_and(|prompt| prompt.to_ascii_lowercase().contains(&needle))
-            || self
-                .snippet
-                .as_ref()
-                .is_some_and(|snippet| snippet.to_ascii_lowercase().contains(&needle))
+        if self.id.to_ascii_lowercase().contains(&needle) {
+            return true;
+        }
+        if self.provider.to_ascii_lowercase().contains(&needle) {
+            return true;
+        }
+        if self
+            .label
+            .as_ref()
+            .is_some_and(|label| label.to_ascii_lowercase().contains(&needle))
+        {
+            return true;
+        }
+        if self
+            .first_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.to_ascii_lowercase().contains(&needle))
+        {
+            return true;
+        }
+        if self
+            .snippet
+            .as_ref()
+            .is_some_and(|snippet| snippet.to_ascii_lowercase().contains(&needle))
+        {
+            return true;
+        }
+        if self.display_label().to_ascii_lowercase().contains(&needle) {
+            return true;
+        }
+        self.short_session_tag()
+            .to_ascii_lowercase()
+            .contains(&needle)
     }
+
+    fn display_label(&self) -> String {
+        if let Some(label) = self.label.as_deref() {
+            return format_rollout_label(label).unwrap_or_else(|| label.to_string());
+        }
+        if let Some(last) = self.id.rsplit('/').next() {
+            return format_rollout_label(last).unwrap_or_else(|| last.to_string());
+        }
+        self.id.clone()
+    }
+
+    fn snippet_line(&self) -> Option<String> {
+        self.snippet
+            .as_deref()
+            .and_then(meaningful_excerpt)
+            .or_else(|| self.first_prompt.as_deref().and_then(meaningful_excerpt))
+    }
+
+    fn short_session_tag(&self) -> String {
+        if let Some(last) = self.id.rsplit('/').next() {
+            if let Some(tag) = rollout_suffix(last) {
+                return format!("#{}", truncate_len(&tag, 12));
+            }
+            return format!("#{}", truncate_len(last, 12));
+        }
+        format!("#{}", truncate_len(&self.id, 12))
+    }
+}
+
+fn truncate_len(input: &str, max: usize) -> String {
+    if input.chars().count() <= max {
+        input.to_string()
+    } else {
+        input.chars().take(max).collect()
+    }
+}
+
+fn normalize_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pad_relative_time(value: &str) -> String {
+    let width = UnicodeWidthStr::width(value);
+    if width >= RELATIVE_TIME_WIDTH {
+        value.to_string()
+    } else {
+        let mut out = String::with_capacity(value.len() + (RELATIVE_TIME_WIDTH - width));
+        out.push_str(value);
+        out.push_str(&" ".repeat(RELATIVE_TIME_WIDTH - width));
+        out
+    }
+}
+
+fn format_rollout_label(label: &str) -> Option<String> {
+    let rest = label.strip_prefix("rollout-")?;
+    let (date, time_uuid) = rest.split_once('T')?;
+    let mut segments = time_uuid.splitn(4, '-');
+    let hour = segments.next()?;
+    let minute = segments.next()?;
+    let second = segments.next()?;
+    let remainder = segments.next().unwrap_or_default();
+    let suffix = rollout_suffix(remainder).unwrap_or_else(|| remainder.to_string());
+    Some(format!("{date} {hour}:{minute}:{second} • {suffix}"))
+}
+
+fn rollout_suffix(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches('-');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .chars()
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase(),
+    )
+}
+
+fn meaningful_excerpt(text: &str) -> Option<String> {
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('<') {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(trimmed);
+        if out.chars().count() >= 240 {
+            break;
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn format_relative_time(ts: Option<i64>, now: OffsetDateTime) -> Option<String> {
+    let ts = ts?;
+    let dt = OffsetDateTime::from_unix_timestamp(ts).ok()?;
+    let seconds_diff = now.unix_timestamp() - dt.unix_timestamp();
+    let future = seconds_diff < 0;
+    let seconds = seconds_diff.unsigned_abs();
+
+    if seconds < 60 {
+        return Some(if future {
+            "in <1m".to_string()
+        } else {
+            "just now".to_string()
+        });
+    }
+
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        let value = minutes;
+        return Some(if future {
+            format!("in {value}m")
+        } else {
+            format!("{value}m ago")
+        });
+    }
+
+    let hours = minutes / 60;
+    if hours < 24 {
+        let value = hours;
+        return Some(if future {
+            format!("in {value}h")
+        } else {
+            format!("{value}h ago")
+        });
+    }
+
+    let formatted = if now.date().year() == dt.date().year() {
+        dt.format(MONTH_DAY_FORMAT).ok()?
+    } else {
+        dt.format(FULL_DATE_FORMAT).ok()?
+    };
+
+    Some(if future {
+        format!("on {formatted}")
+    } else {
+        formatted
+    })
+}
+
+fn format_dual_time(ts: Option<i64>) -> Option<String> {
+    let ts = ts?;
+    let dt = OffsetDateTime::from_unix_timestamp(ts).ok()?;
+    let utc = dt.format(TIMESTAMP_FORMAT).ok()?;
+    let local = UtcOffset::current_local_offset()
+        .ok()
+        .and_then(|offset| {
+            let local_dt = dt.to_offset(offset);
+            local_dt
+                .format(LOCAL_TIMESTAMP_FORMAT)
+                .ok()
+                .map(|value| format!("{value} local"))
+        })
+        .unwrap_or_else(|| "local time unavailable".to_string());
+    Some(format!("Last active: {utc} | {local}"))
 }
 
 impl ProfileEntry {
@@ -203,6 +427,50 @@ impl ProfileEntry {
     }
 }
 
+impl EmptyEntry {
+    fn for_state(ctx: &UiContext<'_>) -> Self {
+        if ctx.config.providers.is_empty() {
+            let conf_d = ctx.directories.config_dir.join("conf.d");
+            let preview = vec![
+                "tx needs at least one provider before sessions can appear.".to_string(),
+                format!(
+                    "Add a TOML file under {} with a [providers.<name>] entry.",
+                    conf_d.display()
+                ),
+                "See README.md (Quick Start) for a ready-to-copy example.".to_string(),
+            ];
+            let status = Some(format!(
+                "No providers configured yet. Add files under {} to enable new sessions.",
+                conf_d.display()
+            ));
+            Self {
+                title: "New session (configure tx)".to_string(),
+                preview,
+                status,
+            }
+        } else {
+            let providers = ctx
+                .config
+                .providers
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let preview = vec![
+                "No sessions indexed yet.".to_string(),
+                format!("Run `tx launch <provider>` using one of: {providers}"),
+                "The list will populate once session logs are ingested.".to_string(),
+            ];
+            let status = Some("No sessions yet — launch a provider to get started.".to_string());
+            Self {
+                title: "New session".to_string(),
+                preview,
+                status,
+            }
+        }
+    }
+}
+
 impl<'ctx> AppState<'ctx> {
     fn new(ctx: &'ctx mut UiContext<'ctx>) -> Result<Self> {
         let defaults = &ctx.config.defaults;
@@ -214,7 +482,6 @@ impl<'ctx> AppState<'ctx> {
             index: 0,
             filter: String::new(),
             provider_filter: None,
-            actionable_only: defaults.actionable_only,
             full_text: matches!(defaults.search_mode, SearchMode::FullText),
             input_mode: InputMode::Normal,
             message: None,
@@ -227,6 +494,60 @@ impl<'ctx> AppState<'ctx> {
         state.refresh_entries()?;
         state.list_state.select(Some(0));
         Ok(state)
+    }
+
+    fn set_status_message(&mut self, message: &'static str) {
+        self.message = Some(message.to_string());
+    }
+
+    fn clear_status_message(&mut self, message: &'static str) {
+        if self.message.as_deref() == Some(message) {
+            self.message = None;
+        }
+    }
+
+    fn status_texts(&self) -> (String, String, String, String) {
+        let filter = if self.filter.is_empty() {
+            "filter: (off) — type to search".to_string()
+        } else {
+            format!("filter: {}", self.filter)
+        };
+        let provider_filter = match &self.provider_filter {
+            Some(p) => format!("provider: {p}"),
+            None => "provider: (all) — Ctrl-P to set".to_string(),
+        };
+        let search_mode = format!(
+            "mode: {} | archived hidden",
+            if self.full_text {
+                "full-text"
+            } else {
+                "prompt"
+            }
+        );
+        let placeholder_message = self.entries.get(self.index).and_then(|entry| match entry {
+            Entry::Empty(empty) => empty.status.as_deref(),
+            _ => None,
+        });
+        let default_status = DEFAULT_STATUS_HINT.to_string();
+        let mut message = placeholder_message
+            .map(str::to_string)
+            .or_else(|| self.message.clone())
+            .unwrap_or(default_status);
+        if let Some(provider_text) = self.entries.get(self.index).and_then(|entry| match entry {
+            Entry::Session(session) => Some(format!("provider: {}", session.provider)),
+            Entry::Profile(profile) => Some(format!("provider: {}", profile.provider)),
+            Entry::Empty(_) => None,
+        }) {
+            message.push_str("  |  ");
+            message.push_str(&provider_text);
+        }
+
+        (filter, provider_filter, search_mode, message)
+    }
+
+    fn status_banner(&self) -> String {
+        let (filter, provider_filter, search_mode, message) = self.status_texts();
+        format!("{filter}  |  {provider_filter}  |  {search_mode}  |  {message}")
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -243,17 +564,57 @@ impl<'ctx> AppState<'ctx> {
 
     fn load_profiles(&mut self) {
         self.profiles.clear();
+        let mut seen = HashSet::new();
 
         for (name, profile) in &self.ctx.config.profiles {
+            let profile_name = name.clone();
+            let key = profile_name.to_ascii_lowercase();
+            if !seen.insert(key) {
+                warn!(
+                    entry = %profile_name,
+                    "duplicate profile name '{profile_name}' detected; keeping first definition"
+                );
+                continue;
+            }
             self.profiles.push(ProfileEntry {
-                display: name.clone(),
+                display: profile_name.clone(),
                 provider: profile.provider.clone(),
                 pre: profile.pre.clone(),
                 post: profile.post.clone(),
                 wrap: profile.wrap.clone(),
                 description: None,
                 tags: Vec::new(),
-                kind: ProfileKind::Config { name: name.clone() },
+                kind: ProfileKind::Config { name: profile_name },
+            });
+        }
+
+        for (name, provider) in &self.ctx.config.providers {
+            let provider_name = name.clone();
+            let key = provider_name.to_ascii_lowercase();
+            if !seen.insert(key) {
+                warn!(
+                    entry = %provider_name,
+                    "provider entry '{provider_name}' conflicts with an existing profile; skipping"
+                );
+                continue;
+            }
+            let mut description = format!("Run '{name}' using {}", provider.bin);
+            if provider.flags.is_empty() {
+                description.push('.');
+            } else {
+                description.push_str(" with flags: ");
+                description.push_str(&provider.flags.join(" "));
+                description.push('.');
+            }
+            self.profiles.push(ProfileEntry {
+                display: format!("New {provider_name} session"),
+                provider: provider_name,
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+                description: Some(description),
+                tags: Vec::new(),
+                kind: ProfileKind::Provider,
             });
         }
 
@@ -270,8 +631,17 @@ impl<'ctx> AppState<'ctx> {
                         .or_else(|| self.ctx.config.providers.keys().next().cloned())
                     {
                         for vp in profiles {
+                            let profile_name = vp.key.clone();
+                            let key = profile_name.to_ascii_lowercase();
+                            if !seen.insert(key) {
+                                warn!(
+                                    entry = %profile_name,
+                                    "virtual profile '{profile_name}' conflicts with an existing entry; skipping"
+                                );
+                                continue;
+                            }
                             self.profiles.push(ProfileEntry {
-                                display: vp.key.clone(),
+                                display: profile_name.clone(),
                                 provider: provider.clone(),
                                 pre: vec!["assemble".to_string()],
                                 post: Vec::new(),
@@ -296,23 +666,28 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn refresh_entries(&mut self) -> Result<()> {
-        let mut sessions = if self.full_text && !self.filter.is_empty() {
-            self.search_sessions(&self.filter)?
+        let searching = !self.filter.is_empty();
+        let mut sessions = if searching {
+            if self.full_text {
+                self.search_full_text_sessions(&self.filter)?
+            } else {
+                self.search_prompt_sessions(&self.filter)?
+            }
         } else {
             self.load_sessions()?
         };
 
-        if !self.filter.is_empty() && !self.full_text {
+        if !searching {
+            sessions.retain(|session| session.actionable);
+        }
+
+        if searching && !self.full_text {
             let query = self.filter.to_ascii_lowercase();
             sessions.retain(|session| session.matches(&query));
         }
 
         if let Some(provider) = &self.provider_filter {
             sessions.retain(|session| session.provider == *provider);
-        }
-
-        if self.actionable_only {
-            sessions.retain(|session| session.actionable);
         }
 
         let mut entries: Vec<Entry> = sessions.into_iter().map(Entry::Session).collect();
@@ -330,32 +705,46 @@ impl<'ctx> AppState<'ctx> {
         }
 
         entries.sort_by(|a, b| match (a, b) {
+            (Entry::Profile(a), Entry::Profile(b)) => a.display.cmp(&b.display),
+            (Entry::Profile(_), Entry::Session(_)) => cmp::Ordering::Less,
+            (Entry::Session(_), Entry::Profile(_)) => cmp::Ordering::Greater,
             (Entry::Session(a), Entry::Session(b)) => b
                 .last_active
                 .unwrap_or_default()
                 .cmp(&a.last_active.unwrap_or_default()),
-            (Entry::Session(_), Entry::Profile(_)) => cmp::Ordering::Less,
-            (Entry::Profile(_), Entry::Session(_)) => cmp::Ordering::Greater,
-            (Entry::Profile(a), Entry::Profile(b)) => a.display.cmp(&b.display),
+            _ => cmp::Ordering::Equal,
         });
+
+        let is_filtered = !self.filter.is_empty() || self.provider_filter.is_some();
+
+        if entries.is_empty() {
+            self.preview_cache.clear();
+            if is_filtered {
+                self.entries.clear();
+                self.index = 0;
+                self.list_state.select(None);
+                self.message = Some("no results".to_string());
+            } else {
+                let placeholder = EmptyEntry::for_state(self.ctx);
+                if matches!(self.message.as_deref(), Some("no results")) {
+                    self.message = None;
+                }
+                self.entries = vec![Entry::Empty(placeholder)];
+                self.index = 0;
+                self.list_state.select(Some(0));
+            }
+            return Ok(());
+        }
 
         self.entries = entries;
         self.preview_cache.clear();
 
-        if self.entries.is_empty() {
-            self.index = 0;
-            self.list_state.select(None);
-            if !self.filter.is_empty() || self.provider_filter.is_some() {
-                self.message = Some("no results".to_string());
-            }
-        } else {
-            if self.index >= self.entries.len() {
-                self.index = self.entries.len().saturating_sub(1);
-            }
-            self.list_state.select(Some(self.index));
-            if matches!(self.message.as_deref(), Some("no results")) {
-                self.message = None;
-            }
+        if self.index >= self.entries.len() {
+            self.index = self.entries.len().saturating_sub(1);
+        }
+        self.list_state.select(Some(self.index));
+        if matches!(self.message.as_deref(), Some("no results")) {
+            self.message = None;
         }
 
         Ok(())
@@ -364,19 +753,26 @@ impl<'ctx> AppState<'ctx> {
     fn load_sessions(&self) -> Result<Vec<SessionEntry>> {
         let queries = self.ctx.db.list_sessions(
             self.provider_filter.as_deref(),
-            self.actionable_only,
+            true,
             None,
             Some(SESSION_LIMIT),
         )?;
         Ok(queries.into_iter().map(SessionEntry::from_query).collect())
     }
 
-    fn search_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
-        let hits = self.ctx.db.search_full_text(
-            term,
-            self.provider_filter.as_deref(),
-            self.actionable_only,
-        )?;
+    fn search_full_text_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
+        let hits = self
+            .ctx
+            .db
+            .search_full_text(term, self.provider_filter.as_deref(), false)?;
+        Ok(hits.into_iter().map(SessionEntry::from_hit).collect())
+    }
+
+    fn search_prompt_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
+        let hits = self
+            .ctx
+            .db
+            .search_first_prompt(term, self.provider_filter.as_deref(), false)?;
         Ok(hits.into_iter().map(SessionEntry::from_hit).collect())
     }
 
@@ -401,20 +797,45 @@ impl<'ctx> AppState<'ctx> {
             }
             (KeyCode::Char('/'), _) => {
                 self.input_mode = InputMode::Filter;
+                self.set_status_message(MESSAGE_FILTER_MODE);
                 Ok(false)
             }
-            (KeyCode::Char('p'), _) => {
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                 self.input_mode = InputMode::Provider;
+                self.set_status_message(MESSAGE_PROVIDER_MODE);
+                Ok(false)
+            }
+            (KeyCode::Backspace, mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
+                if !self.filter.is_empty() {
+                    self.filter.pop();
+                    self.refresh_entries()?;
+                    if self.filter.is_empty() {
+                        self.clear_status_message(MESSAGE_FILTER_MODE);
+                    }
+                }
+                Ok(false)
+            }
+            (KeyCode::Char('?'), _) => {
+                self.input_mode = InputMode::Help;
+                Ok(false)
+            }
+            (KeyCode::Char(ch), mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
+                let was_empty = self.filter.is_empty();
+                self.filter.push(ch);
+                self.refresh_entries()?;
+                if was_empty {
+                    self.set_status_message(MESSAGE_FILTER_MODE);
+                }
                 Ok(false)
             }
             (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                 self.full_text = !self.full_text;
                 self.refresh_entries()?;
-                Ok(false)
-            }
-            (KeyCode::Char('a'), KeyModifiers::ALT) => {
-                self.actionable_only = !self.actionable_only;
-                self.refresh_entries()?;
+                if self.full_text {
+                    self.set_status_message(MESSAGE_SEARCH_FULL_TEXT);
+                } else {
+                    self.set_status_message(MESSAGE_SEARCH_PROMPT);
+                }
                 Ok(false)
             }
             (KeyCode::Char('R'), _) => {
@@ -433,10 +854,6 @@ impl<'ctx> AppState<'ctx> {
                 }
                 Ok(false)
             }
-            (KeyCode::Char('?'), _) => {
-                self.input_mode = InputMode::Help;
-                Ok(false)
-            }
             _ => Ok(false),
         }
     }
@@ -445,15 +862,22 @@ impl<'ctx> AppState<'ctx> {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => {
                 self.input_mode = InputMode::Normal;
+                self.clear_status_message(MESSAGE_FILTER_MODE);
                 Ok(false)
             }
             KeyCode::Backspace => {
                 self.filter.pop();
                 self.refresh_entries()?;
+                if self.filter.is_empty() {
+                    self.clear_status_message(MESSAGE_FILTER_MODE);
+                }
                 Ok(false)
             }
             KeyCode::Char(ch) => {
                 if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if self.filter.is_empty() {
+                        self.set_status_message(MESSAGE_FILTER_MODE);
+                    }
                     self.filter.push(ch);
                     self.refresh_entries()?;
                 }
@@ -469,6 +893,7 @@ impl<'ctx> AppState<'ctx> {
                 self.provider_filter = None;
                 self.input_mode = InputMode::Normal;
                 self.refresh_entries()?;
+                self.clear_status_message(MESSAGE_PROVIDER_MODE);
                 Ok(false)
             }
             KeyCode::Enter => {
@@ -479,6 +904,7 @@ impl<'ctx> AppState<'ctx> {
                 }
                 self.input_mode = InputMode::Normal;
                 self.refresh_entries()?;
+                self.clear_status_message(MESSAGE_PROVIDER_MODE);
                 Ok(false)
             }
             KeyCode::Backspace => {
@@ -496,6 +922,7 @@ impl<'ctx> AppState<'ctx> {
                     let filter = self.provider_filter.get_or_insert_with(String::new);
                     filter.push(ch);
                     self.refresh_entries()?;
+                    self.set_status_message(MESSAGE_PROVIDER_MODE);
                 }
                 Ok(false)
             }
@@ -543,6 +970,14 @@ impl<'ctx> AppState<'ctx> {
                     .session_summary(&session.id)?
                     .ok_or_else(|| eyre!("session '{}' not found", session.id))?;
 
+                let resume_plan = providers::resume_info(&summary)?;
+                let mut provider_args = Vec::new();
+                let mut resume_token = None;
+                if let Some(mut plan) = resume_plan {
+                    resume_token = plan.resume_token.take();
+                    provider_args.extend(plan.args);
+                }
+
                 let request = PipelineRequest {
                     config: self.ctx.config,
                     provider_hint: Some(summary.provider.as_str()),
@@ -550,11 +985,13 @@ impl<'ctx> AppState<'ctx> {
                     additional_pre: Vec::new(),
                     additional_post: Vec::new(),
                     wrap: None,
-                    provider_args: Vec::new(),
+                    provider_args,
                     vars: HashMap::new(),
                     session: SessionContext {
                         id: Some(summary.id.clone()),
                         label: summary.label.clone(),
+                        path: Some(summary.path.to_string_lossy().to_string()),
+                        resume_token,
                     },
                     cwd: summary.path.parent().map_or_else(
                         || env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -589,26 +1026,50 @@ impl<'ctx> AppState<'ctx> {
                         session: SessionContext::default(),
                         cwd: env::current_dir()?,
                     },
+                    ProfileKind::Provider => PipelineRequest {
+                        config: self.ctx.config,
+                        provider_hint: Some(profile.provider.as_str()),
+                        profile: None,
+                        additional_pre: Vec::new(),
+                        additional_post: Vec::new(),
+                        wrap: None,
+                        provider_args: Vec::new(),
+                        vars: HashMap::new(),
+                        session: SessionContext::default(),
+                        cwd: env::current_dir()?,
+                    },
                 };
                 Ok(Some(build_pipeline(&request)?))
+            }
+            Entry::Empty(empty) => {
+                if let Some(message) = &empty.status {
+                    self.message = Some(message.clone());
+                }
+                Ok(None)
             }
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn preview(&mut self) -> Preview {
-        let entry = match self.entries.get(self.index) {
-            Some(entry) => entry.clone(),
-            None => {
-                return Preview {
-                    lines: vec!["No selection".to_string()],
-                    updated_at: Instant::now(),
-                };
-            }
+        let entry = if let Some(entry) = self.entries.get(self.index) {
+            entry.clone()
+        } else {
+            let lines = vec!["No selection".to_string()];
+            let styled = lines_to_plain_text(&lines);
+            return Preview {
+                lines,
+                styled,
+                title: Some("Preview".to_string()),
+                timestamp: None,
+                updated_at: Instant::now(),
+            };
         };
 
         let key = match &entry {
             Entry::Session(session) => format!("session:{}", session.id),
             Entry::Profile(profile) => format!("profile:{}", profile.display),
+            Entry::Empty(empty) => format!("empty:{}", empty.title),
         };
 
         if let Some(preview) = self.preview_cache.get(&key)
@@ -619,23 +1080,55 @@ impl<'ctx> AppState<'ctx> {
 
         let preview = match entry {
             Entry::Session(session) => match self.ctx.db.fetch_transcript(&session.id) {
-                Ok(Some(transcript)) => Preview {
-                    lines: transcript
-                        .messages
-                        .iter()
-                        .take(6)
-                        .map(|msg| format!("{}: {}", msg.role, msg.content))
-                        .collect(),
-                    updated_at: Instant::now(),
-                },
-                Ok(None) => Preview {
-                    lines: vec!["No transcript available".to_string()],
-                    updated_at: Instant::now(),
-                },
-                Err(err) => Preview {
-                    lines: vec![format!("preview error: {err}")],
-                    updated_at: Instant::now(),
-                },
+                Ok(Some(transcript)) => {
+                    let mut lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
+                    let styled = if let Some(filtered) = apply_preview_filter(
+                        self.ctx.config.defaults.preview_filter.as_ref(),
+                        &lines,
+                    ) {
+                        let styled = lines_to_ansi_text(&filtered)
+                            .or_else(|| lines_to_plain_text(&filtered));
+                        lines = filtered;
+                        styled
+                    } else {
+                        lines_to_plain_text(&lines)
+                    };
+                    let title = transcript
+                        .session
+                        .uuid
+                        .clone()
+                        .unwrap_or_else(|| session.id.clone());
+
+                    Preview {
+                        lines,
+                        styled,
+                        title: Some(title),
+                        timestamp: format_dual_time(session.last_active),
+                        updated_at: Instant::now(),
+                    }
+                }
+                Ok(None) => {
+                    let lines = vec!["No transcript available".to_string()];
+                    let styled = lines_to_plain_text(&lines);
+                    Preview {
+                        lines,
+                        styled,
+                        title: Some(session.id.clone()),
+                        timestamp: format_dual_time(session.last_active),
+                        updated_at: Instant::now(),
+                    }
+                }
+                Err(err) => {
+                    let lines = vec![format!("preview error: {err}")];
+                    let styled = lines_to_plain_text(&lines);
+                    Preview {
+                        lines,
+                        styled,
+                        title: Some(session.id.clone()),
+                        timestamp: format_dual_time(session.last_active),
+                        updated_at: Instant::now(),
+                    }
+                }
             },
             Entry::Profile(profile) => {
                 let mut lines = Vec::new();
@@ -644,12 +1137,27 @@ impl<'ctx> AppState<'ctx> {
                     lines.push(String::new());
                     lines.push(description.clone());
                 }
-                if !profile.tags.is_empty() {
+                if !profile.tags.is_empty() && !matches!(profile.kind, ProfileKind::Provider) {
                     lines.push(String::new());
                     lines.push(format!("Tags: {}", profile.tags.join(", ")));
                 }
+                let styled = lines_to_plain_text(&lines);
                 Preview {
                     lines,
+                    styled,
+                    title: Some(profile.display.clone()),
+                    timestamp: None,
+                    updated_at: Instant::now(),
+                }
+            }
+            Entry::Empty(empty) => {
+                let lines = empty.preview.clone();
+                let styled = lines_to_plain_text(&lines);
+                Preview {
+                    lines,
+                    styled,
+                    title: Some(empty.title.clone()),
+                    timestamp: None,
                     updated_at: Instant::now(),
                 }
             }
@@ -658,6 +1166,72 @@ impl<'ctx> AppState<'ctx> {
         self.preview_cache.insert(key, preview.clone());
         preview
     }
+}
+
+fn apply_preview_filter(filter: Option<&Vec<String>>, lines: &[String]) -> Option<Vec<String>> {
+    let args = filter?;
+    if args.is_empty() {
+        return None;
+    }
+
+    let input = lines.join("\n");
+    let output = run_preview_filter(args, &input)?;
+    let out = output.lines().map(str::to_string).collect::<Vec<_>>();
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+fn lines_to_plain_text(lines: &[String]) -> Option<Text<'static>> {
+    if lines.is_empty() {
+        return None;
+    }
+    Some(Text::from(lines.join("\n")))
+}
+
+fn lines_to_ansi_text(lines: &[String]) -> Option<Text<'static>> {
+    if lines.is_empty() {
+        return None;
+    }
+    lines.join("\n").into_text().ok()
+}
+
+fn run_preview_filter(args: &[String], input: &str) -> Option<String> {
+    let mut command = Command::new(&args[0]);
+    if args.len() > 1 {
+        command.args(&args[1..]);
+    }
+    if env::var_os("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
+    if env::var_os("COLORTERM").is_none() {
+        command.env("COLORTERM", "truecolor");
+    }
+    if env::var_os("CLICOLOR_FORCE").is_none() {
+        command.env("CLICOLOR_FORCE", "1");
+    }
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if !input.is_empty() && stdin.write_all(input.as_bytes()).is_err() {
+            return None;
+        }
+        if !input.ends_with('\n') && stdin.write_all(b"\n").is_err() {
+            return None;
+        }
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
@@ -680,21 +1254,25 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
 }
 
 fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
+    let now = OffsetDateTime::now_utc();
     let items = state
         .entries
         .iter()
         .map(|entry| match entry {
             Entry::Session(session) => {
-                let display = session
-                    .label
-                    .as_deref()
-                    .unwrap_or_else(|| session.first_prompt.as_deref().unwrap_or("(no label)"));
-                let mut spans = vec![Span::raw(truncate(display, 40))];
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    session.provider.clone(),
-                    Style::default().fg(Color::Blue),
-                ));
+                let raw_relative = format_relative_time(session.last_active, now)
+                    .unwrap_or_else(|| "n/a".to_string());
+                let relative = pad_relative_time(&raw_relative);
+                let label = session
+                    .snippet_line()
+                    .unwrap_or_else(|| session.display_label());
+                let label = normalize_whitespace(&label);
+                let label = truncate(&label, 200);
+                let spans = vec![
+                    Span::styled(relative, Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+                ];
                 ListItem::new(Line::from(spans))
             }
             Entry::Profile(profile) => {
@@ -704,11 +1282,22 @@ fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )];
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    profile.provider.clone(),
-                    Style::default().fg(Color::Blue),
-                ));
+                if !matches!(profile.kind, ProfileKind::Provider) {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        profile.provider.clone(),
+                        Style::default().fg(Color::Blue),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            }
+            Entry::Empty(empty) => {
+                let spans = vec![Span::styled(
+                    truncate(&empty.title, 40),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )];
                 ListItem::new(Line::from(spans))
             }
         })
@@ -726,64 +1315,56 @@ fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
 
 fn draw_preview(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
     let preview = state.preview();
-    let lines = preview
-        .lines
-        .iter()
-        .map(|line| Line::from(line.clone()))
-        .collect::<Vec<_>>();
-    let block = Block::default().title("Preview").borders(Borders::ALL);
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
+    let Preview {
+        lines,
+        styled,
+        timestamp,
+        title,
+        ..
+    } = preview;
+    let title = timestamp.or(title).unwrap_or_else(|| state.status_banner());
+
+    let mut paragraph = if let Some(styled) = styled {
+        Paragraph::new(styled)
+    } else {
+        let plain_lines = lines
+            .iter()
+            .map(|line| Line::from(line.as_str()))
+            .collect::<Vec<_>>();
+        Paragraph::new(plain_lines)
+    };
+
+    let block = Block::default().title(title).borders(Borders::ALL);
+    paragraph = paragraph.block(block).wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
-    let filter = if state.filter.is_empty() {
-        "filter: (off)".to_string()
-    } else {
-        format!("filter: {}", state.filter)
-    };
-    let provider = state.provider_filter.as_ref().map_or_else(
-        || "provider: (all)".to_string(),
-        |p| format!("provider: {p}"),
-    );
-    let flags = format!(
-        "mode: {}{}",
-        if state.full_text {
-            "full-text"
-        } else {
-            "prompt"
-        },
-        if state.actionable_only {
-            " | actionable"
-        } else {
-            ""
-        }
-    );
-    let status = vec![
-        Line::from(vec![
-            Span::raw(filter),
-            Span::raw("  |  "),
-            Span::raw(provider),
-            Span::raw("  |  "),
-            Span::raw(flags),
-        ]),
-        Line::from(
-            state
-                .message
-                .as_deref()
-                .unwrap_or("Press Tab to emit, Enter to run, / to filter, ? for help")
-                .to_string(),
-        ),
-    ];
-    let block = Block::default().borders(Borders::ALL);
-    frame.render_widget(Paragraph::new(status).block(block), area);
+    let (filter, provider_filter, search_mode, message) = state.status_texts();
+    let mut lines = vec![Line::from(vec![
+        Span::raw(filter),
+        Span::raw("  |  "),
+        Span::raw(provider_filter),
+        Span::raw("  |  "),
+        Span::raw(search_mode),
+    ])];
+    lines.push(Line::from(message));
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let help = vec![
-        Line::from("Tab: emit command    Enter: run pipeline"),
-        Line::from("/: filter    Ctrl-F: toggle full text    Alt-A: toggle actionable"),
-        Line::from("p: provider filter    R: reindex    q/Esc: quit"),
+        Line::from("Enter: run pipeline    Tab: emit command    q/Esc: quit    R: reindex"),
+        Line::from(
+            "Type to filter results instantly    /: focus filter field    Backspace: erase characters",
+        ),
+        Line::from(
+            "Ctrl-P: provider filter (Enter applies, Esc clears)    Ctrl-F: toggle full-text search",
+        ),
+        Line::from(
+            "Archived sessions without user messages are hidden automatically to reduce clutter",
+        ),
+        Line::from("Press any key to close this help overlay."),
     ];
     let chunk = Layout::default()
         .direction(Direction::Vertical)
