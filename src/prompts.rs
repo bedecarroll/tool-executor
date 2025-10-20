@@ -38,6 +38,7 @@ struct Cache {
 }
 
 impl PromptAssembler {
+    #[must_use]
     pub fn new(config: PromptAssemblerConfig) -> Self {
         Self {
             config,
@@ -50,13 +51,13 @@ impl PromptAssembler {
             self.cache = None;
         }
 
-        if let Some(cache) = &self.cache {
-            if cache.fetched_at.elapsed() <= self.config.cache_ttl {
-                return PromptStatus::Ready {
-                    profiles: cache.profiles.clone(),
-                    cached: true,
-                };
-            }
+        if let Some(cache) = &self.cache
+            && cache.fetched_at.elapsed() <= self.config.cache_ttl
+        {
+            return PromptStatus::Ready {
+                profiles: cache.profiles.clone(),
+                cached: true,
+            };
         }
 
         match fetch_prompts(&self.config) {

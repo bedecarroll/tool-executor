@@ -160,7 +160,7 @@ pub enum ConfigCommand {
 
 fn parse_since(raw: &str) -> Result<i64, String> {
     humantime::parse_duration(raw)
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .map_err(|err| format!("invalid duration '{raw}': {err}"))
 }
 

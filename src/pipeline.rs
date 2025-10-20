@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use shell_escape::unix::escape as shell_escape;
 use shlex::split as shlex_split;
+use std::sync::LazyLock;
 
 use crate::config::model::{Config, ProviderConfig, Snippet, WrapperConfig, WrapperMode};
 
@@ -50,10 +50,17 @@ pub enum Invocation {
     Exec { argv: Vec<String> },
 }
 
-static ENV_TOKEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{env:([A-Za-z0-9_]+)\}").unwrap());
-static TEMPLATE_TOKEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{\{([^}]+)\}\}").unwrap());
+static ENV_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{env:([A-Za-z0-9_]+)\}").unwrap());
+static TEMPLATE_TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{([^}]+)\}\}").unwrap());
 
-pub fn build_pipeline(request: PipelineRequest<'_>) -> Result<PipelinePlan> {
+/// Construct a pipeline plan from the provided request and configuration.
+///
+/// # Errors
+///
+/// Returns an error when referenced profiles, snippets, or wrappers are missing or
+/// when template rendering fails.
+pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
     let config = request.config;
 
     let profile = match request.profile {
@@ -67,7 +74,7 @@ pub fn build_pipeline(request: PipelineRequest<'_>) -> Result<PipelinePlan> {
     };
 
     let provider_name = profile
-        .and_then(|p| Some(p.provider.clone()))
+        .map(|p| p.provider.clone())
         .or_else(|| request.provider_hint.map(str::to_string))
         .or_else(|| config.defaults.provider.clone())
         .ok_or_else(|| eyre!("no provider selected; specify --profile or <provider>"))?;

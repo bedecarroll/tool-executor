@@ -40,6 +40,11 @@ impl<'a> Indexer<'a> {
         Self { db, config }
     }
 
+    /// Re-scan configured session roots and update the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if walking the filesystem or updating the database fails.
     pub fn run(&mut self) -> Result<IndexReport> {
         let mut report = IndexReport::default();
 
@@ -63,7 +68,7 @@ impl<'a> Indexer<'a> {
                             }
                             Err(err) => {
                                 report.errors.push(IndexError {
-                                    path: root.to_path_buf(),
+                                    path: root.clone(),
                                     error: err,
                                 });
                             }
@@ -105,11 +110,9 @@ impl<'a> Indexer<'a> {
             // remove stale sessions for provider
             let existing = self.db.sessions_for_provider(&provider.name)?;
             for session in existing {
-                if !seen.contains(&session.id) {
-                    if !session.path.exists() {
-                        self.db.delete_session(&session.id)?;
-                        report.removed += 1;
-                    }
+                if !seen.contains(&session.id) && !session.path.exists() {
+                    self.db.delete_session(&session.id)?;
+                    report.removed += 1;
                 }
             }
         }
@@ -120,21 +123,20 @@ impl<'a> Indexer<'a> {
     fn process_file(&mut self, provider: &ProviderConfig, path: &Path) -> Result<Option<String>> {
         let metadata = fs::metadata(path)
             .with_context(|| format!("failed to read metadata for {}", path.display()))?;
-        let size = metadata.len() as i64;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
         let mtime = system_time_to_unix(metadata.modified().ok()).unwrap_or_else(current_unix_time);
         let created_at = system_time_to_unix(metadata.created().ok());
 
         let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let path_str = canonical_path.to_string_lossy().to_string();
 
-        if let Some(existing) = self.db.existing_by_path(&path_str)? {
-            if !existing.is_stale(size, mtime) {
-                return Ok(None);
-            }
+        if let Some(existing) = self.db.existing_by_path(&path_str)?
+            && !existing.is_stale(size, mtime)
+        {
+            return Ok(None);
         }
 
-        let ingest = self
-            .build_ingest(provider, &canonical_path, size, mtime, created_at)
+        let ingest = Self::build_ingest(provider, &canonical_path, size, mtime, created_at)
             .with_context(|| format!("failed to ingest session from {}", path.display()))?;
         let id = ingest.summary.id.clone();
         self.db.upsert_session(&ingest)?;
@@ -142,18 +144,17 @@ impl<'a> Indexer<'a> {
     }
 
     fn build_ingest(
-        &self,
         provider: &ProviderConfig,
         path: &Path,
         size: i64,
         mtime: i64,
         created_at: Option<i64>,
     ) -> Result<SessionIngest> {
-        let (session_id, relative) = compute_session_id(provider, path)?;
+        let (session_id, relative) = compute_session_id(provider, path);
         let label = path
             .file_stem()
             .and_then(OsStr::to_str)
-            .map(|s| s.to_string())
+            .map(str::to_string)
             .or_else(|| Some(relative.clone()));
 
         let file = File::open(path)?;
@@ -178,7 +179,7 @@ impl<'a> Indexer<'a> {
 
             for (role, content) in extract_messages(&value) {
                 if let Some(clean) = clean_text(&content) {
-                    let index = messages.len() as i64;
+                    let index = i64::try_from(messages.len()).unwrap_or(i64::MAX);
                     if first_prompt.is_none() && role.eq_ignore_ascii_case("user") {
                         first_prompt = Some(clean.clone());
                     }
@@ -212,14 +213,13 @@ impl<'a> Indexer<'a> {
 fn is_jsonl(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
-        .map(|ext| ext.eq_ignore_ascii_case("jsonl"))
-        .unwrap_or(false)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
 fn system_time_to_unix(time: Option<SystemTime>) -> Option<i64> {
     time.and_then(|time| {
         time.duration_since(SystemTime::UNIX_EPOCH)
-            .map(|duration| duration.as_secs() as i64)
+            .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
             .ok()
     })
 }
@@ -227,29 +227,28 @@ fn system_time_to_unix(time: Option<SystemTime>) -> Option<i64> {
 fn current_unix_time() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
-fn compute_session_id(provider: &ProviderConfig, path: &Path) -> Result<(String, String)> {
+fn compute_session_id(provider: &ProviderConfig, path: &Path) -> (String, String) {
     let mut relative = None;
     for root in &provider.session_roots {
         if let Ok(stripped) = path.strip_prefix(root) {
             relative = Some(stripped.to_path_buf());
             break;
         }
-        if let Ok(canon_root) = root.canonicalize() {
-            if let Ok(stripped) = path.strip_prefix(&canon_root) {
-                relative = Some(stripped.to_path_buf());
-                break;
-            }
+        if let Ok(canon_root) = root.canonicalize()
+            && let Ok(stripped) = path.strip_prefix(&canon_root)
+        {
+            relative = Some(stripped.to_path_buf());
+            break;
         }
     }
 
     let relative = relative.unwrap_or_else(|| {
         path.file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf())
+            .map_or_else(|| path.to_path_buf(), PathBuf::from)
     });
 
     let normalized = relative
@@ -257,7 +256,7 @@ fn compute_session_id(provider: &ProviderConfig, path: &Path) -> Result<(String,
         .map(|comp| comp.as_os_str().to_string_lossy())
         .join("/");
     let id = format!("{}/{}", provider.name, normalized);
-    Ok((id, normalized))
+    (id, normalized)
 }
 
 fn extract_messages(value: &Value) -> Vec<(String, String)> {
@@ -267,74 +266,66 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
         if let Some(typ) = obj.get("type").and_then(Value::as_str) {
             match typ {
                 "event_msg" => {
-                    if let Some(payload) = obj.get("payload") {
-                        if payload
+                    if let Some(payload) = obj.get("payload")
+                        && payload
                             .get("type")
                             .and_then(Value::as_str)
-                            .map(|ty| ty == "user_message")
-                            .unwrap_or(false)
-                        {
-                            if let Some(text) = extract_text(payload) {
-                                messages.push(("user".to_string(), text));
-                            }
-                        }
+                            .is_some_and(|ty| ty == "user_message")
+                        && let Some(text) = extract_text(payload)
+                    {
+                        messages.push(("user".to_string(), text));
                     }
                 }
                 "response_item" | "message" => {
                     let container = obj.get("payload").unwrap_or(value);
-                    if let Some(role) = container.get("role").and_then(Value::as_str) {
-                        if let Some(text) = extract_text(container) {
-                            messages.push((role.to_string(), text));
-                        }
+                    if let Some(role) = container.get("role").and_then(Value::as_str)
+                        && let Some(text) = extract_text(container)
+                    {
+                        messages.push((role.to_string(), text));
                     }
                 }
                 _ => {}
             }
         }
 
-        if let Some(role) = obj.get("role").and_then(Value::as_str) {
-            if let Some(text) = extract_text(value) {
-                messages.push((role.to_string(), text));
-            }
+        if let Some(role) = obj.get("role").and_then(Value::as_str)
+            && let Some(text) = extract_text(value)
+        {
+            messages.push((role.to_string(), text));
         }
     }
 
-    if messages.is_empty() {
-        if let Some(role) = value.get("role").and_then(Value::as_str) {
-            if let Some(text) = extract_text(value) {
-                messages.push((role.to_string(), text));
-            }
-        }
+    if messages.is_empty()
+        && let Some(role) = value.get("role").and_then(Value::as_str)
+        && let Some(text) = extract_text(value)
+    {
+        messages.push((role.to_string(), text));
     }
 
     messages
 }
 
 fn extract_text(container: &Value) -> Option<String> {
-    if let Some(content) = container.get("content") {
-        if let Some(items) = content.as_array() {
-            let mut parts = Vec::new();
-            for item in items {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                } else if let Some(message) = item.get("message").and_then(Value::as_str) {
-                    parts.push(message.to_string());
-                } else if let Some(nested) = item.get("content") {
-                    if let Some(text) = extract_text(nested) {
-                        parts.push(text);
-                    }
-                }
+    if let Some(content) = container.get("content")
+        && let Some(items) = content.as_array()
+    {
+        let mut parts = Vec::new();
+        for item in items {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                parts.push(text.to_string());
+            } else if let Some(message) = item.get("message").and_then(Value::as_str) {
+                parts.push(message.to_string());
+            } else if let Some(text) = item.get("content").and_then(extract_text) {
+                parts.push(text);
             }
-            if !parts.is_empty() {
-                return Some(parts.join(""));
-            }
+        }
+        if !parts.is_empty() {
+            return Some(parts.join(""));
         }
     }
 
-    if let Some(payload) = container.get("payload") {
-        if let Some(text) = extract_text(payload) {
-            return Some(text);
-        }
+    if let Some(text) = container.get("payload").and_then(extract_text) {
+        return Some(text);
     }
 
     if let Some(message) = container.get("message").and_then(Value::as_str) {
@@ -346,19 +337,22 @@ fn extract_text(container: &Value) -> Option<String> {
     None
 }
 
+const IGNORED_TAG_PREFIXES: [&str; 3] = [
+    "<user_instructions>",
+    "</user_instructions>",
+    "<environment_context>",
+];
+
 fn clean_text(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    const TAGS: [&str; 3] = [
-        "<user_instructions>",
-        "</user_instructions>",
-        "<environment_context>",
-    ];
-
-    if TAGS.iter().any(|tag| trimmed.starts_with(tag)) {
+    if IGNORED_TAG_PREFIXES
+        .iter()
+        .any(|tag| trimmed.starts_with(tag))
+    {
         return None;
     }
 

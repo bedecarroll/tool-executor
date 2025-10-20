@@ -5,7 +5,7 @@ A thin, configurable launcher that starts, resumes, and searches **AI code-assis
 * **Binary:** `tx`
 * **Repo:** `tool-executor`
 
-### Highlights
+## Highlights
 
 * **One-command TUI**: run `tx`, pick a recent session or a profile, **Tab** to insert the command into your shell, **Enter** to run.
 * **Search**: first-prompt (fast) or **full-text** (FTS) across stored session logs.
@@ -29,7 +29,7 @@ cargo install --path .              # from a clone
 
 Bind **Alt-t** to open `tx`, select an item, then **Tab** to insert the resolved command into your current line (it will not run).
 
-**bash**
+#### bash
 
 ```bash
 # Add to ~/.bashrc
@@ -40,7 +40,7 @@ _tx_insert() {
 bind -x '"\et":"_tx_insert"'
 ```
 
-**zsh**
+#### zsh
 
 ```zsh
 # Add to ~/.zshrc
@@ -52,7 +52,7 @@ zle -N _tx_insert
 bindkey "\et" _tx_insert
 ```
 
-**fish**
+#### fish
 
 ```fish
 # Add to ~/.config/fish/config.fish
@@ -69,7 +69,7 @@ bind \et 'commandline -r (tx --json --emit-command 2>/dev/null)'
 mkdir -p ~/.config/tx/conf.d ~/.local/share/tx ~/.cache/tx
 ```
 
-2. Drop a minimal provider config (example):
+1. Drop a minimal provider config (example):
 
 ```toml
 # ~/.config/tx/conf.d/00-providers.toml
@@ -86,7 +86,7 @@ env = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"]
 session_roots = ["~/.claude/sessions"]
 ```
 
-3. (Optional) Add wrappers and a profile:
+1. (Optional) Add wrappers and a profile:
 
 ```toml
 # ~/.config/tx/conf.d/10-profiles.toml
@@ -101,7 +101,7 @@ post = []
 wrap = "tmux_simple"
 ```
 
-4. Run `tx`, pick **kickoff** or a recent session; **Enter** runs; **Tab** inserts.
+1. Run `tx`, pick **kickoff** or a recent session; **Enter** runs; **Tab** inserts.
 
 ---
 
@@ -132,7 +132,7 @@ tx doctor
 tx self-update [--version TAG]
 ```
 
-**Keys inside TUI**
+### Keys inside TUI
 
 * `Up/Down` move
 * `/` filter
@@ -151,20 +151,20 @@ tx self-update [--version TAG]
 
 `tx` loads in order (later overrides earlier):
 
-```
+```text
 ~/.config/tx/config.toml           # optional base
 ~/.config/tx/conf.d/*.toml         # lexicographic order (00-... 50-... 99-...)
 ./.tx.toml                         # project-local (optional)
 ./.tx.d/*.toml                     # project-local drop-ins (optional)
 ```
 
-**Merge rules**
+### Merge rules
 
 * Tables deep-merge; scalars overwrite.
 * Arrays replace unless you use the `+` form to append: `pre+ = ["assemble"]`.
 * Set a key to `null` to delete it.
 
-**Schema overview**
+### Schema overview
 
 ```toml
 [defaults]
@@ -198,7 +198,7 @@ post = ["save_md"]
 wrap = "tmux_simple"
 ```
 
-**Variables available in templates**
+### Variables available in templates
 
 * `{{CMD}}` -- the fully assembled pipeline string
 * `{{provider}}`, `{{session.id}}`, `{{session.label}}`, `{{cwd}}`

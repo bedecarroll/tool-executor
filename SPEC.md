@@ -1,4 +1,4 @@
-## 1. Purpose
+# 1. Purpose
 
 A single-binary Rust CLI (`tx`) for managing AI code-assistant sessions with a thin philosophy:
 
@@ -16,7 +16,7 @@ A single-binary Rust CLI (`tx`) for managing AI code-assistant sessions with a t
 
 ## 3. CLI Surface
 
-```
+```text
 # TUI
 tx [--json --emit-command]    # --emit-command used by shell keybinding
 

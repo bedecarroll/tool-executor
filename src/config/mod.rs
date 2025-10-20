@@ -37,6 +37,12 @@ pub struct AppDirectories {
 }
 
 impl AppDirectories {
+    /// Create the configuration, data, and cache directories if they are missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any directory cannot be created or is otherwise
+    /// inaccessible.
     pub fn ensure_all(&self) -> Result<()> {
         for dir in [&self.config_dir, &self.data_dir, &self.cache_dir] {
             if !dir.exists() {
@@ -62,6 +68,12 @@ pub struct ConfigSource {
     pub path: PathBuf,
 }
 
+/// Load and merge configuration files into a [`LoadedConfig`].
+///
+/// # Errors
+///
+/// Returns an error if any configuration file cannot be read, parsed, or merged
+/// according to the schema.
 pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
     let dirs = resolve_directories(dir_override)?;
     dirs.ensure_all()?;
@@ -188,8 +200,7 @@ fn read_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
         if path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("toml"))
-            .unwrap_or(false)
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
         {
             files.insert(path);
         }

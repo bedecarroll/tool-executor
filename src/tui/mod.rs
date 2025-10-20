@@ -26,6 +26,12 @@ use crate::session::{SearchHit, SessionQuery};
 
 const SESSION_LIMIT: usize = 200;
 
+/// Run the TUI event loop until the user selects an action or exits.
+///
+/// # Errors
+///
+/// Returns an error if terminal IO fails or database interactions within the UI
+/// produce an error.
 pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -61,16 +67,11 @@ fn run_app<'a>(
             return Ok(Some(outcome));
         }
 
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(event) => {
-                    if state.handle_key(event)? {
-                        return Ok(state.outcome);
-                    }
-                }
-                Event::Resize(_, _) => {}
-                _ => {}
-            }
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(event) = event::read()?
+            && state.handle_key(event)?
+        {
+            return Ok(state.outcome);
         }
     }
 }
@@ -177,18 +178,15 @@ impl SessionEntry {
             || self
                 .label
                 .as_ref()
-                .map(|label| label.to_ascii_lowercase().contains(&needle))
-                .unwrap_or(false)
+                .is_some_and(|label| label.to_ascii_lowercase().contains(&needle))
             || self
                 .first_prompt
                 .as_ref()
-                .map(|prompt| prompt.to_ascii_lowercase().contains(&needle))
-                .unwrap_or(false)
+                .is_some_and(|prompt| prompt.to_ascii_lowercase().contains(&needle))
             || self
                 .snippet
                 .as_ref()
-                .map(|snippet| snippet.to_ascii_lowercase().contains(&needle))
-                .unwrap_or(false)
+                .is_some_and(|snippet| snippet.to_ascii_lowercase().contains(&needle))
     }
 }
 
@@ -225,7 +223,7 @@ impl<'ctx> AppState<'ctx> {
             list_state: ratatui::widgets::ListState::default(),
         };
 
-        state.load_profiles()?;
+        state.load_profiles();
         state.refresh_entries()?;
         state.list_state.select(Some(0));
         Ok(state)
@@ -243,7 +241,7 @@ impl<'ctx> AppState<'ctx> {
         }
     }
 
-    fn load_profiles(&mut self) -> Result<()> {
+    fn load_profiles(&mut self) {
         self.profiles.clear();
 
         for (name, profile) in &self.ctx.config.profiles {
@@ -295,8 +293,6 @@ impl<'ctx> AppState<'ctx> {
                 PromptStatus::Disabled => {}
             }
         }
-
-        Ok(())
     }
 
     fn refresh_entries(&mut self) -> Result<()> {
@@ -322,15 +318,13 @@ impl<'ctx> AppState<'ctx> {
         let mut entries: Vec<Entry> = sessions.into_iter().map(Entry::Session).collect();
 
         for profile in &self.profiles {
-            if let Some(provider) = &self.provider_filter {
-                if &profile.provider != provider {
-                    continue;
-                }
+            if let Some(provider) = &self.provider_filter
+                && &profile.provider != provider
+            {
+                continue;
             }
-            if !self.filter.is_empty() {
-                if !profile.matches(&self.filter) {
-                    continue;
-                }
+            if !self.filter.is_empty() && !profile.matches(&self.filter) {
+                continue;
             }
             entries.push(Entry::Profile(profile.clone()));
         }
@@ -388,7 +382,7 @@ impl<'ctx> AppState<'ctx> {
 
     fn handle_key_normal(&mut self, key: KeyEvent) -> Result<bool> {
         match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => Ok(true),
+            (KeyCode::Esc | KeyCode::Char('q'), _) => Ok(true),
             (KeyCode::Down, _) => {
                 self.move_selection(1);
                 Ok(false)
@@ -449,11 +443,7 @@ impl<'ctx> AppState<'ctx> {
 
     fn handle_key_filter(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                Ok(false)
-            }
-            KeyCode::Enter => {
+            KeyCode::Esc | KeyCode::Enter => {
                 self.input_mode = InputMode::Normal;
                 Ok(false)
             }
@@ -482,10 +472,10 @@ impl<'ctx> AppState<'ctx> {
                 Ok(false)
             }
             KeyCode::Enter => {
-                if let Some(provider) = &self.provider_filter {
-                    if provider.trim().is_empty() {
-                        self.provider_filter = None;
-                    }
+                if let Some(provider) = &self.provider_filter
+                    && provider.trim().is_empty()
+                {
+                    self.provider_filter = None;
                 }
                 self.input_mode = InputMode::Normal;
                 self.refresh_entries()?;
@@ -519,14 +509,10 @@ impl<'ctx> AppState<'ctx> {
             self.list_state.select(None);
             return;
         }
-        let len = self.entries.len() as isize;
-        let mut idx = self.index as isize + delta;
-        if idx < 0 {
-            idx = 0;
-        } else if idx >= len {
-            idx = len - 1;
-        }
-        self.index = idx as usize;
+        let len = self.entries.len();
+        let max_index = len.saturating_sub(1);
+        let next = self.index.saturating_add_signed(delta).min(max_index);
+        self.index = next;
         self.list_state.select(Some(self.index));
     }
 
@@ -570,15 +556,12 @@ impl<'ctx> AppState<'ctx> {
                         id: Some(summary.id.clone()),
                         label: summary.label.clone(),
                     },
-                    cwd: summary
-                        .path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| {
-                            env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                        }),
+                    cwd: summary.path.parent().map_or_else(
+                        || env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                        Path::to_path_buf,
+                    ),
                 };
-                Ok(Some(build_pipeline(request)?))
+                Ok(Some(build_pipeline(&request)?))
             }
             Entry::Profile(profile) => {
                 let request = match profile.kind {
@@ -607,7 +590,7 @@ impl<'ctx> AppState<'ctx> {
                         cwd: env::current_dir()?,
                     },
                 };
-                Ok(Some(build_pipeline(request)?))
+                Ok(Some(build_pipeline(&request)?))
             }
         }
     }
@@ -628,10 +611,10 @@ impl<'ctx> AppState<'ctx> {
             Entry::Profile(profile) => format!("profile:{}", profile.display),
         };
 
-        if let Some(preview) = self.preview_cache.get(&key) {
-            if preview.updated_at.elapsed() < Duration::from_secs(5) {
-                return preview.clone();
-            }
+        if let Some(preview) = self.preview_cache.get(&key)
+            && preview.updated_at.elapsed() < Duration::from_secs(5)
+        {
+            return preview.clone();
         }
 
         let preview = match entry {
@@ -650,7 +633,7 @@ impl<'ctx> AppState<'ctx> {
                     updated_at: Instant::now(),
                 },
                 Err(err) => Preview {
-                    lines: vec![format!("preview error: {}", err)],
+                    lines: vec![format!("preview error: {err}")],
                     updated_at: Instant::now(),
                 },
             },
@@ -759,11 +742,10 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
     } else {
         format!("filter: {}", state.filter)
     };
-    let provider = state
-        .provider_filter
-        .as_ref()
-        .map(|p| format!("provider: {}", p))
-        .unwrap_or_else(|| "provider: (all)".to_string());
+    let provider = state.provider_filter.as_ref().map_or_else(
+        || "provider: (all)".to_string(),
+        |p| format!("provider: {p}"),
+    );
     let flags = format!(
         "mode: {}{}",
         if state.full_text {

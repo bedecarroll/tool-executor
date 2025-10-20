@@ -2,7 +2,6 @@ use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use predicates::str::contains;
-use toml;
 
 fn base_command(temp: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("tx").expect("binary exists");

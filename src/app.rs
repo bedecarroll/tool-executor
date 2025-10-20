@@ -5,9 +5,9 @@ use std::process::Command;
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::json;
+use std::sync::LazyLock;
 use tracing::info;
 use which::which;
 
@@ -47,6 +47,12 @@ pub struct UiContext<'app> {
 }
 
 impl<'cli> App<'cli> {
+    /// Construct the application, loading configuration and initializing the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration files cannot be read or the `SQLite` database
+    /// cannot be opened and prepared.
     pub fn bootstrap(cli: &'cli Cli) -> Result<Self> {
         let loaded = crate::config::load(cli.config_dir.as_deref())?;
         let db_path = loaded.directories.data_dir.join("tx.sqlite3");
@@ -71,6 +77,12 @@ impl<'cli> App<'cli> {
         })
     }
 
+    /// Render the sessions listing according to the provided filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if querying the session database fails or JSON serialization
+    /// of the output cannot be completed.
     pub fn list_sessions(&self, cmd: &SessionsCommand) -> Result<()> {
         let since_epoch = cmd
             .since
@@ -97,6 +109,12 @@ impl<'cli> App<'cli> {
         Ok(())
     }
 
+    /// Execute a sessions search (first prompt or full-text) depending on flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database search fails or the results cannot be
+    /// serialized to JSON when requested.
     pub fn search(&self, cmd: &SearchCommand) -> Result<()> {
         let hits = if cmd.full_text {
             self.db
@@ -121,6 +139,12 @@ impl<'cli> App<'cli> {
         Ok(())
     }
 
+    /// Build and optionally execute a pipeline for launching a new provider session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if variables are invalid, the pipeline cannot be constructed,
+    /// or the resulting command fails to run.
     pub fn launch(&mut self, cmd: &LaunchCommand) -> Result<()> {
         let vars = parse_vars(&cmd.vars)?;
         let request = PipelineRequest {
@@ -136,7 +160,7 @@ impl<'cli> App<'cli> {
             cwd: std::env::current_dir()?,
         };
 
-        let plan = build_pipeline(request)?;
+        let plan = build_pipeline(&request)?;
         if cmd.dry_run || self.cli.emit_command {
             emit_command(&plan, cmd.dry_run || self.cli.json)?;
             return Ok(());
@@ -145,6 +169,12 @@ impl<'cli> App<'cli> {
         execute_plan(&plan).wrap_err("failed to execute pipeline")
     }
 
+    /// Build and optionally execute a pipeline to resume an existing session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot be loaded, the requested profile is
+    /// incompatible, the pipeline cannot be constructed, or execution fails.
     pub fn resume(&mut self, cmd: &ResumeCommand) -> Result<()> {
         let summary = self
             .db
@@ -168,11 +198,10 @@ impl<'cli> App<'cli> {
         }
 
         let vars = parse_vars(&cmd.vars)?;
-        let cwd = summary
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let working_dir = summary.path.parent().map_or_else(
+            || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            Path::to_path_buf,
+        );
 
         let request = PipelineRequest {
             config: &self.loaded.config,
@@ -187,10 +216,10 @@ impl<'cli> App<'cli> {
                 id: Some(summary.id.clone()),
                 label: summary.label.clone(),
             },
-            cwd,
+            cwd: working_dir,
         };
 
-        let plan = build_pipeline(request)?;
+        let plan = build_pipeline(&request)?;
         if cmd.dry_run || self.cli.emit_command {
             emit_command(&plan, cmd.dry_run || self.cli.json)?;
             return Ok(());
@@ -199,6 +228,11 @@ impl<'cli> App<'cli> {
         execute_plan(&plan).wrap_err("failed to execute pipeline")
     }
 
+    /// Export a session transcript in human or Markdown form.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested session does not exist.
     pub fn export(&self, cmd: &ExportCommand) -> Result<()> {
         let transcript = self
             .db
@@ -206,7 +240,7 @@ impl<'cli> App<'cli> {
             .ok_or_else(|| eyre!("session '{}' not found", cmd.session_id))?;
 
         if cmd.md {
-            export_markdown(&transcript)?;
+            export_markdown(&transcript);
         } else {
             export_human(&transcript);
         }
@@ -214,19 +248,41 @@ impl<'cli> App<'cli> {
         Ok(())
     }
 
+    /// Execute one of the configuration subcommands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if dumping, linting, or other configuration operations fail.
     pub fn config(&self, cmd: &ConfigCommand) -> Result<()> {
         match cmd {
-            ConfigCommand::List => self.config_list(),
+            ConfigCommand::List => {
+                self.config_list();
+                Ok(())
+            }
             ConfigCommand::Dump => self.config_dump(),
-            ConfigCommand::Where => self.config_where(),
+            ConfigCommand::Where => {
+                self.config_where();
+                Ok(())
+            }
             ConfigCommand::Lint => self.config_lint(),
         }
     }
 
+    /// Run diagnostic checks to validate binaries, directories, and database state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be inspected or other IO operations fail.
     pub fn doctor(&self) -> Result<()> {
         run_doctor(&self.loaded, &self.db)
     }
 
+    /// Attempt to update the `tx` binary using GitHub releases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updater cannot be configured or the download/apply step
+    /// fails.
     #[cfg(feature = "self-update")]
     pub fn self_update(&self, cmd: &SelfUpdateCommand) -> Result<()> {
         use self_update::backends::github::Update;
@@ -269,6 +325,12 @@ impl<'cli> App<'cli> {
         Ok(())
     }
 
+    /// Launch the interactive TUI for session selection or profile execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TUI cannot be displayed or if underlying database
+    /// interactions fail during operation.
     pub fn run_ui(&mut self) -> Result<()> {
         if self.cli.emit_command {
             return Err(eyre!("--emit-command requires a non-interactive selection"));
@@ -284,7 +346,7 @@ impl<'cli> App<'cli> {
         tui::run(&mut ctx)
     }
 
-    fn config_list(&self) -> Result<()> {
+    fn config_list(&self) {
         println!("Providers:");
         for (name, provider) in &self.loaded.config.providers {
             let roots = provider
@@ -302,7 +364,7 @@ impl<'cli> App<'cli> {
                 crate::config::model::WrapperMode::Shell { .. } => "shell",
                 crate::config::model::WrapperMode::Exec { .. } => "exec",
             };
-            println!("  - {} ({})", name, mode);
+            println!("  - {name} ({mode})");
         }
 
         println!("\nProfiles:");
@@ -316,17 +378,15 @@ impl<'cli> App<'cli> {
                 profile.wrap.as_deref().unwrap_or("-"),
             );
         }
-
-        Ok(())
     }
 
     fn config_dump(&self) -> Result<()> {
         let toml_text = toml::to_string_pretty(&self.loaded.merged)?;
-        println!("{}", toml_text);
+        println!("{toml_text}");
         Ok(())
     }
 
-    fn config_where(&self) -> Result<()> {
+    fn config_where(&self) {
         println!(
             "Configuration directory: {}",
             self.loaded.directories.config_dir.display()
@@ -349,7 +409,6 @@ impl<'cli> App<'cli> {
             };
             println!("  - {} ({})", source.path.display(), kind);
         }
-        Ok(())
     }
 
     fn config_lint(&self) -> Result<()> {
@@ -471,8 +530,8 @@ fn print_sessions_table(sessions: &[SessionQuery]) {
 
 fn print_search_table(hits: &[SearchHit]) {
     println!(
-        "{:<32} {:<12} {:<14} {:<19} {}",
-        "Session ID", "Provider", "Label", "Last Active", "Snippet"
+        "{:<32} {:<12} {:<14} {:<19} Snippet",
+        "Session ID", "Provider", "Label", "Last Active"
     );
     println!("{}", "-".repeat(120));
     for hit in hits {
@@ -497,11 +556,11 @@ fn truncate(input: &str, max: usize) -> String {
     }
 }
 
-fn export_markdown(transcript: &Transcript) -> Result<()> {
+fn export_markdown(transcript: &Transcript) {
     println!("# Session {}", transcript.session.id);
     println!("- Provider: {}", transcript.session.provider);
     if let Some(label) = &transcript.session.label {
-        println!("- Label: {}", label);
+        println!("- Label: {label}");
     }
     println!(
         "- Created: {}",
@@ -519,8 +578,6 @@ fn export_markdown(transcript: &Transcript) -> Result<()> {
         println!();
         println!("{}", message.content);
     }
-
-    Ok(())
 }
 
 fn export_human(transcript: &Transcript) {
@@ -529,7 +586,7 @@ fn export_human(transcript: &Transcript) {
         transcript.session.id, transcript.session.provider
     );
     if let Some(label) = &transcript.session.label {
-        println!("Label: {}", label);
+        println!("Label: {label}");
     }
     println!(
         "Created: {}",
@@ -563,7 +620,8 @@ fn log_index_report(report: &IndexReport) {
     }
 }
 
-static VAR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$\{env:([A-Za-z0-9_]+)\}").unwrap());
+static VAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{env:([A-Za-z0-9_]+)\}").unwrap());
 
 fn run_doctor(loaded: &LoadedConfig, db: &Database) -> Result<()> {
     println!("tx doctor");
@@ -582,9 +640,9 @@ fn run_doctor(loaded: &LoadedConfig, db: &Database) -> Result<()> {
             for caps in VAR_RE.captures_iter(&env.value_template) {
                 let var = caps.get(1).unwrap().as_str();
                 if std::env::var(var).is_ok() {
-                    println!("  ✔ env {} is set", var);
+                    println!("  ✔ env {var} is set");
                 } else {
-                    println!("  ✘ env {} is missing", var);
+                    println!("  ✘ env {var} is missing");
                 }
             }
         }
@@ -603,20 +661,19 @@ fn run_doctor(loaded: &LoadedConfig, db: &Database) -> Result<()> {
     println!("Known sessions: {}", db.count_sessions()?);
 
     if let Some(cfg) = loaded.config.features.prompt_assembler.clone() {
-        check_prompt_assembler(&cfg)?;
+        check_prompt_assembler(&cfg);
     }
 
     Ok(())
 }
 
-fn check_prompt_assembler(cfg: &PromptAssemblerConfig) -> Result<()> {
+fn check_prompt_assembler(cfg: &PromptAssemblerConfig) {
     let mut assembler = PromptAssembler::new(cfg.clone());
     match assembler.refresh(true) {
         PromptStatus::Ready { .. } => println!("✔ prompt assembler responded"),
         PromptStatus::Unavailable { message } => {
-            println!("✘ prompt assembler unavailable: {}", message)
+            println!("✘ prompt assembler unavailable: {message}");
         }
         PromptStatus::Disabled => {}
     }
-    Ok(())
 }

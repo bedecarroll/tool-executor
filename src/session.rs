@@ -39,6 +39,7 @@ pub struct SessionQuery {
 }
 
 impl SessionSummary {
+    #[must_use]
     pub fn is_stale(&self, size: i64, mtime: i64) -> bool {
         self.size != size || self.mtime != mtime
     }
@@ -64,6 +65,7 @@ pub struct Transcript {
 }
 
 impl SessionIngest {
+    #[must_use]
     pub fn new(summary: SessionSummary, messages: Vec<MessageRecord>) -> Self {
         Self { summary, messages }
     }

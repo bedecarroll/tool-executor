@@ -33,6 +33,7 @@ pub enum SearchMode {
 }
 
 impl SearchMode {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             SearchMode::FirstPrompt => "first_prompt",
@@ -126,6 +127,12 @@ pub enum DiagnosticLevel {
 }
 
 impl Config {
+    /// Parse a configuration [`Value`] into a [`Config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input TOML fails schema validation or cannot
+    /// be decoded into the strongly typed configuration.
     pub fn from_value(value: &Value) -> Result<Self> {
         let raw: RawConfig = value
             .clone()
@@ -134,28 +141,29 @@ impl Config {
         raw.into_config()
     }
 
+    #[must_use]
     pub fn lint(&self) -> Vec<ConfigDiagnostic> {
         let mut diags = Vec::new();
-        if let Some(default_provider) = &self.defaults.provider {
-            if !self.providers.contains_key(default_provider) {
-                diags.push(ConfigDiagnostic {
-                    level: DiagnosticLevel::Error,
-                    message: format!(
-                        "default provider '{default_provider}' is not defined in [providers]"
-                    ),
-                });
-            }
+        if let Some(default_provider) = &self.defaults.provider
+            && !self.providers.contains_key(default_provider)
+        {
+            diags.push(ConfigDiagnostic {
+                level: DiagnosticLevel::Error,
+                message: format!(
+                    "default provider '{default_provider}' is not defined in [providers]"
+                ),
+            });
         }
 
-        if let Some(default_profile) = &self.defaults.profile {
-            if !self.profiles.contains_key(default_profile) {
-                diags.push(ConfigDiagnostic {
-                    level: DiagnosticLevel::Error,
-                    message: format!(
-                        "default profile '{default_profile}' is not defined in [profiles]"
-                    ),
-                });
-            }
+        if let Some(default_profile) = &self.defaults.profile
+            && !self.profiles.contains_key(default_profile)
+        {
+            diags.push(ConfigDiagnostic {
+                level: DiagnosticLevel::Error,
+                message: format!(
+                    "default profile '{default_profile}' is not defined in [profiles]"
+                ),
+            });
         }
 
         for profile in self.profiles.values() {
@@ -193,26 +201,26 @@ impl Config {
                 }
             }
 
-            if let Some(wrapper) = &profile.wrap {
-                if !self.wrappers.contains_key(wrapper) {
-                    diags.push(ConfigDiagnostic {
-                        level: DiagnosticLevel::Warning,
-                        message: format!(
-                            "profile '{}' references unknown wrapper '{}'",
-                            profile.name, wrapper
-                        ),
-                    });
-                }
+            if let Some(wrapper) = &profile.wrap
+                && !self.wrappers.contains_key(wrapper)
+            {
+                diags.push(ConfigDiagnostic {
+                    level: DiagnosticLevel::Warning,
+                    message: format!(
+                        "profile '{}' references unknown wrapper '{}'",
+                        profile.name, wrapper
+                    ),
+                });
             }
         }
 
-        if let Some(pa) = &self.features.prompt_assembler {
-            if !matches!(pa.strategy, PromptAssemblerStrategy::ExecOnly) {
-                diags.push(ConfigDiagnostic {
-                    level: DiagnosticLevel::Error,
-                    message: "unsupported prompt-assembler strategy".to_string(),
-                });
-            }
+        if let Some(pa) = &self.features.prompt_assembler
+            && !matches!(pa.strategy, PromptAssemblerStrategy::ExecOnly)
+        {
+            diags.push(ConfigDiagnostic {
+                level: DiagnosticLevel::Error,
+                message: "unsupported prompt-assembler strategy".to_string(),
+            });
         }
 
         diags
@@ -290,8 +298,7 @@ impl RawDefaults {
     fn into_defaults(self) -> Result<Defaults> {
         let mode_key = self.search_mode.trim();
         let search_mode = match mode_key {
-            "" => SearchMode::FirstPrompt,
-            "first_prompt" => SearchMode::FirstPrompt,
+            "" | "first_prompt" => SearchMode::FirstPrompt,
             "full_text" => SearchMode::FullText,
             other => {
                 return Err(eyre!("unknown search_mode '{other}'"));
@@ -347,7 +354,7 @@ impl RawProvider {
             env: self
                 .env
                 .into_iter()
-                .map(parse_env_var)
+                .map(|entry| parse_env_var(&entry))
                 .collect::<Result<Vec<_>>>()?,
             session_roots,
             stdin,
@@ -355,7 +362,7 @@ impl RawProvider {
     }
 }
 
-fn parse_env_var(raw: String) -> Result<EnvVar> {
+fn parse_env_var(raw: &str) -> Result<EnvVar> {
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| eyre!("environment entry '{raw}' must be in KEY=VALUE form"))?;
@@ -534,11 +541,7 @@ impl RawPromptAssembler {
 }
 
 fn expand_path(raw: &str) -> Result<PathBuf> {
-    let expanded = full(raw).with_context(|| {
-        format!(
-            "failed to expand path '{}': environment variable missing",
-            raw
-        )
-    })?;
+    let expanded = full(raw)
+        .with_context(|| format!("failed to expand path '{raw}': environment variable missing"))?;
     Ok(PathBuf::from(expanded.into_owned()))
 }

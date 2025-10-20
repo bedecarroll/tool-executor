@@ -15,9 +15,14 @@ use cli::Command;
 
 pub use cli::Cli;
 
-pub fn run(cli: Cli) -> color_eyre::Result<()> {
-    init_tracing(&cli);
-    let mut app = app::App::bootstrap(&cli)?;
+/// Run the tx CLI entrypoint.
+///
+/// # Errors
+///
+/// Returns an error when initialization or the chosen command fails to execute.
+pub fn run(cli: &Cli) -> color_eyre::Result<()> {
+    init_tracing(cli);
+    let mut app = app::App::bootstrap(cli)?;
 
     let outcome = match &cli.command {
         Some(Command::Sessions(cmd)) => app.list_sessions(cmd),
@@ -35,11 +40,11 @@ pub fn run(cli: Cli) -> color_eyre::Result<()> {
     match outcome {
         Ok(()) => Ok(()),
         Err(err) => {
-            if let Some(app_error) = err.downcast_ref::<app::AppError>() {
-                if matches!(app_error, app::AppError::ProviderMismatch { .. }) {
-                    eprintln!("{}", app_error);
-                    std::process::exit(2);
-                }
+            if let Some(app_error) = err.downcast_ref::<app::AppError>()
+                && matches!(app_error, app::AppError::ProviderMismatch { .. })
+            {
+                eprintln!("{app_error}");
+                std::process::exit(2);
             }
             Err(err)
         }
@@ -71,6 +76,7 @@ fn desired_level(cli: &Cli) -> tracing::level_filters::LevelFilter {
     }
 }
 
+#[must_use]
 pub fn command() -> clap::Command {
     Cli::command()
 }

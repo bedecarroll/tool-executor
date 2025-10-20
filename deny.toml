@@ -2,12 +2,15 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+  "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [
   "Apache-2.0",
   "CDLA-Permissive-2.0",
+  "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
   "MIT",
@@ -44,4 +47,17 @@ skip = [
   { name = "windows_i686_gnullvm", version = "=0.53.1" },
   { name = "windows_i686_msvc", version = "=0.52.6" },
   { name = "windows_i686_msvc", version = "=0.53.1" },
+  { name = "hashbrown", version = "=0.14.5" },
+  { name = "hashbrown", version = "=0.15.5" },
+  { name = "hashbrown", version = "=0.16.0" },
+  { name = "linux-raw-sys", version = "=0.4.15" },
+  { name = "linux-raw-sys", version = "=0.11.0" },
+  { name = "rustix", version = "=0.38.44" },
+  { name = "rustix", version = "=1.1.2" },
+  { name = "thiserror", version = "=1.0.69" },
+  { name = "thiserror", version = "=2.0.17" },
+  { name = "thiserror-impl", version = "=1.0.69" },
+  { name = "thiserror-impl", version = "=2.0.17" },
+  { name = "unicode-width", version = "=0.1.14" },
+  { name = "unicode-width", version = "=0.2.2" },
 ]

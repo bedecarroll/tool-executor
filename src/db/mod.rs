@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
@@ -14,6 +15,11 @@ pub struct Database {
 }
 
 impl Database {
+    /// Open or create the `SQLite` database at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database file cannot be opened or initialized.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
@@ -26,13 +32,13 @@ impl Database {
     fn configure(&self) -> Result<()> {
         self.conn
             .execute_batch(
-                r#"
+                r"
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
                 PRAGMA temp_store = MEMORY;
                 PRAGMA mmap_size = 134217728;
-                "#,
+                ",
             )
             .context("failed to configure database pragmas")?;
         Ok(())
@@ -40,7 +46,7 @@ impl Database {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -72,31 +78,41 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
             CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
-            "#,
+            ",
         )?;
         Ok(())
     }
 
+    /// Look up an existing session summary by on-disk path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the SELECT query fails.
     pub fn existing_by_path(&self, path: &str) -> Result<Option<SessionSummary>> {
         self.conn
             .prepare(
-                r#"
+                r"
                 SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
                 FROM sessions
                 WHERE path = ?1
-                "#,
+                ",
             )?
-            .query_row([path], |row| map_summary(row))
+            .query_row([path], map_summary)
             .optional()
             .map_err(|err| eyre::eyre!("failed to query session by path: {err}"))
     }
 
+    /// Insert or update a session and its messages in a single transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any insert or delete statement fails.
     pub fn upsert_session(&mut self, ingest: &SessionIngest) -> Result<()> {
         let tx = self.conn.transaction()?;
 
         let s = &ingest.summary;
         tx.execute(
-            r#"
+            r"
             INSERT INTO sessions (id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
@@ -109,14 +125,14 @@ impl Database {
                 last_active = excluded.last_active,
                 size = excluded.size,
                 mtime = excluded.mtime
-            "#,
+            ",
             params![
                 s.id,
                 s.provider,
                 s.label,
                 s.path.to_string_lossy(),
                 s.first_prompt,
-                if s.actionable { 1 } else { 0 },
+                i64::from(s.actionable),
                 s.created_at,
                 s.last_active,
                 s.size,
@@ -162,15 +178,20 @@ impl Database {
         Ok(())
     }
 
+    /// List all session summaries for the specified provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be executed.
     pub fn sessions_for_provider(&self, provider: &str) -> Result<Vec<SessionSummary>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
             FROM sessions
             WHERE provider = ?1
-            "#,
+            ",
         )?;
-        let rows = stmt.query_map([provider], |row| map_summary(row))?;
+        let rows = stmt.query_map([provider], map_summary)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -178,6 +199,11 @@ impl Database {
         Ok(out)
     }
 
+    /// Remove a session and its associated data by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete statement fails.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", [id])
@@ -185,6 +211,11 @@ impl Database {
         Ok(())
     }
 
+    /// Count the number of indexed sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the count query fails.
     pub fn count_sessions(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
@@ -193,6 +224,11 @@ impl Database {
             .map_err(|err| eyre!("failed to count sessions: {err}"))
     }
 
+    /// Retrieve a filtered list of sessions with optional provider, actionable, time, and limit filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query execution fails.
     pub fn list_sessions(
         &self,
         provider: Option<&str>,
@@ -228,11 +264,11 @@ impl Database {
         query.push_str(" ORDER BY last_active DESC");
 
         if let Some(limit) = limit {
-            query.push_str(&format!(" LIMIT {limit}"));
+            let _ = write!(&mut query, " LIMIT {limit}");
         }
 
         let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| map_query(row))?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), map_query)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -240,6 +276,11 @@ impl Database {
         Ok(out)
     }
 
+    /// Search sessions by first user prompt using a LIKE query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if executing the query or mapping results fails.
     pub fn search_first_prompt(
         &self,
         term: &str,
@@ -249,7 +290,7 @@ impl Database {
         let mut query = String::from(
             "SELECT id, provider, label, first_prompt, last_active FROM sessions WHERE first_prompt LIKE ?",
         );
-        let mut params: Vec<SqlValue> = vec![SqlValue::from(format!("%{}%", term))];
+        let mut params: Vec<SqlValue> = vec![SqlValue::from(format!("%{term}%"))];
 
         if let Some(provider) = provider {
             query.push_str(" AND provider = ?");
@@ -263,7 +304,7 @@ impl Database {
         query.push_str(" ORDER BY last_active DESC");
 
         let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| map_search_hit(row))?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), map_search_hit)?;
         let mut hits = Vec::new();
         for row in rows {
             hits.push(row?);
@@ -271,6 +312,11 @@ impl Database {
         Ok(hits)
     }
 
+    /// Search sessions using the full-text index across message content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if executing the FTS query or mapping results fails.
     pub fn search_full_text(
         &self,
         term: &str,
@@ -278,12 +324,12 @@ impl Database {
         actionable_only: bool,
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
-            r#"
+            r"
             SELECT s.id, s.provider, s.label, snippet(messages_fts, -1, '[', ']', '…', 10), s.last_active
             FROM messages_fts
             JOIN sessions s ON s.id = messages_fts.session_id
             WHERE messages_fts MATCH ?
-            "#,
+            ",
         );
         let mut params: Vec<SqlValue> = vec![SqlValue::from(term.to_string())];
 
@@ -299,7 +345,7 @@ impl Database {
         query.push_str(" ORDER BY s.last_active DESC");
 
         let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| map_search_hit(row))?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), map_search_hit)?;
         let mut hits = Vec::new();
         for row in rows {
             hits.push(row?);
@@ -307,17 +353,20 @@ impl Database {
         Ok(hits)
     }
 
+    /// Fetch the full transcript for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any SQL query fails during retrieval.
     pub fn fetch_transcript(&self, id: &str) -> Result<Option<Transcript>> {
         let mut session_stmt = self.conn.prepare(
-            r#"
+            r"
             SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
             FROM sessions
             WHERE id = ?1
-            "#,
+            ",
         )?;
-        let summary = session_stmt
-            .query_row([id], |row| map_summary(row))
-            .optional()?;
+        let summary = session_stmt.query_row([id], map_summary).optional()?;
         let Some(summary) = summary else {
             return Ok(None);
         };
@@ -344,19 +393,29 @@ impl Database {
         }))
     }
 
+    /// Retrieve a session summary by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
     pub fn session_summary(&self, id: &str) -> Result<Option<SessionSummary>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             SELECT id, provider, label, path, first_prompt, actionable, created_at, last_active, size, mtime
             FROM sessions
             WHERE id = ?1
-            "#,
+            ",
         )?;
-        stmt.query_row([id], |row| map_summary(row))
+        stmt.query_row([id], map_summary)
             .optional()
             .map_err(|err| eyre!("failed to fetch session summary for {id}: {err}"))
     }
 
+    /// Determine the provider associated with a session identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
     pub fn provider_for(&self, id: &str) -> Result<Option<String>> {
         self.conn
             .query_row("SELECT provider FROM sessions WHERE id = ?1", [id], |row| {
