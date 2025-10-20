@@ -120,11 +120,9 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
         .unwrap_or_else(|| project_dirs.config_dir().to_path_buf());
 
     let data_dir = env::var("TX_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_dirs.data_dir().to_path_buf());
+        .map_or_else(|_| project_dirs.data_dir().to_path_buf(), PathBuf::from);
     let cache_dir = env::var("TX_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_dirs.cache_dir().to_path_buf());
+        .map_or_else(|_| project_dirs.cache_dir().to_path_buf(), PathBuf::from);
 
     Ok(AppDirectories {
         config_dir,
