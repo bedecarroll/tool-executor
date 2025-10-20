@@ -1,135 +1,54 @@
-use std::{
-    fs::{self, File},
-    io::{self, Write},
-    path::PathBuf,
-};
+pub mod config;
+pub mod db;
+pub mod indexer;
+pub mod pipeline;
+pub mod prompts;
+pub mod session;
 
-use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::{Shell, generate_to};
-use color_eyre::eyre::Context;
-use tracing::level_filters::LevelFilter;
+mod app;
+pub mod cli;
+mod tui;
+mod util;
 
-mod commands;
-mod config;
+use clap::CommandFactory;
+use cli::Command;
 
-use commands::CommandContext;
+pub use cli::Cli;
 
-pub use config::Config;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None, name = "tx", bin_name = "tx")]
-pub struct Cli {
-    /// Override the configuration directory.
-    #[arg(long, value_name = "DIR")]
-    config_dir: Option<PathBuf>,
-    /// Increase log verbosity (use -vv for trace).
-    #[arg(short, long, action = ArgAction::Count, global = true)]
-    verbose: u8,
-    /// Silence all log output.
-    #[arg(short, long, action = ArgAction::SetTrue, global = true)]
-    quiet: bool,
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum Command {
-    /// Print a friendly greeting.
-    Greet(commands::greet::GreetCommand),
-    /// Emit shell completion scripts.
-    Completions {
-        /// Target shell for the generated script.
-        #[arg(value_enum)]
-        shell: CompletionShell,
-        /// Optional directory to write the script into (prints to stdout when omitted).
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-    },
-    /// Generate a man page in roff format.
-    Manpage {
-        /// Optional directory to write the man page into (prints to stdout when omitted).
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-    },
-    /// Update the CLI binary from GitHub releases.
-    #[cfg(feature = "self-update")]
-    SelfUpdate(commands::self_update::SelfUpdateCommand),
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub enum CompletionShell {
-    Bash,
-    Elvish,
-    Fish,
-    PowerShell,
-    Zsh,
-}
-
-/// Execute the CLI entry point.
+/// Run the tx CLI entrypoint.
 ///
 /// # Errors
 ///
-/// Returns an error when writing to standard output fails.
-pub fn run(cli: Cli) -> color_eyre::Result<()> {
-    init_tracing(&cli);
-    let config = Config::load(cli.config_dir.as_deref())?;
-    tracing::debug!(?config, "Loaded configuration");
-    let ctx = CommandContext::new(&config);
+/// Returns an error when initialization or the chosen command fails to execute.
+pub fn run(cli: &Cli) -> color_eyre::Result<()> {
+    init_tracing(cli);
+    let mut app = app::App::bootstrap(cli)?;
 
-    match cli.command {
-        Some(Command::Greet(cmd)) => {
-            commands::greet::run(cmd, &ctx)?;
-        }
-        Some(Command::Completions { shell, dir }) => {
-            let mut command = Cli::command();
-            let bin_name = command.get_name().to_string();
-            let shell_label = shell.label();
-            let actual_shell = shell.into_shell();
-
-            if let Some(output_dir) = dir {
-                fs::create_dir_all(&output_dir)
-                    .with_context(|| format!("failed to create {}", output_dir.display()))?;
-                let path = generate_to(actual_shell, &mut command, &bin_name, &output_dir)
-                    .with_context(|| {
-                        format!("failed to write completions into {}", output_dir.display())
-                    })?;
-                tracing::info!(shell = shell_label, path = %path.display(), "Wrote completion script");
-            } else {
-                let mut stdout = io::stdout();
-                clap_complete::generate(actual_shell, &mut command, bin_name, &mut stdout);
-            }
-        }
-        Some(Command::Manpage { dir }) => {
-            let command = Cli::command();
-            let bin_name = command.get_name().to_string();
-            let man = clap_mangen::Man::new(command.clone());
-            let mut buffer = Vec::new();
-            man.render(&mut buffer)?;
-
-            if let Some(output_dir) = dir {
-                fs::create_dir_all(&output_dir)
-                    .with_context(|| format!("failed to create {}", output_dir.display()))?;
-                let path = output_dir.join(format!("{bin_name}.1"));
-                let mut file = File::create(&path)
-                    .with_context(|| format!("failed to create {}", path.display()))?;
-                file.write_all(&buffer)?;
-                tracing::info!(path = %path.display(), "Wrote man page");
-            } else {
-                io::stdout().write_all(&buffer)?;
-            }
-        }
+    let outcome = match &cli.command {
+        Some(Command::Sessions(cmd)) => app.list_sessions(cmd),
+        Some(Command::Search(cmd)) => app.search(cmd),
+        Some(Command::Launch(cmd)) => app.launch(cmd),
+        Some(Command::Resume(cmd)) => app.resume(cmd),
+        Some(Command::Export(cmd)) => app.export(cmd),
+        Some(Command::Config(cmd)) => app.config(cmd),
+        Some(Command::Doctor) => app.doctor(),
         #[cfg(feature = "self-update")]
-        Some(Command::SelfUpdate(cmd)) => {
-            commands::self_update::run(cmd)?;
-        }
-        None => {
-            let mut command = Cli::command();
-            command.print_help()?;
-            println!();
+        Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
+        None => app.run_ui(),
+    };
+
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(app_error) = err.downcast_ref::<app::AppError>()
+                && matches!(app_error, app::AppError::ProviderMismatch { .. })
+            {
+                eprintln!("{app_error}");
+                std::process::exit(2);
+            }
+            Err(err)
         }
     }
-
-    Ok(())
 }
 
 fn init_tracing(cli: &Cli) {
@@ -145,36 +64,19 @@ fn init_tracing(cli: &Cli) {
         .try_init();
 }
 
-fn desired_level(cli: &Cli) -> LevelFilter {
+fn desired_level(cli: &Cli) -> tracing::level_filters::LevelFilter {
     if cli.quiet {
-        return LevelFilter::ERROR;
+        return tracing::level_filters::LevelFilter::ERROR;
     }
 
     match cli.verbose {
-        0 => LevelFilter::INFO,
-        1 => LevelFilter::DEBUG,
-        _ => LevelFilter::TRACE,
+        0 => tracing::level_filters::LevelFilter::INFO,
+        1 => tracing::level_filters::LevelFilter::DEBUG,
+        _ => tracing::level_filters::LevelFilter::TRACE,
     }
 }
 
-impl CompletionShell {
-    fn into_shell(self) -> Shell {
-        match self {
-            CompletionShell::Bash => Shell::Bash,
-            CompletionShell::Elvish => Shell::Elvish,
-            CompletionShell::Fish => Shell::Fish,
-            CompletionShell::PowerShell => Shell::PowerShell,
-            CompletionShell::Zsh => Shell::Zsh,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            CompletionShell::Bash => "bash",
-            CompletionShell::Elvish => "elvish",
-            CompletionShell::Fish => "fish",
-            CompletionShell::PowerShell => "powershell",
-            CompletionShell::Zsh => "zsh",
-        }
-    }
+#[must_use]
+pub fn command() -> clap::Command {
+    Cli::command()
 }

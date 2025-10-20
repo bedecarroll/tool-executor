@@ -28,6 +28,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
 
+      # rustup caches can omit components; install them explicitly to guarantee rustfmt/clippy availability.
+      - name: Install rust components
+        run: rustup component add --toolchain 1.90.0 rustfmt clippy llvm-tools-preview
+
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
         with:
@@ -56,6 +60,9 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
+
+      - name: Install rust components
+        run: rustup component add --toolchain 1.90.0 rustfmt clippy llvm-tools-preview
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
