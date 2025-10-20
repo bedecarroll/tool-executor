@@ -28,6 +28,10 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v3
 
+      # Ensure rustfmt/clippy components exist even when the cached toolchain skipped component installs.
+      - name: Provision toolchain
+        run: mise install
+
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
         with:
@@ -56,6 +60,9 @@ jobs:
 
       - name: Install mise
         uses: jdx/mise-action@v3
+
+      - name: Provision toolchain
+        run: mise install
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
