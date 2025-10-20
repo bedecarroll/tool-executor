@@ -12,10 +12,12 @@ fn base_command(temp: &TempDir) -> Command {
     let data_dir = temp.child("data-root");
     data_dir.create_dir_all().unwrap();
     cmd.env("XDG_DATA_HOME", data_dir.path());
+    cmd.env("TX_DATA_DIR", data_dir.path());
 
     let cache_dir = temp.child("cache-root");
     cache_dir.create_dir_all().unwrap();
     cmd.env("XDG_CACHE_HOME", cache_dir.path());
+    cmd.env("TX_CACHE_DIR", cache_dir.path());
     cmd
 }
 
@@ -50,11 +52,24 @@ fn launch_dry_run_prints_pipeline() -> color_eyre::Result<()> {
     config_dir.create_dir_all()?;
     let sessions_dir = temp.child("sessions");
     sessions_dir.create_dir_all()?;
-    let config_contents = format!(
-        "[providers.echo]\nbin = \"echo\"\nflags = []\nenv = []\nsession_roots = [\"{}\"]\n",
-        sessions_dir.path().display()
-    );
     let config_path = config_dir.child("config.toml");
+    let mut root = toml::map::Map::new();
+    let mut providers = toml::map::Map::new();
+    let mut echo = toml::map::Map::new();
+    let session_root = sessions_dir.path().to_string_lossy().into_owned();
+    echo.insert("bin".into(), toml::Value::String("echo".into()));
+    echo.insert(
+        "flags".into(),
+        toml::Value::Array(Vec::<toml::Value>::new()),
+    );
+    echo.insert("env".into(), toml::Value::Array(Vec::<toml::Value>::new()));
+    echo.insert(
+        "session_roots".into(),
+        toml::Value::Array(vec![toml::Value::String(session_root)]),
+    );
+    providers.insert("echo".into(), toml::Value::Table(echo));
+    root.insert("providers".into(), toml::Value::Table(providers));
+    let config_contents = toml::to_string(&toml::Value::Table(root))?;
     std::fs::write(config_path.path(), config_contents)?;
     let written = std::fs::read_to_string(config_path.path())?;
     toml::from_str::<toml::Value>(&written).expect("valid launch config");

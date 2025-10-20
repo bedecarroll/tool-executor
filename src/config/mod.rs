@@ -119,8 +119,12 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
         .or_else(|| env::var("TX_CONFIG_DIR").ok().map(PathBuf::from))
         .unwrap_or_else(|| project_dirs.config_dir().to_path_buf());
 
-    let data_dir = project_dirs.data_dir().to_path_buf();
-    let cache_dir = project_dirs.cache_dir().to_path_buf();
+    let data_dir = env::var("TX_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| project_dirs.data_dir().to_path_buf());
+    let cache_dir = env::var("TX_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| project_dirs.cache_dir().to_path_buf());
 
     Ok(AppDirectories {
         config_dir,
