@@ -35,7 +35,7 @@ crossterm = "0.28"
 directories = "6.0.0"
 humantime = "2.1"
 indexmap = { version = "2.2", features = ["serde"] }
-itertools = "0.13"
+itertools = "0.14"
 ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
 regex = "1.11"
 rusqlite = { version = "0.31", features = ["bundled", "modern_sqlite"] }
