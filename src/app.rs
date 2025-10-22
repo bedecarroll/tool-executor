@@ -24,7 +24,7 @@ use crate::indexer::{IndexError, IndexReport, Indexer};
 use crate::pipeline::{Invocation, PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::{PromptAssembler, PromptStatus};
 use crate::providers;
-use crate::session::{SearchHit, SessionQuery, SessionSummary, Transcript};
+use crate::session::{SessionSummary, Transcript};
 use crate::tui;
 use crate::util;
 
@@ -35,6 +35,7 @@ pub enum AppError {
 }
 
 pub struct App<'cli> {
+    #[cfg_attr(not(feature = "self-update"), allow(dead_code))]
     pub cli: &'cli Cli,
     pub loaded: LoadedConfig,
     pub db: Database,
@@ -42,7 +43,6 @@ pub struct App<'cli> {
 }
 
 pub struct UiContext<'app> {
-    pub cli: &'app Cli,
     pub config: &'app crate::config::model::Config,
     pub directories: &'app crate::config::AppDirectories,
     pub db: &'app mut Database,
@@ -85,7 +85,7 @@ impl<'cli> App<'cli> {
     /// # Errors
     ///
     /// Returns an error if the database search fails or the results cannot be
-    /// serialized to JSON when requested.
+    /// serialized to JSON.
     pub fn search(&self, cmd: &SearchCommand) -> Result<()> {
         let since_epoch = cmd
             .since
@@ -96,28 +96,29 @@ impl<'cli> App<'cli> {
             .map(str::trim)
             .filter(|term| !term.is_empty());
 
+        if cmd.role.is_some() && (!cmd.full_text || term.is_none()) {
+            return Err(eyre!(
+                "--role requires --full-text and a non-empty search term"
+            ));
+        }
+
         if term.is_none() {
             let sessions =
                 self.db
                     .list_sessions(cmd.provider.as_deref(), true, since_epoch, cmd.limit)?;
 
-            if cmd.json || self.cli.json {
-                let mut payload = Vec::new();
-                for session in &sessions {
-                    if let Some(summary) = self.db.session_summary(&session.id)? {
-                        payload.push(summary_to_json(&summary, summary.first_prompt.as_deref()));
-                    }
+            let mut payload = Vec::new();
+            for session in &sessions {
+                if let Some(summary) = self.db.session_summary(&session.id)? {
+                    payload.push(summary_to_json(
+                        &summary,
+                        summary.first_prompt.as_deref(),
+                        None,
+                    ));
                 }
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-                return Ok(());
             }
 
-            if sessions.is_empty() {
-                println!("No sessions found.");
-                return Ok(());
-            }
-
-            print_sessions_table(&sessions);
+            println!("{}", serde_json::to_string_pretty(&payload)?);
             return Ok(());
         }
 
@@ -130,8 +131,18 @@ impl<'cli> App<'cli> {
                 .search_first_prompt(term, cmd.provider.as_deref(), false)?
         };
 
+        let role_filter = cmd.role.as_deref();
+
         let mut detailed = Vec::new();
         for hit in hits {
+            if let Some(filter) = role_filter
+                && !hit
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case(filter))
+            {
+                continue;
+            }
             if let Some(summary) = self.db.session_summary(&hit.session_id)? {
                 if let Some(cutoff) = since_epoch
                     && summary.last_active.is_some_and(|last| last < cutoff)
@@ -148,25 +159,15 @@ impl<'cli> App<'cli> {
             detailed.truncate(limit);
         }
 
-        if cmd.json || self.cli.json {
-            let payload: Vec<_> = detailed
-                .iter()
-                .map(|(hit, summary)| {
-                    let snippet = hit.snippet.as_deref().or(summary.first_prompt.as_deref());
-                    summary_to_json(summary, snippet)
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-            return Ok(());
-        }
-
-        if detailed.is_empty() {
-            println!("No matches found.");
-            return Ok(());
-        }
-
-        let display_hits: Vec<SearchHit> = detailed.iter().map(|(hit, _)| hit.clone()).collect();
-        print_search_table(&display_hits);
+        let payload: Vec<_> = detailed
+            .iter()
+            .map(|(hit, summary)| {
+                let snippet = hit.snippet.as_deref().or(summary.first_prompt.as_deref());
+                let snippet_role = hit.role.as_deref();
+                summary_to_json(summary, snippet, snippet_role)
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         Ok(())
     }
 
@@ -192,8 +193,12 @@ impl<'cli> App<'cli> {
         };
 
         let plan = build_pipeline(&request)?;
-        if cmd.dry_run || self.cli.emit_command {
-            let mode = if self.cli.json {
+        if cmd.emit_json && !(cmd.dry_run || cmd.emit_command) {
+            return Err(eyre!("--emit-json requires --dry-run or --emit-command"));
+        }
+
+        if cmd.dry_run || cmd.emit_command {
+            let mode = if cmd.emit_json {
                 EmitMode::Json
             } else {
                 EmitMode::Plain { newline: true }
@@ -267,8 +272,12 @@ impl<'cli> App<'cli> {
         };
 
         let plan = build_pipeline(&request)?;
-        if cmd.dry_run || self.cli.emit_command {
-            let mode = if self.cli.json {
+        if cmd.emit_json && !(cmd.dry_run || cmd.emit_command) {
+            return Err(eyre!("--emit-json requires --dry-run or --emit-command"));
+        }
+
+        if cmd.dry_run || cmd.emit_command {
+            let mode = if cmd.emit_json {
                 EmitMode::Json
             } else {
                 EmitMode::Plain { newline: true }
@@ -381,13 +390,8 @@ impl<'cli> App<'cli> {
     /// Returns an error if the TUI cannot be displayed or if underlying database
     /// interactions fail during operation.
     pub fn run_ui(&mut self) -> Result<()> {
-        if self.cli.emit_command {
-            return Err(eyre!("--emit-command requires a non-interactive selection"));
-        }
-
         let prompt = self.prompt.as_mut();
         let mut ctx = UiContext {
-            cli: self.cli,
             config: &self.loaded.config,
             directories: &self.loaded.directories,
             db: &mut self.db,
@@ -569,7 +573,11 @@ fn parse_vars(vars: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-fn summary_to_json(summary: &SessionSummary, snippet: Option<&str>) -> serde_json::Value {
+fn summary_to_json(
+    summary: &SessionSummary,
+    snippet: Option<&str>,
+    snippet_role: Option<&str>,
+) -> serde_json::Value {
     json!({
         "id": summary.id,
         "provider": summary.provider,
@@ -584,53 +592,8 @@ fn summary_to_json(summary: &SessionSummary, snippet: Option<&str>) -> serde_jso
         "size": summary.size,
         "mtime": summary.mtime,
         "snippet": snippet,
+        "snippet_role": snippet_role,
     })
-}
-
-fn print_sessions_table(sessions: &[SessionQuery]) {
-    println!(
-        "{:<32} {:<12} {:<14} {:<10} {:<19}",
-        "Session ID", "Provider", "Label", "Actionable", "Last Active"
-    );
-    println!("{}", "-".repeat(96));
-    for session in sessions {
-        println!(
-            "{:<32} {:<12} {:<14} {:<10} {:<19}",
-            truncate(&session.id, 32),
-            session.provider,
-            truncate(session.label.as_deref().unwrap_or("-"), 14),
-            if session.actionable { "yes" } else { "no" },
-            util::format_timestamp(session.last_active),
-        );
-    }
-}
-
-fn print_search_table(hits: &[SearchHit]) {
-    println!(
-        "{:<32} {:<12} {:<14} {:<19} Snippet",
-        "Session ID", "Provider", "Label", "Last Active"
-    );
-    println!("{}", "-".repeat(120));
-    for hit in hits {
-        println!(
-            "{:<32} {:<12} {:<14} {:<19} {}",
-            truncate(&hit.session_id, 32),
-            hit.provider,
-            truncate(hit.label.as_deref().unwrap_or("-"), 14),
-            util::format_timestamp(hit.last_active),
-            truncate(hit.snippet.as_deref().unwrap_or(""), 50),
-        );
-    }
-}
-
-fn truncate(input: &str, max: usize) -> String {
-    if input.chars().count() <= max {
-        input.to_string()
-    } else {
-        let mut out = input.chars().take(max - 1).collect::<String>();
-        out.push('…');
-        out
-    }
 }
 
 fn export_markdown(transcript: &Transcript) {

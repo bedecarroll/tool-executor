@@ -10,7 +10,7 @@ use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, Transcript,
 };
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 pub struct Database {
     conn: Connection,
@@ -99,8 +99,7 @@ impl Database {
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                 session_id UNINDEXED,
                 role UNINDEXED,
-                content,
-                content=''
+                content
             );
 
             CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
@@ -226,15 +225,10 @@ impl Database {
 
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO messages_fts (rowid, session_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO messages_fts (session_id, role, content) VALUES (?1, ?2, ?3)",
             )?;
             for message in &ingest.messages {
-                stmt.execute(params![
-                    message.index + 1,
-                    message.session_id,
-                    message.role,
-                    message.content,
-                ])?;
+                stmt.execute(params![message.session_id, message.role, message.content,])?;
             }
         }
 
@@ -364,7 +358,7 @@ impl Database {
         actionable_only: bool,
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
-            "SELECT id, provider, label, first_prompt, last_active, actionable FROM sessions WHERE first_prompt LIKE ?",
+            "SELECT id, provider, label, NULL AS role, first_prompt, last_active, actionable FROM sessions WHERE first_prompt LIKE ?",
         );
         let mut params: Vec<SqlValue> = vec![SqlValue::from(format!("%{term}%"))];
 
@@ -401,7 +395,7 @@ impl Database {
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
             r"
-            SELECT s.id, s.provider, s.label, snippet(messages_fts, -1, '[', ']', '…', 10), s.last_active, s.actionable
+            SELECT s.id, s.provider, s.label, messages_fts.role, messages_fts.content, s.last_active, s.actionable
             FROM messages_fts
             JOIN sessions s ON s.id = messages_fts.session_id
             WHERE messages_fts MATCH ?
@@ -575,8 +569,89 @@ fn map_search_hit(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
         session_id: row.get(0)?,
         provider: row.get(1)?,
         label: row.get(2)?,
-        snippet: row.get(3)?,
-        last_active: row.get(4)?,
-        actionable: row.get::<_, i64>(5)? != 0,
+        role: row.get(3)?,
+        snippet: row.get(4)?,
+        last_active: row.get(5)?,
+        actionable: row.get::<_, i64>(6)? != 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn full_text_search_is_case_insensitive() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut db = Database { conn };
+        db.configure()?;
+        db.migrate()?;
+
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "session-1".into(),
+            provider: "codex".into(),
+            label: Some("demo".into()),
+            path: PathBuf::from("session-1.jsonl"),
+            uuid: None,
+            first_prompt: Some("Context awareness request".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 42,
+            mtime: now,
+        };
+
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Context awareness should be case insensitive.",
+            None,
+            Some(now),
+        );
+        message.is_first = true;
+
+        let ingest = SessionIngest::new(summary.clone(), vec![message]);
+        db.upsert_session(&ingest)?;
+
+        let lower = db.search_full_text("context", None, false)?;
+        assert!(
+            !lower.is_empty(),
+            "expected lower-case search to return results"
+        );
+        let lower_hit = lower
+            .iter()
+            .find(|hit| hit.session_id == summary.id)
+            .expect("summary should be present in lower-case search");
+        assert_eq!(
+            lower_hit.role.as_deref(),
+            Some("user"),
+            "expected role to be captured for lower-case search"
+        );
+        assert_eq!(
+            lower_hit.snippet.as_deref(),
+            Some("Context awareness should be case insensitive.")
+        );
+
+        let upper = db.search_full_text("Context", None, false)?;
+        assert!(
+            !upper.is_empty(),
+            "expected upper-case search to return results"
+        );
+        assert_eq!(lower.len(), upper.len());
+        let upper_hit = upper
+            .iter()
+            .find(|hit| hit.session_id == summary.id)
+            .expect("summary should be present in upper-case search");
+        assert_eq!(upper_hit.role.as_deref(), Some("user"));
+        assert_eq!(
+            upper_hit.snippet.as_deref(),
+            Some("Context awareness should be case insensitive.")
+        );
+        Ok(())
+    }
 }
