@@ -8,13 +8,14 @@ use color_eyre::eyre::{WrapErr, eyre};
 use regex::Regex;
 use serde_json::json;
 use std::sync::LazyLock;
-use tracing::info;
+use tracing::debug;
 use which::which;
 
 #[cfg(feature = "self-update")]
 use crate::cli::SelfUpdateCommand;
 use crate::cli::{
-    Cli, ConfigCommand, ExportCommand, LaunchCommand, ResumeCommand, SearchCommand, SessionsCommand,
+    Cli, ConfigCommand, ConfigDefaultCommand, ExportCommand, LaunchCommand, ResumeCommand,
+    SearchCommand,
 };
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
@@ -22,7 +23,8 @@ use crate::db::Database;
 use crate::indexer::{IndexError, IndexReport, Indexer};
 use crate::pipeline::{Invocation, PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::{PromptAssembler, PromptStatus};
-use crate::session::{SearchHit, SessionQuery, Transcript};
+use crate::providers;
+use crate::session::{SearchHit, SessionQuery, SessionSummary, Transcript};
 use crate::tui;
 use crate::util;
 
@@ -42,6 +44,7 @@ pub struct App<'cli> {
 pub struct UiContext<'app> {
     pub cli: &'app Cli,
     pub config: &'app crate::config::model::Config,
+    pub directories: &'app crate::config::AppDirectories,
     pub db: &'app mut Database,
     pub prompt: Option<&'app mut PromptAssembler>,
 }
@@ -77,38 +80,6 @@ impl<'cli> App<'cli> {
         })
     }
 
-    /// Render the sessions listing according to the provided filters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if querying the session database fails or JSON serialization
-    /// of the output cannot be completed.
-    pub fn list_sessions(&self, cmd: &SessionsCommand) -> Result<()> {
-        let since_epoch = cmd
-            .since
-            .map(|seconds| util::unix_timestamp().saturating_sub(seconds));
-        let sessions = self.db.list_sessions(
-            cmd.provider.as_deref(),
-            cmd.actionable,
-            since_epoch,
-            cmd.limit,
-        )?;
-
-        if cmd.json || self.cli.json {
-            let payload: Vec<_> = sessions.iter().map(session_to_json).collect();
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-            return Ok(());
-        }
-
-        if sessions.is_empty() {
-            println!("No sessions found.");
-            return Ok(());
-        }
-
-        print_sessions_table(&sessions);
-        Ok(())
-    }
-
     /// Execute a sessions search (first prompt or full-text) depending on flags.
     ///
     /// # Errors
@@ -116,26 +87,86 @@ impl<'cli> App<'cli> {
     /// Returns an error if the database search fails or the results cannot be
     /// serialized to JSON when requested.
     pub fn search(&self, cmd: &SearchCommand) -> Result<()> {
+        let since_epoch = cmd
+            .since
+            .map(|seconds| util::unix_timestamp().saturating_sub(seconds));
+        let term = cmd
+            .term
+            .as_deref()
+            .map(str::trim)
+            .filter(|term| !term.is_empty());
+
+        if term.is_none() {
+            let sessions =
+                self.db
+                    .list_sessions(cmd.provider.as_deref(), true, since_epoch, cmd.limit)?;
+
+            if cmd.json || self.cli.json {
+                let mut payload = Vec::new();
+                for session in &sessions {
+                    if let Some(summary) = self.db.session_summary(&session.id)? {
+                        payload.push(summary_to_json(&summary, summary.first_prompt.as_deref()));
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            if sessions.is_empty() {
+                println!("No sessions found.");
+                return Ok(());
+            }
+
+            print_sessions_table(&sessions);
+            return Ok(());
+        }
+
+        let term = term.unwrap();
         let hits = if cmd.full_text {
             self.db
-                .search_full_text(&cmd.term, cmd.provider.as_deref(), cmd.actionable)?
+                .search_full_text(term, cmd.provider.as_deref(), false)?
         } else {
             self.db
-                .search_first_prompt(&cmd.term, cmd.provider.as_deref(), cmd.actionable)?
+                .search_first_prompt(term, cmd.provider.as_deref(), false)?
         };
 
+        let mut detailed = Vec::new();
+        for hit in hits {
+            if let Some(summary) = self.db.session_summary(&hit.session_id)? {
+                if let Some(cutoff) = since_epoch
+                    && summary.last_active.is_some_and(|last| last < cutoff)
+                {
+                    continue;
+                }
+                detailed.push((hit, summary));
+            }
+        }
+
+        if let Some(limit) = cmd.limit
+            && detailed.len() > limit
+        {
+            detailed.truncate(limit);
+        }
+
         if cmd.json || self.cli.json {
-            let payload: Vec<_> = hits.iter().map(search_to_json).collect();
+            let payload: Vec<_> = detailed
+                .iter()
+                .map(|(hit, summary)| {
+                    let snippet = hit.snippet.as_deref().or(summary.first_prompt.as_deref());
+                    summary_to_json(summary, snippet)
+                })
+                .collect();
             println!("{}", serde_json::to_string_pretty(&payload)?);
             return Ok(());
         }
 
-        if hits.is_empty() {
+        if detailed.is_empty() {
             println!("No matches found.");
             return Ok(());
         }
 
-        print_search_table(&hits);
+        let display_hits: Vec<SearchHit> = detailed.iter().map(|(hit, _)| hit.clone()).collect();
+        print_search_table(&display_hits);
         Ok(())
     }
 
@@ -162,7 +193,12 @@ impl<'cli> App<'cli> {
 
         let plan = build_pipeline(&request)?;
         if cmd.dry_run || self.cli.emit_command {
-            emit_command(&plan, cmd.dry_run || self.cli.json)?;
+            let mode = if self.cli.json {
+                EmitMode::Json
+            } else {
+                EmitMode::Plain { newline: true }
+            };
+            emit_command(&plan, mode)?;
             return Ok(());
         }
 
@@ -203,6 +239,15 @@ impl<'cli> App<'cli> {
             Path::to_path_buf,
         );
 
+        let resume_plan = providers::resume_info(&summary)?;
+        let mut provider_args = Vec::new();
+        let mut resume_token = None;
+        if let Some(mut plan) = resume_plan {
+            resume_token = plan.resume_token.take();
+            provider_args.extend(plan.args);
+        }
+        provider_args.extend(cmd.provider_args.clone());
+
         let request = PipelineRequest {
             config: &self.loaded.config,
             provider_hint: Some(summary.provider.as_str()),
@@ -210,18 +255,25 @@ impl<'cli> App<'cli> {
             additional_pre: cmd.pre_snippets.clone(),
             additional_post: cmd.post_snippets.clone(),
             wrap: cmd.wrap.as_deref(),
-            provider_args: cmd.provider_args.clone(),
+            provider_args,
             vars,
             session: SessionContext {
                 id: Some(summary.id.clone()),
                 label: summary.label.clone(),
+                path: Some(summary.path.to_string_lossy().to_string()),
+                resume_token,
             },
             cwd: working_dir,
         };
 
         let plan = build_pipeline(&request)?;
         if cmd.dry_run || self.cli.emit_command {
-            emit_command(&plan, cmd.dry_run || self.cli.json)?;
+            let mode = if self.cli.json {
+                EmitMode::Json
+            } else {
+                EmitMode::Plain { newline: true }
+            };
+            emit_command(&plan, mode)?;
             return Ok(());
         }
 
@@ -239,11 +291,7 @@ impl<'cli> App<'cli> {
             .fetch_transcript(&cmd.session_id)?
             .ok_or_else(|| eyre!("session '{}' not found", cmd.session_id))?;
 
-        if cmd.md {
-            export_markdown(&transcript);
-        } else {
-            export_human(&transcript);
-        }
+        export_markdown(&transcript);
 
         Ok(())
     }
@@ -265,6 +313,7 @@ impl<'cli> App<'cli> {
                 Ok(())
             }
             ConfigCommand::Lint => self.config_lint(),
+            ConfigCommand::Default(cmd) => self.config_default(cmd),
         }
     }
 
@@ -340,6 +389,7 @@ impl<'cli> App<'cli> {
         let mut ctx = UiContext {
             cli: self.cli,
             config: &self.loaded.config,
+            directories: &self.loaded.directories,
             db: &mut self.db,
             prompt,
         };
@@ -378,6 +428,23 @@ impl<'cli> App<'cli> {
                 profile.wrap.as_deref().unwrap_or("-"),
             );
         }
+    }
+
+    /// Print the bundled default configuration to stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to stdout fails.
+    fn config_default(&self, cmd: &ConfigDefaultCommand) -> Result<()> {
+        let mut stdout = io::stdout().lock();
+        if cmd.raw {
+            stdout.write_all(crate::config::default_template().as_bytes())?;
+        } else {
+            let config = crate::config::bundled_default_config(&self.loaded.directories);
+            stdout.write_all(config.as_bytes())?;
+        }
+        stdout.flush()?;
+        Ok(())
     }
 
     fn config_dump(&self) -> Result<()> {
@@ -436,13 +503,26 @@ impl<'cli> App<'cli> {
     }
 }
 
-pub(crate) fn emit_command(plan: &PipelinePlan, json: bool) -> Result<()> {
-    if json {
-        let payload = json!({ "command": plan.display, "env": plan.env });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        print!("{}", plan.display);
-        io::stdout().flush()?;
+#[derive(Debug, Clone, Copy)]
+pub enum EmitMode {
+    Json,
+    Plain { newline: bool },
+}
+
+pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
+    match mode {
+        EmitMode::Json => {
+            let payload = json!({ "command": plan.display, "env": plan.env });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        EmitMode::Plain { newline } => {
+            if newline {
+                println!("{}", plan.display);
+            } else {
+                print!("{}", plan.display);
+                io::stdout().flush()?;
+            }
+        }
     }
     Ok(())
 }
@@ -489,24 +569,21 @@ fn parse_vars(vars: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-fn session_to_json(session: &SessionQuery) -> serde_json::Value {
+fn summary_to_json(summary: &SessionSummary, snippet: Option<&str>) -> serde_json::Value {
     json!({
-        "id": session.id,
-        "provider": session.provider,
-        "label": session.label,
-        "first_prompt": session.first_prompt,
-        "actionable": session.actionable,
-        "last_active": session.last_active,
-    })
-}
-
-fn search_to_json(hit: &SearchHit) -> serde_json::Value {
-    json!({
-        "session_id": hit.session_id,
-        "provider": hit.provider,
-        "label": hit.label,
-        "snippet": hit.snippet,
-        "last_active": hit.last_active,
+        "id": summary.id,
+        "provider": summary.provider,
+        "label": summary.label,
+        "path": summary.path.to_string_lossy(),
+        "uuid": summary.uuid,
+        "first_prompt": summary.first_prompt,
+        "actionable": summary.actionable,
+        "created_at": summary.created_at,
+        "started_at": summary.started_at,
+        "last_active": summary.last_active,
+        "size": summary.size,
+        "mtime": summary.mtime,
+        "snippet": snippet,
     })
 }
 
@@ -557,56 +634,14 @@ fn truncate(input: &str, max: usize) -> String {
 }
 
 fn export_markdown(transcript: &Transcript) {
-    println!("# Session {}", transcript.session.id);
-    println!("- Provider: {}", transcript.session.provider);
-    if let Some(label) = &transcript.session.label {
-        println!("- Label: {label}");
-    }
-    println!(
-        "- Created: {}",
-        util::format_timestamp(transcript.session.created_at)
-    );
-    println!(
-        "- Last active: {}",
-        util::format_timestamp(transcript.session.last_active)
-    );
-    println!();
-    println!("## Transcript");
-
-    for message in &transcript.messages {
-        println!("\n### {}", message.role);
-        println!();
-        println!("{}", message.content);
-    }
-}
-
-fn export_human(transcript: &Transcript) {
-    println!(
-        "Session {} ({})",
-        transcript.session.id, transcript.session.provider
-    );
-    if let Some(label) = &transcript.session.label {
-        println!("Label: {label}");
-    }
-    println!(
-        "Created: {}",
-        util::format_timestamp(transcript.session.created_at)
-    );
-    println!(
-        "Last active: {}",
-        util::format_timestamp(transcript.session.last_active)
-    );
-    println!("{}", "-".repeat(48));
-    for message in &transcript.messages {
-        println!("{}:", message.role);
-        println!("{}", message.content);
-        println!("{}", "-".repeat(48));
+    for line in transcript.markdown_lines(None) {
+        println!("{line}");
     }
 }
 
 fn log_index_report(report: &IndexReport) {
     if report.errors.is_empty() {
-        info!(
+        debug!(
             scanned = report.scanned,
             updated = report.updated,
             skipped = report.skipped,
@@ -615,7 +650,7 @@ fn log_index_report(report: &IndexReport) {
         );
     } else {
         for IndexError { path, error } in &report.errors {
-            tracing::warn!(path = %path.display(), error = %error, "session ingestion failure");
+            tracing::warn!(path = %path.display(), error = ?error, "session ingestion failure");
         }
     }
 }

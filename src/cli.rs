@@ -26,8 +26,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// List known sessions.
-    Sessions(SessionsCommand),
     /// Search session transcripts.
     Search(SearchCommand),
     /// Launch a new session pipeline.
@@ -47,37 +45,21 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
-pub struct SessionsCommand {
-    /// Restrict to a specific provider.
-    #[arg(long)]
-    pub provider: Option<String>,
-    /// Only include sessions active since this duration ago (e.g. 7d, 12h).
-    #[arg(long, value_parser = parse_since)]
-    pub since: Option<i64>,
-    /// Only include actionable sessions.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub actionable: bool,
-    /// Emit JSON instead of a table.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub json: bool,
-    /// Maximum number of sessions to display.
-    #[arg(long)]
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Args)]
 pub struct SearchCommand {
-    /// Search term to find.
-    pub term: String,
+    /// Search term to find (omit for latest sessions).
+    pub term: Option<String>,
     /// Search the full transcript instead of just the first prompt.
     #[arg(long, action = ArgAction::SetTrue)]
     pub full_text: bool,
     /// Restrict to a specific provider.
     #[arg(long)]
     pub provider: Option<String>,
-    /// Only include actionable sessions.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub actionable: bool,
+    /// Only include sessions active since this duration ago (e.g. 7d, 12h).
+    #[arg(long, value_parser = parse_since)]
+    pub since: Option<i64>,
+    /// Maximum number of sessions to return.
+    #[arg(long)]
+    pub limit: Option<usize>,
     /// Emit JSON results.
     #[arg(long, action = ArgAction::SetTrue)]
     pub json: bool,
@@ -141,9 +123,6 @@ pub struct ResumeCommand {
 pub struct ExportCommand {
     /// Session identifier to export.
     pub session_id: String,
-    /// Emit Markdown to stdout.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub md: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +135,15 @@ pub enum ConfigCommand {
     Where,
     /// Validate configuration references.
     Lint,
+    /// Print the bundled default configuration.
+    Default(ConfigDefaultCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigDefaultCommand {
+    /// Show the raw bundled template without resolving runtime paths.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub raw: bool,
 }
 
 fn parse_since(raw: &str) -> Result<i64, String> {

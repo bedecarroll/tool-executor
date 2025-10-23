@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -9,11 +9,15 @@ use color_eyre::Result;
 use color_eyre::eyre::{self, Context, eyre};
 use itertools::Itertools;
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
 
 use crate::config::model::{Config, ProviderConfig};
 use crate::db::Database;
-use crate::session::{MessageRecord, SessionIngest, SessionSummary};
+use crate::session::{
+    MessageRecord, SessionIngest, SessionSummary, fallback_session_uuid, session_uuid_from_value,
+};
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -157,10 +161,60 @@ impl<'a> Indexer<'a> {
             .map(str::to_string)
             .or_else(|| Some(relative.clone()));
 
+        let mut state = Self::collect_ingest_state(&session_id, path)?;
+
+        if state.messages.is_empty() {
+            Self::handle_empty_transcript(
+                &mut state.messages,
+                &mut state.first_prompt,
+                state.fallback_preview,
+                state.instructions_preview,
+                state.saw_instruction_block,
+                state.saw_any_record,
+                &session_id,
+            )?;
+        }
+
+        if let Some(first) = state.messages.first_mut() {
+            first.is_first = true;
+        }
+
+        let actionable = state
+            .messages
+            .iter()
+            .any(|message| message.role.eq_ignore_ascii_case("user"));
+        if state.first_prompt.is_none() {
+            state.first_prompt = state
+                .messages
+                .first()
+                .map(|message| message.content.clone());
+        }
+        let session_uuid = state.session_uuid.or_else(|| fallback_session_uuid(path));
+        let started_at = state.earliest_timestamp.or(created_at);
+        let last_active = state.latest_timestamp.unwrap_or(mtime);
+        let summary = SessionSummary {
+            id: session_id,
+            provider: provider.name.clone(),
+            label,
+            path: path.to_path_buf(),
+            uuid: session_uuid,
+            first_prompt: state.first_prompt,
+            actionable,
+            created_at,
+            started_at,
+            last_active: Some(last_active),
+            size,
+            mtime,
+        };
+
+        Ok(SessionIngest::new(summary, state.messages))
+    }
+
+    fn collect_ingest_state(session_id: &str, path: &Path) -> Result<IngestState> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let mut messages = Vec::new();
-        let mut first_prompt: Option<String> = None;
+        let mut state = IngestState::default();
+        let mut seen_messages: HashMap<(String, String, Option<i64>), usize> = HashMap::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -176,38 +230,149 @@ impl<'a> Indexer<'a> {
                     continue;
                 }
             };
+            state.saw_any_record = true;
+
+            if state.session_uuid.is_none() {
+                state.session_uuid = session_uuid_from_value(&value);
+            }
+
+            if state.instructions_preview.is_none()
+                && let Some(instructions) = value
+                    .get("payload")
+                    .and_then(|payload| payload.get("instructions"))
+                    .and_then(Value::as_str)
+            {
+                state.instructions_preview = summarize_instructions(instructions);
+            }
+
+            let source = value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let timestamp = parse_timestamp(&value);
+            if let Some(ts) = timestamp {
+                state.earliest_timestamp = Some(
+                    state
+                        .earliest_timestamp
+                        .map_or(ts, |current| current.min(ts)),
+                );
+                state.latest_timestamp =
+                    Some(state.latest_timestamp.map_or(ts, |current| current.max(ts)));
+            }
 
             for (role, content) in extract_messages(&value) {
+                let trimmed_content = content.trim();
+                if state.fallback_preview.is_none()
+                    && let Some(line) = trimmed_content
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty() && !line.starts_with('<'))
+                {
+                    state.fallback_preview =
+                        summarize_instructions(line).or_else(|| Some(line.to_string()));
+                }
+
+                if trimmed_content.starts_with("<user_instructions>")
+                    || trimmed_content.starts_with("</user_instructions>")
+                {
+                    state.saw_instruction_block = true;
+                }
+
                 if let Some(clean) = clean_text(&content) {
-                    let index = i64::try_from(messages.len()).unwrap_or(i64::MAX);
-                    if first_prompt.is_none() && role.eq_ignore_ascii_case("user") {
-                        first_prompt = Some(clean.clone());
+                    let normalized_role = role.to_ascii_lowercase();
+                    let key = (normalized_role.clone(), clean.clone(), timestamp);
+                    if let Some(existing_idx) = seen_messages.get(&key) {
+                        if let Some(existing) = state.messages.get_mut(*existing_idx) {
+                            update_existing_source(existing, source.as_ref());
+                        }
+                        continue;
                     }
-                    messages.push(MessageRecord::new(&session_id, index, role, clean));
+
+                    let is_user = normalized_role == "user";
+                    let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
+                    if state.first_prompt.is_none() && is_user {
+                        state.first_prompt = Some(clean.clone());
+                    }
+                    state.messages.push(MessageRecord::new(
+                        session_id,
+                        index,
+                        role,
+                        clean,
+                        source.clone(),
+                        timestamp,
+                    ));
+                    seen_messages.insert(key, state.messages.len() - 1);
                 }
             }
         }
 
-        if messages.is_empty() {
-            return Err(eyre!("no messages discovered in session"));
+        Ok(state)
+    }
+
+    fn handle_empty_transcript(
+        messages: &mut Vec<MessageRecord>,
+        first_prompt: &mut Option<String>,
+        fallback_preview: Option<String>,
+        instructions_preview: Option<String>,
+        saw_instruction_block: bool,
+        saw_any_record: bool,
+        session_id: &str,
+    ) -> Result<()> {
+        let mut preview = fallback_preview.or(instructions_preview).or_else(|| {
+            if saw_instruction_block {
+                Some("Session bootstrapped (instructions only)".to_string())
+            } else {
+                None
+            }
+        });
+
+        if preview.is_none() && saw_any_record {
+            preview = Some("Session created (no transcript yet)".to_string());
         }
 
-        let actionable = first_prompt.is_some();
-        let summary = SessionSummary {
-            id: session_id,
-            provider: provider.name.clone(),
-            label,
-            path: path.to_path_buf(),
-            first_prompt,
-            actionable,
-            created_at,
-            last_active: Some(mtime),
-            size,
-            mtime,
-        };
+        if let Some(summary) = &mut preview
+            && summary.len() > 240
+        {
+            summary.truncate(240);
+        }
 
-        Ok(SessionIngest::new(summary, messages))
+        let preview = preview.ok_or_else(|| eyre!("no messages discovered in session"))?;
+        if first_prompt.is_none() {
+            *first_prompt = Some(preview.clone());
+        }
+        messages.push(MessageRecord::new(
+            session_id, 0, "system", preview, None, None,
+        ));
+        Ok(())
     }
+}
+
+#[derive(Default)]
+struct IngestState {
+    messages: Vec<MessageRecord>,
+    first_prompt: Option<String>,
+    fallback_preview: Option<String>,
+    instructions_preview: Option<String>,
+    saw_instruction_block: bool,
+    saw_any_record: bool,
+    session_uuid: Option<String>,
+    earliest_timestamp: Option<i64>,
+    latest_timestamp: Option<i64>,
+}
+
+fn update_existing_source(existing: &mut MessageRecord, source: Option<&String>) {
+    if let Some(value) = source
+        && (existing.source.is_none() || value == "response_item")
+    {
+        existing.source = Some(value.clone());
+    }
+}
+
+fn parse_timestamp(value: &Value) -> Option<i64> {
+    let timestamp = value.get("timestamp").and_then(Value::as_str)?;
+    OffsetDateTime::parse(timestamp, &Rfc3339)
+        .ok()
+        .map(OffsetDateTime::unix_timestamp)
 }
 
 fn is_jsonl(path: &Path) -> bool {
@@ -246,10 +411,12 @@ fn compute_session_id(provider: &ProviderConfig, path: &Path) -> (String, String
         }
     }
 
-    let relative = relative.unwrap_or_else(|| {
-        path.file_name()
-            .map_or_else(|| path.to_path_buf(), PathBuf::from)
-    });
+    let relative = match relative {
+        Some(rel) if !rel.as_os_str().is_empty() => rel,
+        _ => path
+            .file_name()
+            .map_or_else(|| path.to_path_buf(), PathBuf::from),
+    };
 
     let normalized = relative
         .components()
@@ -357,4 +524,114 @@ fn clean_text(input: &str) -> Option<String> {
     }
 
     Some(trimmed.to_string())
+}
+
+fn summarize_instructions(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('<') {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            let summary = trimmed.trim_start_matches('#').trim();
+            if !summary.is_empty() {
+                return Some(summary.to_string());
+            }
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_fs::TempDir;
+    use assert_fs::prelude::*;
+    use color_eyre::Result;
+    use std::convert::TryFrom;
+
+    fn provider_with_root(root: &Path) -> ProviderConfig {
+        ProviderConfig {
+            name: "codex".to_string(),
+            bin: "codex".to_string(),
+            flags: Vec::new(),
+            env: Vec::new(),
+            session_roots: vec![root.to_path_buf()],
+            stdin: None,
+        }
+    }
+
+    #[test]
+    fn instructions_only_sessions_get_placeholder() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"# General guidance\\n\\nKeep things simple.\\n\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<user_instructions>\\n\\n# General guidance\\n\\nKeep things simple.\\n</user_instructions>\"}]}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(ingest.messages.len(), 1);
+        assert_eq!(ingest.messages[0].role, "system");
+        assert!(
+            ingest.messages[0].content.contains("General guidance"),
+            "placeholder should summarize instructions"
+        );
+        assert!(ingest.messages[0].is_first);
+        assert_eq!(ingest.messages[0].source, None);
+        assert_eq!(ingest.summary.uuid.as_deref(), Some("session"));
+        assert!(!ingest.summary.actionable);
+        assert_eq!(
+            ingest.summary.first_prompt.as_deref(),
+            Some("General guidance")
+        );
+        assert_eq!(ingest.summary.started_at, Some(now));
+        assert_eq!(ingest.summary.last_active, Some(now));
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_and_assistant_messages_are_ingested() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("conversation.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello world\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hi there\"}]}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(ingest.messages.len(), 2);
+        assert_eq!(ingest.messages[0].role, "user");
+        assert_eq!(ingest.messages[0].content, "Hello world");
+        assert!(ingest.messages[0].is_first);
+        assert_eq!(ingest.messages[0].source.as_deref(), Some("event_msg"));
+        assert_eq!(ingest.messages[1].role, "assistant");
+        assert!(!ingest.messages[1].is_first);
+        assert_eq!(ingest.messages[1].source.as_deref(), Some("response_item"));
+        assert!(ingest.summary.actionable);
+        assert_eq!(ingest.summary.first_prompt.as_deref(), Some("Hello world"));
+        assert_eq!(ingest.summary.uuid.as_deref(), Some("conversation"));
+        assert_eq!(ingest.summary.started_at, Some(now));
+        assert_eq!(ingest.summary.last_active, Some(now));
+
+        Ok(())
+    }
 }

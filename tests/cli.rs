@@ -18,14 +18,23 @@ fn base_command(temp: &TempDir) -> Command {
     cache_dir.create_dir_all().unwrap();
     cmd.env("XDG_CACHE_HOME", cache_dir.path());
     cmd.env("TX_CACHE_DIR", cache_dir.path());
+
+    let home_dir = temp.child("home");
+    home_dir.create_dir_all().unwrap();
+    cmd.env("HOME", home_dir.path());
+    cmd.env("USERPROFILE", home_dir.path());
+
+    let codex_home = temp.child("codex-home");
+    codex_home.create_dir_all().unwrap();
+    cmd.env("CODEX_HOME", codex_home.path());
     cmd
 }
 
 #[test]
-fn sessions_reports_empty_when_no_data() -> color_eyre::Result<()> {
+fn search_lists_empty_when_no_data() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
-    cmd.arg("sessions")
+    cmd.arg("search")
         .assert()
         .success()
         .stdout(contains("No sessions found."));
@@ -50,23 +59,16 @@ fn launch_dry_run_prints_pipeline() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let config_dir = temp.child("config-root");
     config_dir.create_dir_all()?;
-    let sessions_dir = temp.child("sessions");
-    sessions_dir.create_dir_all()?;
     let config_path = config_dir.child("config.toml");
     let mut root = toml::map::Map::new();
     let mut providers = toml::map::Map::new();
     let mut echo = toml::map::Map::new();
-    let session_root = sessions_dir.path().to_string_lossy().into_owned();
     echo.insert("bin".into(), toml::Value::String("echo".into()));
     echo.insert(
         "flags".into(),
         toml::Value::Array(Vec::<toml::Value>::new()),
     );
     echo.insert("env".into(), toml::Value::Array(Vec::<toml::Value>::new()));
-    echo.insert(
-        "session_roots".into(),
-        toml::Value::Array(vec![toml::Value::String(session_root)]),
-    );
     providers.insert("echo".into(), toml::Value::Table(echo));
     root.insert("providers".into(), toml::Value::Table(providers));
     let config_contents = toml::to_string(&toml::Value::Table(root))?;
@@ -92,14 +94,14 @@ fn config_dump_outputs_merged_toml() -> color_eyre::Result<()> {
     let config_dir = temp.child("config-root");
     config_dir.create_dir_all()?;
     let config_path = config_dir.child("config.toml");
-    std::fs::write(config_path.path(), "[defaults]\nprovider = \"echo\"\n")?;
+    std::fs::write(config_path.path(), "provider = \"echo\"\n")?;
     let written = std::fs::read_to_string(config_path.path())?;
     toml::from_str::<toml::Value>(&written).expect("valid defaults config");
     let conf_d = config_dir.child("conf.d");
     conf_d.create_dir_all()?;
     std::fs::write(
         conf_d.child("00-extra.toml").path(),
-        "[defaults]\nactionable_only = false\n",
+        "search_mode = \"full_text\"\n",
     )?;
 
     let mut cmd = base_command(&temp);
@@ -108,7 +110,8 @@ fn config_dump_outputs_merged_toml() -> color_eyre::Result<()> {
         .arg("dump")
         .assert()
         .success()
-        .stdout(contains("[defaults]"));
+        .stdout(contains("provider = \"echo\""))
+        .stdout(contains("search_mode = \"full_text\""));
 
     temp.close()?;
     Ok(())
@@ -130,6 +133,19 @@ fn config_lint_reports_errors_for_bad_config() -> color_eyre::Result<()> {
         .failure()
         .stderr(contains("missing required field 'bin'"));
 
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["config", "default"])
+        .assert()
+        .success()
+        .stdout(contains("provider = \"codex\""))
+        .stdout(contains("Session logs are discovered automatically"));
     temp.close()?;
     Ok(())
 }

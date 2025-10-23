@@ -1,8 +1,10 @@
+use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
+use directories::BaseDirs;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use shellexpand::full;
@@ -23,7 +25,7 @@ pub struct Defaults {
     pub provider: Option<String>,
     pub profile: Option<String>,
     pub search_mode: SearchMode,
-    pub actionable_only: bool,
+    pub preview_filter: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +231,7 @@ impl Config {
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
-    #[serde(default)]
+    #[serde(default, flatten)]
     defaults: RawDefaults,
     #[serde(default)]
     providers: IndexMap<String, RawProvider>,
@@ -282,17 +284,13 @@ struct RawDefaults {
     profile: Option<String>,
     #[serde(default = "RawDefaults::default_search_mode")]
     search_mode: String,
-    #[serde(default = "RawDefaults::default_actionable")]
-    actionable_only: bool,
+    #[serde(default)]
+    preview_filter: Option<CommandSpec>,
 }
 
 impl RawDefaults {
     fn default_search_mode() -> String {
         "first_prompt".to_string()
-    }
-
-    fn default_actionable() -> bool {
-        true
     }
 
     fn into_defaults(self) -> Result<Defaults> {
@@ -305,11 +303,18 @@ impl RawDefaults {
             }
         };
 
+        let preview_filter = match self.preview_filter {
+            Some(spec) => spec
+                .into_args()
+                .map_err(|err| eyre!("invalid preview_filter command: {err}"))?,
+            None => None,
+        };
+
         Ok(Defaults {
             provider: self.provider,
             profile: self.profile,
             search_mode,
-            actionable_only: self.actionable_only,
+            preview_filter,
         })
     }
 }
@@ -322,8 +327,6 @@ struct RawProvider {
     #[serde(default)]
     env: Vec<String>,
     #[serde(default)]
-    session_roots: Vec<String>,
-    #[serde(default)]
     stdin_to: Option<String>,
 }
 
@@ -332,15 +335,7 @@ impl RawProvider {
         let bin = self
             .bin
             .ok_or_else(|| eyre!("provider '{name}' is missing required field 'bin'"))?;
-        let session_roots = self
-            .session_roots
-            .into_iter()
-            .map(|entry| {
-                expand_path(&entry).wrap_err_with(|| {
-                    format!("while expanding session_roots for provider '{name}'")
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let session_roots = infer_session_roots(&name);
 
         let stdin = match self.stdin_to {
             Some(raw) => Some(parse_stdin(&raw, &name)?),
@@ -373,6 +368,48 @@ fn parse_env_var(raw: &str) -> Result<EnvVar> {
         key: key.trim().to_string(),
         value_template: value.trim().to_string(),
     })
+}
+
+fn parse_command_args(raw: &str) -> Result<Vec<String>> {
+    shlex::split(raw).ok_or_else(|| eyre!("failed to parse command line '{raw}'"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CommandSpec {
+    String(String),
+    List(Vec<String>),
+}
+
+impl CommandSpec {
+    fn into_args(self) -> Result<Option<Vec<String>>> {
+        match self {
+            CommandSpec::String(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                let args = parse_command_args(trimmed)?;
+                if args.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(args))
+                }
+            }
+            CommandSpec::List(items) => {
+                let args = items
+                    .into_iter()
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<_>>();
+                if args.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(args))
+                }
+            }
+        }
+    }
 }
 
 fn parse_stdin(raw: &str, provider: &str) -> Result<StdinMapping> {
@@ -540,8 +577,78 @@ impl RawPromptAssembler {
     }
 }
 
+fn infer_session_roots(provider: &str) -> Vec<PathBuf> {
+    match provider {
+        "codex" => resolve_codex_session_roots(),
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_codex_session_roots() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+
+    if let Ok(raw) = env::var("CODEX_HOME")
+        && let Some(path) = expand_optional_path(&raw)
+    {
+        push_unique_path(&mut homes, path);
+    }
+
+    if let Some(base) = BaseDirs::new() {
+        push_unique_path(&mut homes, base.home_dir().join(".codex"));
+    }
+
+    let mut roots = Vec::new();
+    for home in homes {
+        push_unique_path(&mut roots, home.join("session"));
+        push_unique_path(&mut roots, home.join("sessions"));
+    }
+
+    roots
+}
+
+fn expand_optional_path(raw: &str) -> Option<PathBuf> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    expand_path(raw).ok()
+}
+
+fn push_unique_path(list: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !list.iter().any(|existing| existing == &candidate) {
+        list.push(candidate);
+    }
+}
+
 fn expand_path(raw: &str) -> Result<PathBuf> {
     let expanded = full(raw)
         .with_context(|| format!("failed to expand path '{raw}': environment variable missing"))?;
     Ok(PathBuf::from(expanded.into_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommandSpec;
+
+    #[test]
+    fn command_spec_string_splits_with_shlex() {
+        let args = CommandSpec::String("glow -s dark".into())
+            .into_args()
+            .expect("parsing succeeds")
+            .expect("non-empty command");
+        assert_eq!(args, ["glow", "-s", "dark"]);
+    }
+
+    #[test]
+    fn command_spec_list_trims_and_filters() {
+        let args = CommandSpec::List(vec![
+            " glow ".into(),
+            " ".into(),
+            "-s".into(),
+            "dark".into(),
+        ])
+        .into_args()
+        .expect("parsing succeeds")
+        .expect("non-empty command");
+        assert_eq!(args, ["glow", "-s", "dark"]);
+    }
 }

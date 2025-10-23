@@ -3,6 +3,7 @@ pub mod db;
 pub mod indexer;
 pub mod pipeline;
 pub mod prompts;
+pub mod providers;
 pub mod session;
 
 mod app;
@@ -25,7 +26,6 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
     let mut app = app::App::bootstrap(cli)?;
 
     let outcome = match &cli.command {
-        Some(Command::Sessions(cmd)) => app.list_sessions(cmd),
         Some(Command::Search(cmd)) => app.search(cmd),
         Some(Command::Launch(cmd)) => app.launch(cmd),
         Some(Command::Resume(cmd)) => app.resume(cmd),
