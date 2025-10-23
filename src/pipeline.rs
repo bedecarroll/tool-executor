@@ -6,10 +6,11 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 use regex::Regex;
 use shell_escape::unix::escape as shell_escape;
-use shlex::split as shlex_split;
 use std::sync::LazyLock;
 
-use crate::config::model::{Config, ProviderConfig, Snippet, WrapperConfig, WrapperMode};
+use crate::config::model::{
+    Config, ProviderConfig, Snippet, StdinMode, WrapperConfig, WrapperMode,
+};
 
 #[derive(Debug, Clone)]
 pub struct PipelineRequest<'a> {
@@ -109,17 +110,24 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
 
     let mut provider_args = provider.flags.clone();
     if let Some(stdin) = &provider.stdin {
-        let extra = shlex_split(&stdin.arg)
-            .ok_or_else(|| eyre!("failed to parse stdin_to arguments '{}'", stdin.arg))?;
-        provider_args.extend(extra);
+        provider_args.extend(stdin.args.clone());
     }
     provider_args.extend(request.provider_args.iter().cloned());
 
-    let provider_stage = command_string(&provider.bin, &provider_args);
-
     let mut stages = Vec::new();
-    stages.extend(pre_commands.iter().cloned());
-    stages.push(provider_stage.clone());
+    let capture_prompt = provider
+        .stdin
+        .as_ref()
+        .is_some_and(|stdin| matches!(stdin.mode, StdinMode::CaptureArg));
+
+    if capture_prompt {
+        let internal_command = build_capture_command(provider, &pre_commands, &provider_args);
+        stages.push(internal_command);
+    } else {
+        stages.extend(pre_commands.iter().cloned());
+        let provider_stage = command_string(&provider.bin, &provider_args);
+        stages.push(provider_stage);
+    }
     stages.extend(post_commands.iter().cloned());
 
     let pipeline = stages.join(" | ");
@@ -196,6 +204,35 @@ fn render_env(provider: &ProviderConfig) -> Result<Vec<(String, String)>> {
             Ok((entry.key.clone(), value))
         })
         .collect()
+}
+
+fn build_capture_command(
+    provider: &ProviderConfig,
+    pre_commands: &[String],
+    provider_args: &[String],
+) -> String {
+    let mut internal_args = vec![
+        "internal".to_string(),
+        "capture-arg".to_string(),
+        "--provider".to_string(),
+        provider.name.clone(),
+        "--bin".to_string(),
+        provider.bin.clone(),
+    ];
+    for pre in pre_commands {
+        internal_args.push("--pre".to_string());
+        internal_args.push(pre.clone());
+    }
+    for arg in provider_args {
+        internal_args.push("--arg".to_string());
+        internal_args.push(arg.clone());
+    }
+
+    let tx_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "tx".to_string());
+    command_string(&tx_path, &internal_args)
 }
 
 fn expand_env_template(template: &str) -> Result<String> {

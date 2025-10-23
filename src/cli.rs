@@ -36,6 +36,9 @@ pub enum Command {
     /// Update tx to the latest released version.
     #[cfg(feature = "self-update")]
     SelfUpdate(SelfUpdateCommand),
+    /// Internal helpers (unstable, subject to change).
+    #[command(subcommand, hide = true)]
+    Internal(InternalCommand),
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +132,32 @@ pub struct ResumeCommand {
 pub struct ExportCommand {
     /// Session identifier to export.
     pub session_id: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InternalCommand {
+    /// Run a provider after capturing stdin as a positional prompt argument.
+    #[command(name = "capture-arg", hide = true)]
+    CaptureArg(InternalCaptureArgCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct InternalCaptureArgCommand {
+    /// Provider name (for diagnostics only).
+    #[arg(long)]
+    pub provider: String,
+    /// Executable to invoke for the provider.
+    #[arg(long)]
+    pub bin: String,
+    /// Commands that produce the prompt before launching the provider.
+    #[arg(long = "pre", action = ArgAction::Append)]
+    pub pre_commands: Vec<String>,
+    /// Arguments forwarded to the provider before inserting the prompt.
+    #[arg(long = "arg", action = ArgAction::Append)]
+    pub provider_args: Vec<String>,
+    /// Maximum captured prompt size in bytes.
+    #[arg(long = "prompt-limit", default_value = "1048576")]
+    pub prompt_limit: usize,
 }
 
 #[derive(Debug, Subcommand)]

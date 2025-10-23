@@ -200,7 +200,8 @@ bin = "codex"                  # executable name or path
 flags = ["--search"]           # ordered default flags
 env = ["KEY=${env:KEY}"]      # per-provider env vars (expanded)
 # Session logs for Codex are discovered automatically from $CODEX_HOME.
-stdin_to = "codex:--prompt -"  # (optional) map stdin into a provider flag
+stdin_mode = "capture-arg"      # capture stdin and pass as positional prompt
+stdin_to = "codex:--prompt {prompt}"
 
 [snippets.pre]
 assemble = "pa {{var:pa_prompt}} {{var:pa_data}}"   # example
