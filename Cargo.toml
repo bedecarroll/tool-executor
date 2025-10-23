@@ -45,7 +45,7 @@ shellexpand = "3.1"
 shlex = "1.3"
 once_cell = "1.19"
 shell-escape = "0.1"
-thiserror = "1.0"
+thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 toml = { version = "0.9.8", features = ["preserve_order"] }
 tracing = "0.1"
