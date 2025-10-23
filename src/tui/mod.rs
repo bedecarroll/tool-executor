@@ -18,6 +18,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use shell_escape::unix::escape as shell_escape;
+use std::borrow::Cow;
 
 use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
@@ -150,6 +152,7 @@ struct ProfileEntry {
     wrap: Option<String>,
     description: Option<String>,
     tags: Vec<String>,
+    inline_pre: Vec<String>,
     kind: ProfileKind,
 }
 
@@ -561,6 +564,7 @@ impl<'ctx> AppState<'ctx> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn load_profiles(&mut self) {
         self.profiles.clear();
         let mut seen = HashSet::new();
@@ -583,6 +587,7 @@ impl<'ctx> AppState<'ctx> {
                 wrap: profile.wrap.clone(),
                 description: None,
                 tags: Vec::new(),
+                inline_pre: Vec::new(),
                 kind: ProfileKind::Config { name: profile_name },
             });
         }
@@ -613,6 +618,7 @@ impl<'ctx> AppState<'ctx> {
                 wrap: None,
                 description: Some(description),
                 tags: Vec::new(),
+                inline_pre: Vec::new(),
                 kind: ProfileKind::Provider,
             });
         }
@@ -642,11 +648,15 @@ impl<'ctx> AppState<'ctx> {
                             self.profiles.push(ProfileEntry {
                                 display: profile_name.clone(),
                                 provider: provider.clone(),
-                                pre: vec!["assemble".to_string()],
+                                pre: Vec::new(),
                                 post: Vec::new(),
                                 wrap: None,
                                 description: vp.description.clone(),
                                 tags: vp.tags.clone(),
+                                inline_pre: vec![format!(
+                                    "pa {}",
+                                    shell_escape(Cow::Borrowed(vp.name.as_str()))
+                                )],
                                 kind: ProfileKind::Virtual,
                             });
                         }
@@ -983,6 +993,7 @@ impl<'ctx> AppState<'ctx> {
                     profile: None,
                     additional_pre: Vec::new(),
                     additional_post: Vec::new(),
+                    inline_pre: Vec::new(),
                     wrap: None,
                     provider_args,
                     vars: HashMap::new(),
@@ -1007,6 +1018,7 @@ impl<'ctx> AppState<'ctx> {
                         profile: Some(name.as_str()),
                         additional_pre: Vec::new(),
                         additional_post: Vec::new(),
+                        inline_pre: Vec::new(),
                         wrap: profile.wrap.as_deref(),
                         provider_args: Vec::new(),
                         vars: HashMap::new(),
@@ -1019,6 +1031,7 @@ impl<'ctx> AppState<'ctx> {
                         profile: None,
                         additional_pre: profile.pre.clone(),
                         additional_post: profile.post.clone(),
+                        inline_pre: profile.inline_pre.clone(),
                         wrap: profile.wrap.as_deref(),
                         provider_args: Vec::new(),
                         vars: HashMap::new(),
@@ -1031,6 +1044,7 @@ impl<'ctx> AppState<'ctx> {
                         profile: None,
                         additional_pre: Vec::new(),
                         additional_post: Vec::new(),
+                        inline_pre: Vec::new(),
                         wrap: None,
                         provider_args: Vec::new(),
                         vars: HashMap::new(),
