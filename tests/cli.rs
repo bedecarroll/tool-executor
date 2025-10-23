@@ -198,6 +198,33 @@ fn launch_emit_command_prints_pipeline() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn launch_with_capture_arg_runs_internal_helper() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_path = config_dir.child("config.toml");
+    std::fs::write(
+        config_path.path(),
+        r#"[providers.codex]
+bin = "codex"
+flags = ["--search"]
+stdin_mode = "capture-arg"
+stdin_to = "codex:--prompt {prompt}"
+"#,
+    )?;
+
+    let mut cmd = base_command(&temp);
+    cmd.args(["launch", "codex", "--emit-command"])
+        .assert()
+        .success()
+        .stdout(contains("internal capture-arg"))
+        .stdout(contains("--arg --search"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn search_role_requires_term() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);

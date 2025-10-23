@@ -26,7 +26,8 @@ Each provider entry defines how to launch an external tool.
 | `bin` | `string` | ✅ | Executable name or absolute path to invoke. |
 | `flags` | `array<string>` | | Default arguments passed to the command. |
 | `env` | `array<string>` | | Environment entries written as `KEY=value`. Values support `${env:VAR}` interpolation. |
-| `stdin_to` | `string` | | Maps session content to a provider flag. Specify `provider:flag` to forward stdin to another provider, or just `"--prompt -"` to use the current provider. |
+| `stdin_to` | `string` | | Optional mapping from assembled stdin to provider arguments. Tokens are parsed with `shlex`. Include `"{prompt}"` where the captured prompt should be substituted (omit it to append the prompt as a final argument). |
+| `stdin_mode` | `string` | | How stdin should be delivered. `"pipe"` (default) streams stdin directly. `"capture-arg"` consumes stdin (after running pre snippets) and passes it as a single positional argument. |
 
 ## Snippet Commands (`[snippets.pre]`, `[snippets.post]`)
 

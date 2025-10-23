@@ -8,6 +8,7 @@ pub mod session;
 
 mod app;
 pub mod cli;
+pub mod internal;
 mod tui;
 mod util;
 
@@ -23,6 +24,11 @@ pub use cli::Cli;
 /// Returns an error when initialization or the chosen command fails to execute.
 pub fn run(cli: &Cli) -> color_eyre::Result<()> {
     init_tracing(cli);
+
+    if let Some(Command::Internal(cmd)) = &cli.command {
+        return internal::run(cmd);
+    }
+
     let mut app = app::App::bootstrap(cli)?;
 
     let outcome = match &cli.command {
@@ -32,6 +38,7 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         Some(Command::Export(cmd)) => app.export(cmd),
         Some(Command::Config(cmd)) => app.config(cmd),
         Some(Command::Doctor) => app.doctor(),
+        Some(Command::Internal(_)) => unreachable!("internal command handled above"),
         #[cfg(feature = "self-update")]
         Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
         None => app.run_ui(),

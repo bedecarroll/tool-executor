@@ -62,8 +62,14 @@ pub struct EnvVar {
 
 #[derive(Debug, Clone)]
 pub struct StdinMapping {
-    pub provider: String,
-    pub arg: String,
+    pub args: Vec<String>,
+    pub mode: StdinMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdinMode {
+    Pipe,
+    CaptureArg,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +334,8 @@ struct RawProvider {
     env: Vec<String>,
     #[serde(default)]
     stdin_to: Option<String>,
+    #[serde(default)]
+    stdin_mode: Option<String>,
 }
 
 impl RawProvider {
@@ -337,9 +345,20 @@ impl RawProvider {
             .ok_or_else(|| eyre!("provider '{name}' is missing required field 'bin'"))?;
         let session_roots = infer_session_roots(&name);
 
-        let stdin = match self.stdin_to {
-            Some(raw) => Some(parse_stdin(&raw, &name)?),
-            None => None,
+        let stdin_mode = parse_stdin_mode(self.stdin_mode.as_deref())?;
+
+        let stdin_args = match self.stdin_to {
+            Some(ref raw) => parse_stdin(raw, &name)?,
+            None => Vec::new(),
+        };
+
+        let stdin = if self.stdin_to.is_some() || !matches!(stdin_mode, StdinMode::Pipe) {
+            Some(StdinMapping {
+                args: stdin_args,
+                mode: stdin_mode,
+            })
+        } else {
+            None
         };
 
         Ok(ProviderConfig {
@@ -412,22 +431,39 @@ impl CommandSpec {
     }
 }
 
-fn parse_stdin(raw: &str, provider: &str) -> Result<StdinMapping> {
+fn parse_stdin(raw: &str, provider: &str) -> Result<Vec<String>> {
     if let Some((prefix, rest)) = raw.split_once(':') {
         if !prefix.trim().is_empty() && prefix.trim() != provider {
             return Err(eyre!(
                 "stdin_to refers to provider '{prefix}' but is declared under provider '{provider}'"
             ));
         }
-        Ok(StdinMapping {
-            provider: provider.to_string(),
-            arg: rest.trim().to_string(),
-        })
+        parse_stdin(rest, provider)
     } else {
-        Ok(StdinMapping {
-            provider: provider.to_string(),
-            arg: raw.trim().to_string(),
-        })
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = parse_command_args(trimmed)?;
+        if args.last().is_some_and(|last| last == "-") {
+            args.pop();
+        }
+        Ok(args)
+    }
+}
+
+fn parse_stdin_mode(raw: Option<&str>) -> Result<StdinMode> {
+    let Some(value) = raw else {
+        return Ok(StdinMode::Pipe);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(StdinMode::Pipe);
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "pipe" => Ok(StdinMode::Pipe),
+        "capture_arg" | "capture-arg" => Ok(StdinMode::CaptureArg),
+        other => Err(eyre!("unknown stdin_mode '{other}'")),
     }
 }
 
