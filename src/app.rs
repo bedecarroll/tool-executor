@@ -426,12 +426,13 @@ impl<'cli> App<'cli> {
         println!("\nProfiles:");
         for (name, profile) in &self.loaded.config.profiles {
             println!(
-                "  - {} (provider: {}, pre: [{}], post: [{}], wrap: {})",
+                "  - {} (provider: {}, pre: [{}], post: [{}], wrap: {}, description: {})",
                 name,
                 profile.provider,
                 profile.pre.join(", "),
                 profile.post.join(", "),
                 profile.wrap.as_deref().unwrap_or("-"),
+                profile.description.as_deref().unwrap_or("-"),
             );
         }
     }

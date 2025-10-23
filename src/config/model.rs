@@ -98,6 +98,7 @@ pub enum WrapperMode {
 pub struct ProfileConfig {
     pub name: String,
     pub provider: String,
+    pub description: Option<String>,
     pub pre: Vec<String>,
     pub post: Vec<String>,
     pub wrap: Option<String>,
@@ -517,6 +518,8 @@ impl RawWrapper {
 struct RawProfile {
     provider: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     pre: Vec<String>,
     #[serde(default)]
     post: Vec<String>,
@@ -529,6 +532,10 @@ impl RawProfile {
         ProfileConfig {
             name,
             provider: self.provider,
+            description: self
+                .description
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             pre: self.pre,
             post: self.post,
             wrap: self.wrap,
