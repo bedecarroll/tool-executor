@@ -57,7 +57,6 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let json_mode = ctx.cli.json;
     let result = run_app(ctx, &mut terminal);
 
     disable_raw_mode()?;
@@ -67,14 +66,7 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     terminal.show_cursor()?;
 
     match result? {
-        Some(Outcome::Emit(plan)) => {
-            let mode = if json_mode {
-                EmitMode::Json
-            } else {
-                EmitMode::Plain { newline: true }
-            };
-            app::emit_command(&plan, mode)
-        }
+        Some(Outcome::Emit(plan)) => app::emit_command(&plan, EmitMode::Plain { newline: true }),
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
         None => Ok(()),
     }
@@ -137,6 +129,7 @@ struct SessionEntry {
     actionable: bool,
     last_active: Option<i64>,
     snippet: Option<String>,
+    snippet_role: Option<String>,
 }
 
 static TIMESTAMP_FORMAT: &[FormatItem<'static>] =
@@ -201,6 +194,7 @@ impl SessionEntry {
             actionable: query.actionable,
             last_active: query.last_active,
             snippet: None,
+            snippet_role: None,
         }
     }
 
@@ -213,6 +207,7 @@ impl SessionEntry {
             actionable: hit.actionable,
             last_active: hit.last_active,
             snippet: hit.snippet,
+            snippet_role: hit.role,
         }
     }
 
@@ -264,10 +259,14 @@ impl SessionEntry {
     }
 
     fn snippet_line(&self) -> Option<String> {
-        self.snippet
-            .as_deref()
-            .and_then(meaningful_excerpt)
-            .or_else(|| self.first_prompt.as_deref().and_then(meaningful_excerpt))
+        if let Some(snippet) = self.snippet.as_deref().and_then(meaningful_excerpt) {
+            if let Some(role) = self.snippet_role.as_deref() {
+                return Some(format!("[{}] {snippet}", role.to_ascii_lowercase()));
+            }
+            return Some(snippet);
+        }
+
+        self.first_prompt.as_deref().and_then(meaningful_excerpt)
     }
 
     fn short_session_tag(&self) -> String {

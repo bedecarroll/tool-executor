@@ -29,13 +29,17 @@ cargo install --path .              # from a clone
 
 Bind **Alt-t** to open `tx`, select an item, then **Tab** to insert the resolved command into your current line (it will not run).
 
+Inside the TUI, press **Tab** to emit the assembled command to stdout and exit. You can wire that into your shell so the command replaces the current line:
+
 #### bash
 
 ```bash
 # Add to ~/.bashrc
 _tx_insert() {
-  local cmd; cmd="$(tx --json --emit-command 2>/dev/null)" || return
-  READLINE_LINE="$cmd"; READLINE_POINT=${#READLINE_LINE}
+  local cmd
+  cmd="$(tx 2>/dev/null)" || return  # launch the TUI, pick an entry, press Tab
+  READLINE_LINE="$cmd"
+  READLINE_POINT=${#READLINE_LINE}
 }
 bind -x '"\et":"_tx_insert"'
 ```
@@ -45,8 +49,10 @@ bind -x '"\et":"_tx_insert"'
 ```zsh
 # Add to ~/.zshrc
 _tx_insert() {
-  local cmd; cmd="$(tx --json --emit-command 2>/dev/null)" || return
-  LBUFFER="$cmd"; CURSOR=${#LBUFFER}
+  local cmd
+  cmd="$(tx 2>/dev/null)" || return   # launch the TUI, pick an entry, press Tab
+  LBUFFER="$cmd"
+  CURSOR=${#LBUFFER}
 }
 zle -N _tx_insert
 bindkey "\et" _tx_insert
@@ -56,7 +62,12 @@ bindkey "\et" _tx_insert
 
 ```fish
 # Add to ~/.config/fish/config.fish
-bind \et 'commandline -r (tx --json --emit-command 2>/dev/null)'
+function _tx_insert
+  set -l cmd (tx 2>/dev/null)
+  test -n "$cmd"; or return
+  commandline -r -- $cmd
+end
+bind \et '_tx_insert'
 ```
 
 ---
@@ -112,9 +123,10 @@ wrap = "tmux_simple"
 tx                     # open UI: recent sessions + profiles (new sessions)
 
 # Search
-tx search              # list recent sessions (archived entries stay hidden)
-tx search asset        # first user-prompt only
-tx search asset --full-text --json
+tx search                         # list recent sessions (archived entries stay hidden)
+tx search asset                   # first user-prompt only
+tx search asset --full-text       # full-text FTS search (JSON output by default)
+tx search context --full-text --role assistant   # filter FTS hits to assistant replies
 
 # Launch / resume (non-TUI paths also supported)
 tx launch <provider> [--profile NAME] [--pre NAME...] [--post NAME...] [--wrap NAME] [--] [provider-args...]
@@ -132,6 +144,16 @@ tx doctor
 # Self-update (requires `--features self-update`)
 tx self-update [--version TAG]
 ```
+
+### Search output
+
+`tx search` always emits pretty JSON. For full-text hits, the payload includes:
+
+* `snippet`: the full message line that matched.
+* `snippet_role`: `"user"` or `"assistant"` so you can filter or style results.
+* `last_active`: seconds since epoch (UTC) for easy recency sorting.
+
+Prompt-only searches populate `snippet` with the first user prompt and omit `snippet_role`.
 
 ### Keys inside TUI
 

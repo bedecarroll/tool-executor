@@ -2,6 +2,8 @@ use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use predicates::str::contains;
+use serde_json::Value;
+use serde_json::json;
 
 fn base_command(temp: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("tx").expect("binary exists");
@@ -34,10 +36,10 @@ fn base_command(temp: &TempDir) -> Command {
 fn search_lists_empty_when_no_data() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
-    cmd.arg("search")
-        .assert()
-        .success()
-        .stdout(contains("No sessions found."));
+    let output = cmd.arg("search").output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed, json!([]));
     temp.close()?;
     Ok(())
 }
@@ -46,10 +48,10 @@ fn search_lists_empty_when_no_data() -> color_eyre::Result<()> {
 fn search_reports_empty_when_no_matches() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
-    cmd.args(["search", "missing"])
-        .assert()
-        .success()
-        .stdout(contains("No matches found."));
+    let output = cmd.args(["search", "missing"]).output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed, json!([]));
     temp.close()?;
     Ok(())
 }
@@ -146,6 +148,75 @@ fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
         .success()
         .stdout(contains("provider = \"codex\""))
         .stdout(contains("Session logs are discovered automatically"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn search_help_omits_json_and_emit_flags() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    let output = cmd.args(["search", "--help"]).output()?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(!stdout.contains("--json"));
+    assert!(!stdout.contains("--emit-command"));
+    assert!(stdout.contains("--full-text"));
+    assert!(stdout.contains("--role"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn launch_emit_command_prints_pipeline() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_path = config_dir.child("config.toml");
+    let mut root = toml::map::Map::new();
+    let mut providers = toml::map::Map::new();
+    let mut echo = toml::map::Map::new();
+    echo.insert("bin".into(), toml::Value::String("echo".into()));
+    echo.insert(
+        "flags".into(),
+        toml::Value::Array(Vec::<toml::Value>::new()),
+    );
+    echo.insert("env".into(), toml::Value::Array(Vec::<toml::Value>::new()));
+    providers.insert("echo".into(), toml::Value::Table(echo));
+    root.insert("providers".into(), toml::Value::Table(providers));
+    let config_contents = toml::to_string(&toml::Value::Table(root))?;
+    std::fs::write(config_path.path(), config_contents)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.args(["launch", "echo", "--emit-command"])
+        .assert()
+        .success()
+        .stdout(contains("echo"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn search_role_requires_term() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["search", "--role", "user"])
+        .assert()
+        .failure()
+        .stderr(contains("--role requires --full-text"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn search_role_requires_full_text() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["search", "context", "--role", "user"])
+        .assert()
+        .failure()
+        .stderr(contains("--role requires --full-text"));
     temp.close()?;
     Ok(())
 }

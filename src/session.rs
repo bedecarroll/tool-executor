@@ -64,6 +64,7 @@ pub struct SearchHit {
     pub session_id: String,
     pub provider: String,
     pub label: Option<String>,
+    pub role: Option<String>,
     pub snippet: Option<String>,
     pub last_active: Option<i64>,
     pub actionable: bool,

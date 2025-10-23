@@ -8,12 +8,6 @@ pub struct Cli {
     /// Override the configuration directory.
     #[arg(long, value_name = "DIR")]
     pub config_dir: Option<PathBuf>,
-    /// Emit machine-readable output when supported.
-    #[arg(long, action = ArgAction::SetTrue, global = true)]
-    pub json: bool,
-    /// Print the fully-resolved command instead of executing it.
-    #[arg(long, action = ArgAction::SetTrue, global = true)]
-    pub emit_command: bool,
     /// Increase log verbosity (use -vv for trace).
     #[arg(short, long, action = ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -57,12 +51,12 @@ pub struct SearchCommand {
     /// Only include sessions active since this duration ago (e.g. 7d, 12h).
     #[arg(long, value_parser = parse_since)]
     pub since: Option<i64>,
+    /// Restrict results to messages with this role (user or assistant).
+    #[arg(long, value_parser = parse_role)]
+    pub role: Option<String>,
     /// Maximum number of sessions to return.
     #[arg(long)]
     pub limit: Option<usize>,
-    /// Emit JSON results.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -81,6 +75,12 @@ pub struct LaunchCommand {
     /// Override the wrapper by name.
     #[arg(long)]
     pub wrap: Option<String>,
+    /// Print the fully-resolved command instead of executing it.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub emit_command: bool,
+    /// Emit pipeline details as JSON when combined with --dry-run or --emit-command.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub emit_json: bool,
     /// Provide a variable binding (KEY=VALUE).
     #[arg(long = "var", action = ArgAction::Append)]
     pub vars: Vec<String>,
@@ -108,6 +108,12 @@ pub struct ResumeCommand {
     /// Override the wrapper by name.
     #[arg(long)]
     pub wrap: Option<String>,
+    /// Print the fully-resolved command instead of executing it.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub emit_command: bool,
+    /// Emit pipeline details as JSON when combined with --dry-run or --emit-command.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub emit_json: bool,
     /// Provide a variable binding (KEY=VALUE).
     #[arg(long = "var", action = ArgAction::Append)]
     pub vars: Vec<String>,
@@ -150,6 +156,15 @@ fn parse_since(raw: &str) -> Result<i64, String> {
     humantime::parse_duration(raw)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .map_err(|err| format!("invalid duration '{raw}': {err}"))
+}
+
+fn parse_role(raw: &str) -> Result<String, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "user" | "assistant" => Ok(raw.to_ascii_lowercase()),
+        other => Err(format!(
+            "invalid role '{other}', expected 'user' or 'assistant'"
+        )),
+    }
 }
 
 #[cfg(feature = "self-update")]
