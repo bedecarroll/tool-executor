@@ -9,7 +9,7 @@ use shell_escape::unix::escape as shell_escape;
 use std::sync::LazyLock;
 
 use crate::config::model::{
-    Config, ProviderConfig, Snippet, StdinMode, WrapperConfig, WrapperMode,
+    Config, ProfileConfig, ProviderConfig, Snippet, StdinMode, WrapperConfig, WrapperMode,
 };
 
 #[derive(Debug, Clone)]
@@ -67,84 +67,29 @@ static TEMPLATE_TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{([^}]
 /// when template rendering fails.
 pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
     let config = request.config;
+    let profile = resolve_profile(config, request.profile)?;
+    let provider = resolve_provider(config, profile, request.provider_hint)?;
+    let (wrapper, wrap_name) = determine_wrapper(config, request.wrap, profile)?;
 
-    let profile = match request.profile {
-        Some(name) => Some(
-            config
-                .profiles
-                .get(name)
-                .ok_or_else(|| eyre!("profile '{name}' not found"))?,
-        ),
-        None => None,
-    };
-
-    let provider_name = profile
-        .map(|p| p.provider.clone())
-        .or_else(|| request.provider_hint.map(str::to_string))
-        .or_else(|| config.defaults.provider.clone())
-        .ok_or_else(|| eyre!("no provider selected; specify --profile or <provider>"))?;
-
-    let provider = config
-        .providers
-        .get(&provider_name)
-        .ok_or_else(|| eyre!("provider '{provider_name}' not defined"))?;
-
-    let profile_wrap = profile.and_then(|p| p.wrap.clone());
-    let wrap_name = request.wrap.map(str::to_string).or(profile_wrap);
-    let wrapper = match wrap_name {
-        Some(ref name) => Some(
-            config
-                .wrappers
-                .get(name)
-                .ok_or_else(|| eyre!("wrapper '{name}' not found"))?,
-        ),
-        None => None,
-    };
-
-    let mut pre_snippet_names = profile.map(|p| p.pre.clone()).unwrap_or_default();
-    pre_snippet_names.extend(request.additional_pre.iter().cloned());
-
-    let mut post_snippet_names = profile.map(|p| p.post.clone()).unwrap_or_default();
-    post_snippet_names.extend(request.additional_post.iter().cloned());
-
-    let pre_commands = resolve_snippets(&config.snippets.pre, &pre_snippet_names, "pre")?;
-    let mut pre_commands = pre_commands;
-    pre_commands.extend(request.inline_pre.iter().cloned());
-
+    let (pre_snippet_names, post_snippet_names) = collect_snippet_names(profile, request);
+    let pre_commands = build_pre_commands(config, &pre_snippet_names, &request.inline_pre)?;
     let post_commands = resolve_snippets(&config.snippets.post, &post_snippet_names, "post")?;
 
     let provider_capture = provider
         .stdin
         .as_ref()
         .is_some_and(|stdin| matches!(stdin.mode, StdinMode::CaptureArg));
-
-    let mut provider_args = provider.flags.clone();
-    if let Some(stdin) = &provider.stdin {
-        if provider_capture {
-            if request.capture_prompt {
-                provider_args.extend(stdin.args.clone());
-            }
-        } else {
-            provider_args.extend(stdin.args.clone());
-        }
-    }
-    provider_args.extend(request.provider_args.iter().cloned());
-
-    let mut stages = Vec::new();
+    let provider_args = build_provider_args(provider, request, provider_capture);
     let capture_prompt = request.capture_prompt && provider_capture;
 
-    if capture_prompt {
-        let internal_command = build_capture_command(provider, &pre_commands, &provider_args);
-        stages.push(internal_command);
-    } else {
-        stages.extend(pre_commands.iter().cloned());
-        let provider_stage = command_string(&provider.bin, &provider_args);
-        stages.push(provider_stage);
-    }
-    stages.extend(post_commands.iter().cloned());
-
+    let stages = compose_stages(
+        provider,
+        capture_prompt,
+        &pre_commands,
+        &post_commands,
+        &provider_args,
+    );
     let pipeline = stages.join(" | ");
-
     let env = render_env(provider)?;
 
     let cwd_str = request.cwd.to_string_lossy().to_string();
@@ -186,6 +131,119 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         wrapper: wrap_name,
         cwd: request.cwd.clone(),
     })
+}
+
+fn resolve_profile<'a>(
+    config: &'a Config,
+    profile_name: Option<&str>,
+) -> Result<Option<&'a ProfileConfig>> {
+    match profile_name {
+        Some(name) => config
+            .profiles
+            .get(name)
+            .map(Some)
+            .ok_or_else(|| eyre!("profile '{name}' not found")),
+        None => Ok(None),
+    }
+}
+
+fn resolve_provider<'a>(
+    config: &'a Config,
+    profile: Option<&ProfileConfig>,
+    provider_hint: Option<&str>,
+) -> Result<&'a ProviderConfig> {
+    let provider_name = profile
+        .map(|p| p.provider.as_str())
+        .or(provider_hint)
+        .or(config.defaults.provider.as_deref())
+        .ok_or_else(|| eyre!("no provider selected; specify --profile or <provider>"))?;
+
+    config
+        .providers
+        .get(provider_name)
+        .ok_or_else(|| eyre!("provider '{provider_name}' not defined"))
+}
+
+fn determine_wrapper<'a>(
+    config: &'a Config,
+    requested_wrap: Option<&str>,
+    profile: Option<&ProfileConfig>,
+) -> Result<(Option<&'a WrapperConfig>, Option<String>)> {
+    let wrap_name = requested_wrap
+        .map(str::to_string)
+        .or_else(|| profile.and_then(|p| p.wrap.clone()));
+
+    let wrapper = match wrap_name.as_deref() {
+        Some(name) => Some(
+            config
+                .wrappers
+                .get(name)
+                .ok_or_else(|| eyre!("wrapper '{name}' not found"))?,
+        ),
+        None => None,
+    };
+
+    Ok((wrapper, wrap_name))
+}
+
+fn collect_snippet_names(
+    profile: Option<&ProfileConfig>,
+    request: &PipelineRequest<'_>,
+) -> (Vec<String>, Vec<String>) {
+    let mut pre = profile.map(|p| p.pre.clone()).unwrap_or_default();
+    pre.extend(request.additional_pre.iter().cloned());
+
+    let mut post = profile.map(|p| p.post.clone()).unwrap_or_default();
+    post.extend(request.additional_post.iter().cloned());
+
+    (pre, post)
+}
+
+fn build_pre_commands(
+    config: &Config,
+    snippet_names: &[String],
+    inline_commands: &[String],
+) -> Result<Vec<String>> {
+    let mut commands = resolve_snippets(&config.snippets.pre, snippet_names, "pre")?;
+    commands.extend(inline_commands.iter().cloned());
+    Ok(commands)
+}
+
+fn build_provider_args(
+    provider: &ProviderConfig,
+    request: &PipelineRequest<'_>,
+    provider_capture: bool,
+) -> Vec<String> {
+    let mut provider_args = provider.flags.clone();
+    if let Some(stdin) = &provider.stdin {
+        if provider_capture {
+            if request.capture_prompt {
+                provider_args.extend(stdin.args.clone());
+            }
+        } else {
+            provider_args.extend(stdin.args.clone());
+        }
+    }
+    provider_args.extend(request.provider_args.iter().cloned());
+    provider_args
+}
+
+fn compose_stages(
+    provider: &ProviderConfig,
+    capture_prompt: bool,
+    pre_commands: &[String],
+    post_commands: &[String],
+    provider_args: &[String],
+) -> Vec<String> {
+    let mut stages = Vec::new();
+    if capture_prompt {
+        stages.push(build_capture_command(provider, pre_commands, provider_args));
+    } else {
+        stages.extend(pre_commands.iter().cloned());
+        stages.push(command_string(&provider.bin, provider_args));
+    }
+    stages.extend(post_commands.iter().cloned());
+    stages
 }
 
 fn resolve_snippets(
