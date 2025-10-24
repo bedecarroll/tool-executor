@@ -78,7 +78,8 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
             .get("description")
             .or_else(|| entry.get("summary"))
             .and_then(Value::as_str)
-            .map(ToString::to_string);
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let tags = entry
             .get("tags")
             .and_then(Value::as_array)

@@ -44,6 +44,7 @@ const MESSAGE_SEARCH_FULL_TEXT: &str =
     "Search mode: full-text enabled. Press Ctrl-F to return to prompt-only.";
 const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  type to filter  •  / focus filter  •  Ctrl-P provider filter  •  Ctrl-F toggle search mode  •  ? help  •  q/Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
+const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 
 /// Run the TUI event loop until the user selects an action or exits.
 ///
@@ -419,10 +420,11 @@ fn format_dual_time(ts: Option<i64>) -> Option<String> {
 impl ProfileEntry {
     fn matches(&self, needle: &str) -> bool {
         let haystack = format!(
-            "{} {} {}",
+            "{} {} {} {}",
             self.display,
             self.description.as_deref().unwrap_or(""),
-            self.tags.join(" ")
+            self.tags.join(" "),
+            self.provider
         )
         .to_ascii_lowercase();
         haystack.contains(&needle.to_ascii_lowercase())
@@ -585,7 +587,12 @@ impl<'ctx> AppState<'ctx> {
                 pre: profile.pre.clone(),
                 post: profile.post.clone(),
                 wrap: profile.wrap.clone(),
-                description: None,
+                description: profile.description.clone().or_else(|| {
+                    Some(format!(
+                        "Launch via 'tx launch {} --profile {}'",
+                        profile.provider, profile_name
+                    ))
+                }),
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
                 kind: ProfileKind::Config { name: profile_name },
@@ -602,7 +609,7 @@ impl<'ctx> AppState<'ctx> {
                 );
                 continue;
             }
-            let mut description = format!("Run '{name}' using {}", provider.bin);
+            let mut description = format!("Launch via 'tx launch {name}' using {}", provider.bin);
             if provider.flags.is_empty() {
                 description.push('.');
             } else {
@@ -611,7 +618,7 @@ impl<'ctx> AppState<'ctx> {
                 description.push('.');
             }
             self.profiles.push(ProfileEntry {
-                display: format!("New {provider_name} session"),
+                display: provider_name.clone(),
                 provider: provider_name,
                 pre: Vec::new(),
                 post: Vec::new(),
@@ -1268,6 +1275,18 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
 
 fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
     let now = OffsetDateTime::now_utc();
+    let identifier_width = state
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Profile(profile) => {
+                let truncated = truncate(&profile.display, PROFILE_IDENTIFIER_LIMIT);
+                Some(truncated.chars().count())
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
     let items = state
         .entries
         .iter()
@@ -1289,17 +1308,28 @@ fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
                 ListItem::new(Line::from(spans))
             }
             Entry::Profile(profile) => {
+                let identifier = {
+                    let truncated = truncate(&profile.display, PROFILE_IDENTIFIER_LIMIT);
+                    let truncated_len = truncated.chars().count();
+                    if identifier_width == 0 || truncated_len >= identifier_width {
+                        truncated
+                    } else {
+                        format!("{truncated:<identifier_width$}")
+                    }
+                };
                 let mut spans = vec![Span::styled(
-                    truncate(&profile.display, 40),
+                    identifier,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )];
-                if !matches!(profile.kind, ProfileKind::Provider) {
+                if let Some(description) = profile.description.as_deref()
+                    && !description.is_empty()
+                {
                     spans.push(Span::raw("  "));
                     spans.push(Span::styled(
-                        profile.provider.clone(),
-                        Style::default().fg(Color::Blue),
+                        truncate(description, 80),
+                        Style::default().fg(Color::White),
                     ));
                 }
                 ListItem::new(Line::from(spans))

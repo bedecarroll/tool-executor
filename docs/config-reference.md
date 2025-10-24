@@ -53,6 +53,7 @@ Profiles bundle providers with optional snippets and wrappers.
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
 | `provider` | `string` | ✅ | Provider key to launch. |
+| `description` | `string` | | Short label shown in the TUI next to the profile name. Provide launch guidance here. |
 | `pre` | `array<string>` | | Ordered list of snippet names from `[snippets.pre]` to run beforehand. |
 | `post` | `array<string>` | | Snippet names from `[snippets.post]` to run after the session. |
 | `wrap` | `string` | | Name of a wrapper from `[wrappers]`. |
