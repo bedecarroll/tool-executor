@@ -40,6 +40,7 @@ pub struct SessionContext {
 pub struct PipelinePlan {
     pub pipeline: String,
     pub display: String,
+    pub friendly_display: String,
     pub env: Vec<(String, String)>,
     pub invocation: Invocation,
     pub provider: String,
@@ -120,9 +121,22 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
             .join(" "),
     };
 
+    let friendly_display = if wrapper.is_none() && capture_prompt {
+        friendly_capture_display(
+            provider,
+            &pre_commands,
+            &post_commands,
+            &provider_args,
+            &display,
+        )
+    } else {
+        display.clone()
+    };
+
     Ok(PipelinePlan {
         pipeline,
         display,
+        friendly_display,
         env,
         invocation,
         provider: provider.name.clone(),
@@ -244,6 +258,103 @@ fn compose_stages(
     }
     stages.extend(post_commands.iter().cloned());
     stages
+}
+
+#[derive(Debug)]
+struct FriendlyArg {
+    text: String,
+    needs_escape: bool,
+}
+
+fn friendly_capture_display(
+    provider: &ProviderConfig,
+    pre_commands: &[String],
+    post_commands: &[String],
+    provider_args: &[String],
+    fallback: &str,
+) -> String {
+    let substitution_pipeline = if pre_commands.is_empty() {
+        None
+    } else {
+        Some(pre_commands.join(" | "))
+    };
+
+    let substitution_raw = substitution_pipeline
+        .as_ref()
+        .map(|pipeline| format!("$({pipeline})"));
+    let substitution_quoted = substitution_pipeline.as_ref().map(|pipeline| {
+        let escaped = pipeline.replace('"', "\\\"");
+        format!("\"$({escaped})\"")
+    });
+
+    let mut args = Vec::new();
+
+    for arg in provider_args {
+        if arg == "{prompt}" {
+            if let Some(quoted) = &substitution_quoted {
+                args.push(FriendlyArg {
+                    text: quoted.clone(),
+                    needs_escape: false,
+                });
+            }
+            continue;
+        }
+
+        if arg.contains("{prompt}") {
+            if let Some(raw) = &substitution_raw {
+                let replaced = arg.replace("{prompt}", raw);
+                let needs_quotes = arg.contains(' ') || arg.contains('"');
+                if needs_quotes {
+                    let escaped = replaced.replace('"', "\\\"");
+                    args.push(FriendlyArg {
+                        text: format!("\"{escaped}\""),
+                        needs_escape: false,
+                    });
+                } else {
+                    args.push(FriendlyArg {
+                        text: replaced,
+                        needs_escape: false,
+                    });
+                }
+            } else {
+                let replaced = arg.replace("{prompt}", "<prompt>");
+                args.push(FriendlyArg {
+                    text: replaced,
+                    needs_escape: true,
+                });
+            }
+            continue;
+        }
+
+        args.push(FriendlyArg {
+            text: arg.clone(),
+            needs_escape: true,
+        });
+    }
+
+    let provider_stage = assemble_friendly_command(&provider.bin, &args);
+    let mut stages = Vec::with_capacity(post_commands.len() + 1);
+    stages.push(provider_stage);
+    stages.extend(post_commands.iter().cloned());
+
+    if stages.is_empty() {
+        fallback.to_string()
+    } else {
+        stages.join(" | ")
+    }
+}
+
+fn assemble_friendly_command(bin: &str, args: &[FriendlyArg]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_escape(Cow::Borrowed(bin)).to_string());
+    for arg in args {
+        if arg.needs_escape {
+            parts.push(shell_escape(Cow::Borrowed(arg.text.as_str())).to_string());
+        } else {
+            parts.push(arg.text.clone());
+        }
+    }
+    parts.join(" ")
 }
 
 fn resolve_snippets(
@@ -490,6 +601,10 @@ mod tests {
             "expected captured prompt placeholder in pipeline: {}",
             plan.pipeline
         );
+        assert_eq!(
+            plan.friendly_display, r#"codex --search "$(pa hello)""#,
+            "expected friendly display to use command substitution"
+        );
     }
 
     #[test]
@@ -559,6 +674,74 @@ mod tests {
             !plan.pipeline.contains("{prompt}"),
             "expected prompt placeholder to be absent: {}",
             plan.pipeline
+        );
+        assert_eq!(
+            plan.friendly_display, plan.display,
+            "expected friendly display to match pipeline when capture is disabled"
+        );
+    }
+
+    #[test]
+    fn friendly_display_for_capture_without_pre() {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: vec!["--search".into()],
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: Some(StdinMapping {
+                    args: vec!["{prompt}".into()],
+                    mode: StdinMode::CaptureArg,
+                }),
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args: Vec::new(),
+            capture_prompt: true,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let plan = build_pipeline(&request).expect("pipeline builds");
+        assert!(
+            plan.pipeline.contains("internal capture-arg"),
+            "expected capture helper when capture enabled: {}",
+            plan.pipeline
+        );
+        assert_eq!(
+            plan.friendly_display, "codex --search",
+            "expected friendly display to omit placeholder when source unknown"
         );
     }
 }

@@ -203,7 +203,10 @@ impl<'cli> App<'cli> {
             let mode = if cmd.emit_json {
                 EmitMode::Json
             } else {
-                EmitMode::Plain { newline: true }
+                EmitMode::Plain {
+                    newline: true,
+                    friendly: false,
+                }
             };
             emit_command(&plan, mode)?;
             return Ok(());
@@ -284,7 +287,10 @@ impl<'cli> App<'cli> {
             let mode = if cmd.emit_json {
                 EmitMode::Json
             } else {
-                EmitMode::Plain { newline: true }
+                EmitMode::Plain {
+                    newline: true,
+                    friendly: false,
+                }
             };
             emit_command(&plan, mode)?;
             return Ok(());
@@ -515,7 +521,7 @@ impl<'cli> App<'cli> {
 #[derive(Debug, Clone, Copy)]
 pub enum EmitMode {
     Json,
-    Plain { newline: bool },
+    Plain { newline: bool, friendly: bool },
 }
 
 pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
@@ -524,11 +530,16 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
             let payload = json!({ "command": plan.display, "env": plan.env });
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
-        EmitMode::Plain { newline } => {
-            if newline {
-                println!("{}", plan.display);
+        EmitMode::Plain { newline, friendly } => {
+            let command = if friendly {
+                &plan.friendly_display
             } else {
-                print!("{}", plan.display);
+                &plan.display
+            };
+            if newline {
+                println!("{command}");
+            } else {
+                print!("{command}");
                 io::stdout().flush()?;
             }
         }

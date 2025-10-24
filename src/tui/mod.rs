@@ -64,7 +64,13 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     terminal.show_cursor()?;
 
     match result? {
-        Some(Outcome::Emit(plan)) => app::emit_command(&plan, EmitMode::Plain { newline: true }),
+        Some(Outcome::Emit(plan)) => app::emit_command(
+            &plan,
+            EmitMode::Plain {
+                newline: true,
+                friendly: true,
+            },
+        ),
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
         None => Ok(()),
     }
@@ -1068,7 +1074,7 @@ impl<'ctx> AppState<'ctx> {
                         inline_pre: Vec::new(),
                         wrap: None,
                         provider_args: Vec::new(),
-                        capture_prompt: false,
+                        capture_prompt: true,
                         vars: HashMap::new(),
                         session: SessionContext::default(),
                         cwd: env::current_dir()?,
