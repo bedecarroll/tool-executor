@@ -22,6 +22,7 @@ pub struct PipelineRequest<'a> {
     pub inline_pre: Vec<String>,
     pub wrap: Option<&'a str>,
     pub provider_args: Vec<String>,
+    pub capture_prompt: bool,
     pub vars: HashMap<String, String>,
     pub session: SessionContext,
     pub cwd: PathBuf,
@@ -112,17 +113,25 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
 
     let post_commands = resolve_snippets(&config.snippets.post, &post_snippet_names, "post")?;
 
+    let provider_capture = provider
+        .stdin
+        .as_ref()
+        .is_some_and(|stdin| matches!(stdin.mode, StdinMode::CaptureArg));
+
     let mut provider_args = provider.flags.clone();
     if let Some(stdin) = &provider.stdin {
-        provider_args.extend(stdin.args.clone());
+        if provider_capture {
+            if request.capture_prompt {
+                provider_args.extend(stdin.args.clone());
+            }
+        } else {
+            provider_args.extend(stdin.args.clone());
+        }
     }
     provider_args.extend(request.provider_args.iter().cloned());
 
     let mut stages = Vec::new();
-    let capture_prompt = provider
-        .stdin
-        .as_ref()
-        .is_some_and(|stdin| matches!(stdin.mode, StdinMode::CaptureArg));
+    let capture_prompt = request.capture_prompt && provider_capture;
 
     if capture_prompt {
         let internal_command = build_capture_command(provider, &pre_commands, &provider_args);
@@ -406,6 +415,7 @@ mod tests {
             inline_pre: vec!["pa hello".into()],
             wrap: None,
             provider_args: Vec::new(),
+            capture_prompt: true,
             vars: HashMap::new(),
             session: SessionContext::default(),
             cwd: PathBuf::from("/tmp"),
@@ -420,6 +430,76 @@ mod tests {
         assert!(
             plan.pipeline.contains("{prompt}"),
             "expected captured prompt placeholder in pipeline: {}",
+            plan.pipeline
+        );
+    }
+
+    #[test]
+    fn capture_arg_is_skipped_when_disabled() {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: vec!["--search".into()],
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: Some(StdinMapping {
+                    args: vec!["{prompt}".into()],
+                    mode: StdinMode::CaptureArg,
+                }),
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args: Vec::new(),
+            capture_prompt: false,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let plan = build_pipeline(&request).expect("pipeline builds");
+        assert!(
+            !plan.pipeline.contains("internal capture-arg"),
+            "expected capture helper to be skipped: {}",
+            plan.pipeline
+        );
+        assert!(
+            plan.pipeline.contains("codex --search"),
+            "expected provider invocation in pipeline: {}",
+            plan.pipeline
+        );
+        assert!(
+            !plan.pipeline.contains("{prompt}"),
+            "expected prompt placeholder to be absent: {}",
             plan.pipeline
         );
     }

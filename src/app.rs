@@ -188,6 +188,7 @@ impl<'cli> App<'cli> {
             inline_pre: Vec::new(),
             wrap: cmd.wrap.as_deref(),
             provider_args: cmd.provider_args.clone(),
+            capture_prompt: true,
             vars,
             session: SessionContext::default(),
             cwd: std::env::current_dir()?,
@@ -263,6 +264,7 @@ impl<'cli> App<'cli> {
             inline_pre: Vec::new(),
             wrap: cmd.wrap.as_deref(),
             provider_args,
+            capture_prompt: false,
             vars,
             session: SessionContext {
                 id: Some(summary.id.clone()),

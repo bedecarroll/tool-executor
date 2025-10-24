@@ -37,12 +37,7 @@ use unicode_width::UnicodeWidthStr;
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
 const MESSAGE_FILTER_MODE: &str = "Filter mode: type to narrow results, Enter to apply, Esc to stop editing (Esc again from the list to quit).";
-const MESSAGE_PROVIDER_MODE: &str = "Provider filter mode: type a provider name, Enter to apply, Esc to clear (Esc again from the list to quit).";
-const MESSAGE_SEARCH_PROMPT: &str =
-    "Search mode: prompt-only search enabled. Press Ctrl-F for full-text.";
-const MESSAGE_SEARCH_FULL_TEXT: &str =
-    "Search mode: full-text enabled. Press Ctrl-F to return to prompt-only.";
-const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  type to filter  •  / focus filter  •  Ctrl-P provider filter  •  Ctrl-F toggle search mode  •  ? help  •  q/Esc quit";
+const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-P cycle provider filter  •  Ctrl-F toggle search mode  •  Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
 const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 
@@ -81,6 +76,7 @@ fn run_app<'a>(
 ) -> Result<Option<Outcome>> {
     let mut state = AppState::new(ctx)?;
     loop {
+        state.expire_status_message();
         terminal.draw(|frame| draw(frame, &mut state))?;
         if let Some(outcome) = state.outcome {
             return Ok(Some(outcome));
@@ -108,9 +104,11 @@ struct AppState<'ctx> {
     index: usize,
     filter: String,
     provider_filter: Option<String>,
+    provider_order: Vec<String>,
     full_text: bool,
     input_mode: InputMode,
     message: Option<String>,
+    overlay_message: Option<(String, Instant)>,
     preview_cache: HashMap<String, Preview>,
     outcome: Option<Outcome>,
     list_state: ratatui::widgets::ListState,
@@ -175,8 +173,6 @@ enum ProfileKind {
 enum InputMode {
     Normal,
     Filter,
-    Provider,
-    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +259,10 @@ impl SessionEntry {
     }
 
     fn snippet_line(&self) -> Option<String> {
+        if let Some(prompt) = self.first_prompt.as_deref().and_then(meaningful_excerpt) {
+            return Some(prompt);
+        }
+
         if let Some(snippet) = self.snippet.as_deref().and_then(meaningful_excerpt) {
             if let Some(role) = self.snippet_role.as_deref() {
                 return Some(format!("[{}] {snippet}", role.to_ascii_lowercase()));
@@ -270,7 +270,7 @@ impl SessionEntry {
             return Some(snippet);
         }
 
-        self.first_prompt.as_deref().and_then(meaningful_excerpt)
+        None
     }
 
     fn short_session_tag(&self) -> String {
@@ -478,6 +478,8 @@ impl EmptyEntry {
 impl<'ctx> AppState<'ctx> {
     fn new(ctx: &'ctx mut UiContext<'ctx>) -> Result<Self> {
         let defaults = &ctx.config.defaults;
+        let mut provider_order: Vec<String> = ctx.config.providers.keys().cloned().collect();
+        provider_order.sort();
 
         let mut state = Self {
             ctx,
@@ -486,9 +488,11 @@ impl<'ctx> AppState<'ctx> {
             index: 0,
             filter: String::new(),
             provider_filter: None,
+            provider_order,
             full_text: matches!(defaults.search_mode, SearchMode::FullText),
             input_mode: InputMode::Normal,
             message: None,
+            overlay_message: None,
             preview_cache: HashMap::new(),
             outcome: None,
             list_state: ratatui::widgets::ListState::default(),
@@ -510,59 +514,94 @@ impl<'ctx> AppState<'ctx> {
         }
     }
 
-    fn status_texts(&self) -> (String, String, String, String) {
-        let filter = if self.filter.is_empty() {
-            "filter: (off) — type to search".to_string()
-        } else {
-            format!("filter: {}", self.filter)
-        };
-        let provider_filter = match &self.provider_filter {
-            Some(p) => format!("provider: {p}"),
-            None => "provider: (all) — Ctrl-P to set".to_string(),
-        };
-        let search_mode = format!(
-            "mode: {} | archived hidden",
-            if self.full_text {
-                "full-text"
+    fn set_temporary_status_message(&mut self, message: String, duration: Duration) {
+        self.overlay_message = Some((message, Instant::now() + duration));
+    }
+
+    fn expire_status_message(&mut self) {
+        if let Some((_, until)) = &self.overlay_message
+            && Instant::now() >= *until
+        {
+            self.overlay_message = None;
+        }
+    }
+
+    fn cycle_provider_filter(&mut self) -> Result<()> {
+        if self.provider_order.is_empty() {
+            self.provider_filter = None;
+        } else if let Some(current) = &self.provider_filter {
+            if let Some(index) = self
+                .provider_order
+                .iter()
+                .position(|provider| provider == current)
+            {
+                if index + 1 < self.provider_order.len() {
+                    self.provider_filter = Some(self.provider_order[index + 1].clone());
+                } else {
+                    self.provider_filter = None;
+                }
             } else {
-                "prompt"
+                self.provider_filter = Some(self.provider_order[0].clone());
             }
-        );
-        let placeholder_message = self.entries.get(self.index).and_then(|entry| match entry {
-            Entry::Empty(empty) => empty.status.as_deref(),
-            _ => None,
-        });
-        let default_status = DEFAULT_STATUS_HINT.to_string();
-        let mut message = placeholder_message
-            .map(str::to_string)
-            .or_else(|| self.message.clone())
-            .unwrap_or(default_status);
-        if let Some(provider_text) = self.entries.get(self.index).and_then(|entry| match entry {
-            Entry::Session(session) => Some(format!("provider: {}", session.provider)),
-            Entry::Profile(profile) => Some(format!("provider: {}", profile.provider)),
-            Entry::Empty(_) => None,
-        }) {
-            message.push_str("  |  ");
-            message.push_str(&provider_text);
+        } else {
+            self.provider_filter = Some(self.provider_order[0].clone());
         }
 
-        (filter, provider_filter, search_mode, message)
+        self.refresh_entries()?;
+        let message = match &self.provider_filter {
+            Some(provider) => format!("provider: {provider}"),
+            None => "provider: all".to_string(),
+        };
+        self.set_temporary_status_message(message, Duration::from_secs(3));
+        Ok(())
+    }
+
+    fn status_message(&self) -> Option<String> {
+        if let Some((text, until)) = &self.overlay_message
+            && Instant::now() < *until
+        {
+            return Some(text.clone());
+        }
+
+        if matches!(self.input_mode, InputMode::Filter) {
+            return if self.filter.is_empty() {
+                Some(String::new())
+            } else {
+                Some(self.filter.clone())
+            };
+        }
+
+        if let Some(message) = self.entries.get(self.index).and_then(|entry| match entry {
+            Entry::Empty(empty) => empty.status.clone(),
+            _ => None,
+        }) && !message.is_empty()
+        {
+            return Some(message);
+        }
+
+        if let Some(message) = self.message.as_deref()
+            && !message.is_empty()
+            && message != MESSAGE_FILTER_MODE
+        {
+            return Some(message.to_string());
+        }
+
+        if !self.filter.is_empty() {
+            return Some(self.filter.clone());
+        }
+
+        None
     }
 
     fn status_banner(&self) -> String {
-        let (filter, provider_filter, search_mode, message) = self.status_texts();
-        format!("{filter}  |  {provider_filter}  |  {search_mode}  |  {message}")
+        self.status_message()
+            .unwrap_or_else(|| DEFAULT_STATUS_HINT.to_string())
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         match self.input_mode {
             InputMode::Normal => self.handle_key_normal(key),
             InputMode::Filter => self.handle_key_filter(key),
-            InputMode::Provider => self.handle_key_provider(key),
-            InputMode::Help => {
-                self.input_mode = InputMode::Normal;
-                Ok(false)
-            }
         }
     }
 
@@ -739,12 +778,8 @@ impl<'ctx> AppState<'ctx> {
                 self.entries.clear();
                 self.index = 0;
                 self.list_state.select(None);
-                self.message = Some("no results".to_string());
             } else {
                 let placeholder = EmptyEntry::for_state(self.ctx);
-                if matches!(self.message.as_deref(), Some("no results")) {
-                    self.message = None;
-                }
                 self.entries = vec![Entry::Empty(placeholder)];
                 self.index = 0;
                 self.list_state.select(Some(0));
@@ -759,10 +794,6 @@ impl<'ctx> AppState<'ctx> {
             self.index = self.entries.len().saturating_sub(1);
         }
         self.list_state.select(Some(self.index));
-        if matches!(self.message.as_deref(), Some("no results")) {
-            self.message = None;
-        }
-
         Ok(())
     }
 
@@ -781,7 +812,38 @@ impl<'ctx> AppState<'ctx> {
             .ctx
             .db
             .search_full_text(term, self.provider_filter.as_deref(), false)?;
-        Ok(hits.into_iter().map(SessionEntry::from_hit).collect())
+
+        let mut seen = HashSet::new();
+        let mut sessions = Vec::new();
+
+        for hit in hits {
+            if !seen.insert(hit.session_id.clone()) {
+                continue;
+            }
+
+            let mut entry = if let Some(summary) = self.ctx.db.session_summary(&hit.session_id)? {
+                let query = SessionQuery {
+                    id: summary.id.clone(),
+                    provider: summary.provider.clone(),
+                    label: summary.label.clone(),
+                    first_prompt: summary.first_prompt.clone(),
+                    actionable: summary.actionable,
+                    last_active: summary.last_active,
+                };
+                SessionEntry::from_query(query)
+            } else {
+                SessionEntry::from_hit(hit.clone())
+            };
+
+            if entry.first_prompt.is_none() {
+                entry.snippet.clone_from(&hit.snippet);
+                entry.snippet_role.clone_from(&hit.role);
+            }
+
+            sessions.push(entry);
+        }
+
+        Ok(sessions)
     }
 
     fn search_prompt_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
@@ -794,7 +856,7 @@ impl<'ctx> AppState<'ctx> {
 
     fn handle_key_normal(&mut self, key: KeyEvent) -> Result<bool> {
         match (key.code, key.modifiers) {
-            (KeyCode::Esc | KeyCode::Char('q'), _) => Ok(true),
+            (KeyCode::Esc, _) => Ok(true),
             (KeyCode::Down, _) => {
                 self.move_selection(1);
                 Ok(false)
@@ -817,8 +879,7 @@ impl<'ctx> AppState<'ctx> {
                 Ok(false)
             }
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                self.input_mode = InputMode::Provider;
-                self.set_status_message(MESSAGE_PROVIDER_MODE);
+                self.cycle_provider_filter()?;
                 Ok(false)
             }
             (KeyCode::Backspace, mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
@@ -831,27 +892,20 @@ impl<'ctx> AppState<'ctx> {
                 }
                 Ok(false)
             }
-            (KeyCode::Char('?'), _) => {
-                self.input_mode = InputMode::Help;
-                Ok(false)
-            }
             (KeyCode::Char(ch), mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                let was_empty = self.filter.is_empty();
                 self.filter.push(ch);
                 self.refresh_entries()?;
-                if was_empty {
-                    self.set_status_message(MESSAGE_FILTER_MODE);
-                }
                 Ok(false)
             }
             (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                 self.full_text = !self.full_text;
                 self.refresh_entries()?;
-                if self.full_text {
-                    self.set_status_message(MESSAGE_SEARCH_FULL_TEXT);
+                let mode_label = if self.full_text {
+                    "search: full-text"
                 } else {
-                    self.set_status_message(MESSAGE_SEARCH_PROMPT);
-                }
+                    "search: prompt"
+                };
+                self.set_temporary_status_message(mode_label.to_string(), Duration::from_secs(3));
                 Ok(false)
             }
             (KeyCode::Char('R'), _) => {
@@ -896,49 +950,6 @@ impl<'ctx> AppState<'ctx> {
                     }
                     self.filter.push(ch);
                     self.refresh_entries()?;
-                }
-                Ok(false)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    fn handle_key_provider(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Esc => {
-                self.provider_filter = None;
-                self.input_mode = InputMode::Normal;
-                self.refresh_entries()?;
-                self.clear_status_message(MESSAGE_PROVIDER_MODE);
-                Ok(false)
-            }
-            KeyCode::Enter => {
-                if let Some(provider) = &self.provider_filter
-                    && provider.trim().is_empty()
-                {
-                    self.provider_filter = None;
-                }
-                self.input_mode = InputMode::Normal;
-                self.refresh_entries()?;
-                self.clear_status_message(MESSAGE_PROVIDER_MODE);
-                Ok(false)
-            }
-            KeyCode::Backspace => {
-                if let Some(filter) = &mut self.provider_filter {
-                    filter.pop();
-                    if filter.is_empty() {
-                        self.provider_filter = None;
-                    }
-                }
-                self.refresh_entries()?;
-                Ok(false)
-            }
-            KeyCode::Char(ch) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    let filter = self.provider_filter.get_or_insert_with(String::new);
-                    filter.push(ch);
-                    self.refresh_entries()?;
-                    self.set_status_message(MESSAGE_PROVIDER_MODE);
                 }
                 Ok(false)
             }
@@ -1003,6 +1014,7 @@ impl<'ctx> AppState<'ctx> {
                     inline_pre: Vec::new(),
                     wrap: None,
                     provider_args,
+                    capture_prompt: false,
                     vars: HashMap::new(),
                     session: SessionContext {
                         id: Some(summary.id.clone()),
@@ -1028,6 +1040,7 @@ impl<'ctx> AppState<'ctx> {
                         inline_pre: Vec::new(),
                         wrap: profile.wrap.as_deref(),
                         provider_args: Vec::new(),
+                        capture_prompt: true,
                         vars: HashMap::new(),
                         session: SessionContext::default(),
                         cwd: env::current_dir()?,
@@ -1041,6 +1054,7 @@ impl<'ctx> AppState<'ctx> {
                         inline_pre: profile.inline_pre.clone(),
                         wrap: profile.wrap.as_deref(),
                         provider_args: Vec::new(),
+                        capture_prompt: true,
                         vars: HashMap::new(),
                         session: SessionContext::default(),
                         cwd: env::current_dir()?,
@@ -1054,6 +1068,7 @@ impl<'ctx> AppState<'ctx> {
                         inline_pre: Vec::new(),
                         wrap: None,
                         provider_args: Vec::new(),
+                        capture_prompt: false,
                         vars: HashMap::new(),
                         session: SessionContext::default(),
                         cwd: env::current_dir()?,
@@ -1257,7 +1272,7 @@ fn run_preview_filter(args: &[String], input: &str) -> Option<String> {
 fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(frame.area());
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -1267,10 +1282,6 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
     draw_entries(frame, columns[0], state);
     draw_preview(frame, columns[1], state);
     draw_status(frame, vertical[1], state);
-
-    if state.input_mode == InputMode::Help {
-        draw_help(frame, frame.area());
-    }
 }
 
 fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
@@ -1383,54 +1394,19 @@ fn draw_preview(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
-    let (filter, provider_filter, search_mode, message) = state.status_texts();
-    let mut lines = vec![Line::from(vec![
-        Span::raw(filter),
-        Span::raw("  |  "),
-        Span::raw(provider_filter),
-        Span::raw("  |  "),
-        Span::raw(search_mode),
-    ])];
-    lines.push(Line::from(message));
-    frame.render_widget(Paragraph::new(lines), area);
-}
+    let status = state.status_message();
+    let (content, style) = match status {
+        Some(text) => (format!(" {text} "), Style::default()),
+        None => (
+            format!(" {DEFAULT_STATUS_HINT} "),
+            Style::default().fg(Color::DarkGray),
+        ),
+    };
 
-fn draw_help(frame: &mut Frame<'_>, area: Rect) {
-    let help = vec![
-        Line::from("Enter: run pipeline    Tab: emit command    q/Esc: quit    R: reindex"),
-        Line::from(
-            "Type to filter results instantly    /: focus filter field    Backspace: erase characters",
-        ),
-        Line::from(
-            "Ctrl-P: provider filter (Enter applies, Esc clears)    Ctrl-F: toggle full-text search",
-        ),
-        Line::from(
-            "Archived sessions without user messages are hidden automatically to reduce clutter",
-        ),
-        Line::from("Press any key to close this help overlay."),
-    ];
-    let chunk = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-        ])
-        .split(area)[1];
-    let inner = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
-        ])
-        .split(chunk)[1];
-    let block = Block::default()
-        .title("Help")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Yellow));
-    let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, inner);
+    let paragraph = Paragraph::new(content)
+        .style(style)
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(paragraph, area);
 }
 
 fn truncate(input: &str, max: usize) -> String {
