@@ -303,6 +303,15 @@ fn friendly_capture_display(
         if arg.contains("{prompt}") {
             if let Some(raw) = &substitution_raw {
                 let replaced = arg.replace("{prompt}", raw);
+                let prompt_in_quotes = prompt_inside_double_quotes(arg);
+                if prompt_in_quotes {
+                    args.push(FriendlyArg {
+                        text: replaced,
+                        needs_escape: false,
+                    });
+                    continue;
+                }
+
                 let needs_quotes = arg.contains(' ') || arg.contains('"');
                 if needs_quotes {
                     let escaped = replaced.replace('"', "\\\"");
@@ -355,6 +364,42 @@ fn assemble_friendly_command(bin: &str, args: &[FriendlyArg]) -> String {
         }
     }
     parts.join(" ")
+}
+
+fn prompt_inside_double_quotes(input: &str) -> bool {
+    let mut in_quotes = false;
+    let mut escape = false;
+    let mut index = 0;
+    while index < input.len() {
+        let ch = input[index..].chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+
+        if ch == '\\' && !escape {
+            escape = true;
+            index += ch_len;
+            continue;
+        }
+
+        if ch == '"' && !escape {
+            in_quotes = !in_quotes;
+            index += ch_len;
+            continue;
+        }
+
+        if ch == '{' && input[index..].starts_with("{prompt}") {
+            if in_quotes {
+                return true;
+            }
+            index += "{prompt}".len();
+            escape = false;
+            continue;
+        }
+
+        escape = false;
+        index += ch_len;
+    }
+
+    false
 }
 
 fn resolve_snippets(
@@ -743,5 +788,28 @@ mod tests {
             plan.friendly_display, "codex --search",
             "expected friendly display to omit placeholder when source unknown"
         );
+    }
+
+    #[test]
+    fn friendly_capture_display_preserves_existing_quotes() {
+        let provider = ProviderConfig {
+            name: "codex".into(),
+            bin: "codex".into(),
+            flags: Vec::new(),
+            env: Vec::new(),
+            session_roots: Vec::new(),
+            stdin: Some(StdinMapping {
+                args: vec!["{prompt}".into()],
+                mode: StdinMode::CaptureArg,
+            }),
+        };
+
+        let pre = vec!["cat prompt.txt".to_string()];
+        let post: Vec<String> = Vec::new();
+        let args = vec!["--prompt=\"{prompt}\"".to_string()];
+
+        let friendly = friendly_capture_display(&provider, &pre, &post, &args, "fallback");
+
+        assert_eq!(friendly, "codex --prompt=\"$(cat prompt.txt)\"");
     }
 }
