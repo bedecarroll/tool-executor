@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use itertools::Itertools;
 use toml::Value;
 
@@ -114,24 +114,57 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
 }
 
 fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
-    let project_dirs = ProjectDirs::from("", "", APP_NAME)
-        .ok_or_else(|| eyre!("unable to resolve platform directories for {APP_NAME}"))?;
+    let (default_config_dir, default_data_dir, default_cache_dir) = resolve_default_directories()?;
 
     let config_dir = dir_override
         .map(PathBuf::from)
         .or_else(|| env::var("TX_CONFIG_DIR").ok().map(PathBuf::from))
-        .unwrap_or_else(|| project_dirs.config_dir().to_path_buf());
+        .unwrap_or(default_config_dir);
 
-    let data_dir = env::var("TX_DATA_DIR")
-        .map_or_else(|_| project_dirs.data_dir().to_path_buf(), PathBuf::from);
-    let cache_dir = env::var("TX_CACHE_DIR")
-        .map_or_else(|_| project_dirs.cache_dir().to_path_buf(), PathBuf::from);
+    let data_dir = env::var("TX_DATA_DIR").map_or_else(|_| default_data_dir.clone(), PathBuf::from);
+    let cache_dir =
+        env::var("TX_CACHE_DIR").map_or_else(|_| default_cache_dir.clone(), PathBuf::from);
 
     Ok(AppDirectories {
         config_dir,
         data_dir,
         cache_dir,
     })
+}
+
+fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
+    if let Some(project_dirs) = ProjectDirs::from("", "", APP_NAME) {
+        return Ok((
+            project_dirs.config_dir().to_path_buf(),
+            project_dirs.data_dir().to_path_buf(),
+            project_dirs.cache_dir().to_path_buf(),
+        ));
+    }
+
+    if let Some(base_dirs) = BaseDirs::new() {
+        return Ok((
+            base_dirs.config_dir().join(APP_NAME),
+            base_dirs.data_dir().join(APP_NAME),
+            base_dirs.cache_dir().join(APP_NAME),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        for key in ["LOCALAPPDATA", "APPDATA"] {
+            if let Ok(path) = env::var(key) {
+                let base = PathBuf::from(path);
+                let config = base.join(APP_NAME);
+                let data = config.clone();
+                let cache = config.clone();
+                return Ok((config, data, cache));
+            }
+        }
+    }
+
+    Err(eyre!(
+        "unable to resolve platform directories for {APP_NAME}"
+    ))
 }
 
 fn ensure_default_layout(dirs: &AppDirectories) -> Result<()> {
