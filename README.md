@@ -204,7 +204,7 @@ stdin_mode = "capture-arg"      # capture stdin and pass as positional prompt
 stdin_to = "codex:--prompt {prompt}"
 
 [snippets.pre]
-assemble = "pa {{var:pa_prompt}} {{var:pa_data}}"   # example
+assemble = "prompt-tool --from-stdin"
 
 [snippets.post]
 save_md  = "tee session.md"
@@ -235,13 +235,12 @@ wrap = "tmux_simple"
 # ~/.config/tx/conf.d/20-pa.toml
 [features.pa]
 enabled = true
-strategy = "exec_only"      # tx will call: pa list --json
 namespace = "pa"
-cache_ttl_ms = 5000
 ```
 
-* When enabled, `tx` runs `pa list --json`, turns each prompt into a virtual profile `pa/<name>` with `pre=["assemble"]`.
-* If pa is missing or `list` fails, `tx` hides pa items and shows a small header notice.
+* When enabled, `tx` calls `pa list --json`, turning each prompt into a virtual profile `pa/<name>` that runs `pa <prompt>` before your provider.
+* Configure your provider to capture the assembled text, e.g. `stdin_mode = "capture-arg"` and `stdin_to = "codex:{prompt}"` so the PA output becomes the final positional argument.
+* If `pa` is missing or `list` fails, `tx` hides PA items and shows a small header notice.
 
 ---
 

@@ -1,13 +1,11 @@
-use std::env;
-use std::path::PathBuf;
-use std::time::Duration;
-
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 use directories::BaseDirs;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use shellexpand::full;
+use std::env;
+use std::path::PathBuf;
 use toml::Value;
 
 #[derive(Debug, Clone)]
@@ -112,14 +110,7 @@ pub struct FeatureConfig {
 
 #[derive(Debug, Clone)]
 pub struct PromptAssemblerConfig {
-    pub strategy: PromptAssemblerStrategy,
     pub namespace: String,
-    pub cache_ttl: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptAssemblerStrategy {
-    ExecOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -220,15 +211,6 @@ impl Config {
                     ),
                 });
             }
-        }
-
-        if let Some(pa) = &self.features.prompt_assembler
-            && !matches!(pa.strategy, PromptAssemblerStrategy::ExecOnly)
-        {
-            diags.push(ConfigDiagnostic {
-                level: DiagnosticLevel::Error,
-                message: "unsupported prompt-assembler strategy".to_string(),
-            });
         }
 
         diags
@@ -574,41 +556,19 @@ impl RawFeatures {
 #[derive(Debug, Deserialize, Default)]
 struct RawPromptAssembler {
     enabled: Option<bool>,
-    #[serde(default = "RawPromptAssembler::default_strategy")]
-    strategy: String,
     #[serde(default = "RawPromptAssembler::default_namespace")]
     namespace: String,
-    #[serde(default = "RawPromptAssembler::default_cache_ttl")]
-    cache_ttl_ms: u64,
 }
 
 impl RawPromptAssembler {
-    fn default_strategy() -> String {
-        "exec_only".to_string()
-    }
-
     fn default_namespace() -> String {
         "pa".to_string()
     }
 
-    fn default_cache_ttl() -> u64 {
-        5_000
-    }
-
+    #[allow(clippy::unnecessary_wraps)]
     fn into_config(self) -> Result<PromptAssemblerConfig> {
-        let strategy = match self.strategy.as_str() {
-            "exec_only" => PromptAssemblerStrategy::ExecOnly,
-            other => {
-                return Err(eyre!("unsupported prompt assembler strategy '{other}'"));
-            }
-        };
-
-        let ttl = Duration::from_millis(self.cache_ttl_ms);
-
         Ok(PromptAssemblerConfig {
-            strategy,
             namespace: self.namespace,
-            cache_ttl: ttl,
         })
     }
 }

@@ -153,7 +153,7 @@ pub struct InternalCaptureArgCommand {
     #[arg(long = "pre", action = ArgAction::Append)]
     pub pre_commands: Vec<String>,
     /// Arguments forwarded to the provider before inserting the prompt.
-    #[arg(long = "arg", action = ArgAction::Append)]
+    #[arg(long = "arg", action = ArgAction::Append, allow_hyphen_values = true)]
     pub provider_args: Vec<String>,
     /// Maximum captured prompt size in bytes.
     #[arg(long = "prompt-limit", default_value = "1048576")]

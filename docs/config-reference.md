@@ -63,10 +63,11 @@ The prompt-assembler feature is currently the only optional module.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | `bool` | `false` | Enable the prompt assembler. When `false` the rest of the keys are ignored. |
-| `strategy` | `string` | `exec_only` | Execution strategy. Only `exec_only` is supported today. |
+| `enabled` | `bool` | `false` | Enable the prompt assembler. When `false` the namespace is ignored. |
 | `namespace` | `string` | `pa` | Prefix used when storing assembler output. |
-| `cache_ttl_ms` | `integer` | `5000` | Cache duration in milliseconds for assembler responses. |
+
+`tx` invokes `pa list --json` directly; additional strategies or caching knobs
+will be added here if the upstream tool grows alternative APIs.
 
 ## Derived Values
 

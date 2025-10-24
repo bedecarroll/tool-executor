@@ -19,6 +19,7 @@ pub struct PipelineRequest<'a> {
     pub profile: Option<&'a str>,
     pub additional_pre: Vec<String>,
     pub additional_post: Vec<String>,
+    pub inline_pre: Vec<String>,
     pub wrap: Option<&'a str>,
     pub provider_args: Vec<String>,
     pub vars: HashMap<String, String>,
@@ -106,6 +107,9 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
     post_snippet_names.extend(request.additional_post.iter().cloned());
 
     let pre_commands = resolve_snippets(&config.snippets.pre, &pre_snippet_names, "pre")?;
+    let mut pre_commands = pre_commands;
+    pre_commands.extend(request.inline_pre.iter().cloned());
+
     let post_commands = resolve_snippets(&config.snippets.post, &post_snippet_names, "post")?;
 
     let mut provider_args = provider.flags.clone();
@@ -345,4 +349,78 @@ fn command_string(bin: &str, args: &[String]) -> String {
         parts.push(shell_escape(Cow::Borrowed(arg)).to_string());
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::{
+        Defaults, FeatureConfig, ProviderConfig, SearchMode, SnippetConfig, StdinMapping,
+    };
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+
+    #[test]
+    fn inline_pre_commands_are_included_for_capture_arg() {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: vec!["--search".into()],
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: Some(StdinMapping {
+                    args: vec!["{prompt}".into()],
+                    mode: StdinMode::CaptureArg,
+                }),
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: vec!["pa hello".into()],
+            wrap: None,
+            provider_args: Vec::new(),
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let plan = build_pipeline(&request).expect("pipeline builds");
+        assert!(
+            plan.pipeline.contains("pa hello"),
+            "expected inline pre command in pipeline: {}",
+            plan.pipeline
+        );
+        assert!(
+            plan.pipeline.contains("{prompt}"),
+            "expected captured prompt placeholder in pipeline: {}",
+            plan.pipeline
+        );
+    }
 }
