@@ -1,0 +1,29 @@
+[book]
+title = "tx User Guide"
+authors = ["tx Maintainers"]
+description = "Comprehensive user-facing documentation for the tx tool executor."
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "build"
+create-missing = true
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/bedecarroll/tool-executor"
+git-repository-icon = "fa-github"
+site-url = "/"
+fold.enable = true
+
+[output.html.playground]
+editable = false
+copyable = true
+
+[output.html.search]
+use-boolean-and = true
+boost-title = 2.0
+boost-hierarchy = 1.2
+boost-paragraph = 1.0

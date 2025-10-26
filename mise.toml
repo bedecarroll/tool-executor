@@ -93,4 +93,4 @@ run = ["cargo insta review"]
 
 [tasks.dist-doc]
 description = "Explain how to configure cargo-dist"
-run = ["cat docs/releasing.md"]
+run = ["cat docs/src/reference/releasing.md"]
