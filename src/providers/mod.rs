@@ -20,3 +20,28 @@ pub fn resume_info(summary: &SessionSummary) -> Result<Option<ResumePlan>> {
         _ => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_info_returns_none_for_other_providers() -> Result<()> {
+        let summary = SessionSummary {
+            id: "sess".into(),
+            provider: "other".into(),
+            label: None,
+            path: "/tmp/other.jsonl".into(),
+            uuid: None,
+            first_prompt: None,
+            actionable: false,
+            created_at: None,
+            started_at: None,
+            last_active: None,
+            size: 0,
+            mtime: 0,
+        };
+        assert!(resume_info(&summary)?.is_none());
+        Ok(())
+    }
+}

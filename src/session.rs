@@ -212,3 +212,137 @@ pub fn fallback_session_uuid(path: &Path) -> Option<String> {
 
     Some(trimmed.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_summary() -> SessionSummary {
+        SessionSummary {
+            id: "sample".into(),
+            provider: "codex".into(),
+            label: Some("demo".into()),
+            path: PathBuf::from("/tmp/sample.jsonl"),
+            uuid: Some("abc123".into()),
+            first_prompt: Some("Hello world".into()),
+            actionable: true,
+            created_at: Some(1),
+            started_at: Some(2),
+            last_active: Some(3),
+            size: 1024,
+            mtime: 4,
+        }
+    }
+
+    #[test]
+    fn transcript_markdown_limits_output() {
+        let mut messages = Vec::new();
+        for (idx, (role, content)) in [
+            ("user", "First message"),
+            ("assistant", "Response"),
+            ("system", "Skip me"),
+            (
+                "assistant",
+                "<user_instructions>ignored</user_instructions>",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut record = MessageRecord::new(
+                "sample",
+                i64::try_from(idx).expect("message index within i64 range"),
+                role,
+                content,
+                None,
+                Some(5),
+            );
+            if idx == 0 {
+                record.is_first = true;
+            }
+            messages.push(record);
+        }
+        let transcript = Transcript {
+            session: sample_summary(),
+            messages,
+        };
+
+        let lines = transcript.markdown_lines(Some(1));
+        assert!(lines.iter().any(|line| line.contains("First message")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("… and 1 more messages"))
+        );
+        assert!(lines.iter().all(|line| !line.contains("Skip me")));
+    }
+
+    #[test]
+    fn transcript_markdown_includes_assistant_roles_without_limit() {
+        let mut messages = Vec::new();
+        for (idx, (role, content)) in [("user", "Hello"), ("assistant", "Hi there")]
+            .into_iter()
+            .enumerate()
+        {
+            let mut record = MessageRecord::new(
+                "sample",
+                i64::try_from(idx).expect("message index within i64 range"),
+                role,
+                content,
+                None,
+                Some(5),
+            );
+            if idx == 0 {
+                record.is_first = true;
+            }
+            messages.push(record);
+        }
+        let transcript = Transcript {
+            session: sample_summary(),
+            messages,
+        };
+
+        let lines = transcript.markdown_lines(None);
+        assert!(lines.iter().any(|line| line.contains("— User")));
+        assert!(lines.iter().any(|line| line.contains("— Assistant")));
+    }
+
+    #[test]
+    fn session_summary_has_path_matches_exact_path() {
+        let summary = sample_summary();
+        assert!(summary.has_path("/tmp/sample.jsonl"));
+        assert!(!summary.has_path("/tmp/other.jsonl"));
+    }
+
+    #[test]
+    fn session_uuid_from_value_falls_back_to_session_key() {
+        let value: Value =
+            serde_json::json!({"session": {"id": "session-1"}, "payload": {"type": "noop"}});
+        assert_eq!(session_uuid_from_value(&value), Some("session-1".into()));
+    }
+
+    #[test]
+    fn session_uuid_from_value_uses_payload_id() {
+        let value: Value = serde_json::json!({"payload": {"id": "payload-42"}});
+        assert_eq!(session_uuid_from_value(&value), Some("payload-42".into()));
+    }
+
+    #[test]
+    fn fallback_session_uuid_extracts_rollout_suffix() {
+        let path = Path::new("/tmp/rollout-2024-10-26-abcdef.jsonl");
+        assert_eq!(fallback_session_uuid(path), Some("abcdef".to_string()));
+    }
+
+    #[test]
+    fn fallback_session_uuid_handles_rollout_without_suffix() {
+        let path = Path::new("/tmp/rollout-log.jsonl");
+        assert_eq!(fallback_session_uuid(path), Some("log".to_string()));
+    }
+
+    #[test]
+    fn session_summary_staleness_detects_changes() {
+        let summary = sample_summary();
+        assert!(summary.is_stale(2048, 8));
+        assert!(!summary.is_stale(1024, 4));
+    }
+}

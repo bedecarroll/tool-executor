@@ -550,9 +550,12 @@ fn summarize_instructions(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::model::{Defaults, FeatureConfig, SearchMode, SnippetConfig};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use color_eyre::Result;
+    use indexmap::IndexMap;
+    use serde_json::json;
     use std::convert::TryFrom;
 
     fn provider_with_root(root: &Path) -> ProviderConfig {
@@ -563,6 +566,29 @@ mod tests {
             env: Vec::new(),
             session_roots: vec![root.to_path_buf()],
             stdin: None,
+        }
+    }
+
+    fn config_from_provider(provider: ProviderConfig) -> Config {
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider);
+        Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
         }
     }
 
@@ -633,5 +659,451 @@ mod tests {
         assert_eq!(ingest.summary.last_active, Some(now));
 
         Ok(())
+    }
+
+    #[test]
+    fn indexer_reports_errors_for_unexpected_payloads() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+
+        let good = sessions_dir.child("good.jsonl");
+        good.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        )?;
+
+        let bad = sessions_dir.child("bad.jsonl");
+        bad.write_str("{not-json}\n")?;
+
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.updated, 1, "expected one session to be ingested");
+        assert_eq!(report.errors.len(), 1, "expected one error for bad payload");
+        let error_path = &report.errors[0].path;
+        assert!(
+            error_path.ends_with("bad.jsonl"),
+            "unexpected error path: {error_path:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_processes_single_file_roots() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Inline root\"}}\n",
+        )?;
+
+        let provider = provider_with_root(session_file.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.scanned, 1, "single file root should be scanned once");
+        assert_eq!(report.updated, 1, "session should be ingested");
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_ignores_missing_roots() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.child("missing-root");
+        let provider = provider_with_root(missing.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.removed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_skips_non_jsonl_file_roots() -> Result<()> {
+        let temp = TempDir::new()?;
+        let notes = temp.child("notes.txt");
+        notes.write_str("not jsonl")?;
+
+        let provider = provider_with_root(notes.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.updated, 0);
+        assert!(report.errors.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_removes_sessions_missing_on_disk() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let missing_path = sessions_dir.child("missing.jsonl");
+        let summary = SessionSummary {
+            id: "codex/missing.jsonl".into(),
+            provider: "codex".into(),
+            label: Some("orphaned".into()),
+            path: missing_path.path().to_path_buf(),
+            uuid: Some("missing".into()),
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(0),
+            started_at: Some(0),
+            last_active: Some(0),
+            size: 1,
+            mtime: 1,
+        };
+        let ingest = SessionIngest::new(
+            summary,
+            vec![MessageRecord::new(
+                "codex/missing.jsonl",
+                0,
+                "system",
+                "hello",
+                None,
+                None,
+            )],
+        );
+        db.upsert_session(&ingest)?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.removed, 1, "expected missing session to be pruned");
+        assert_eq!(report.updated, 0, "no new sessions expected");
+        assert_eq!(db.count_sessions()?, 0, "database should be empty");
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_skips_unchanged_sessions_on_subsequent_runs() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+
+        let session_file = sessions_dir.child("session.jsonl");
+        session_file.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ping\"}}\n",
+        )?;
+
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        {
+            let mut indexer = Indexer::new(&mut db, &config);
+            let report = indexer.run()?;
+            assert_eq!(report.updated, 1, "initial run should ingest session");
+            assert_eq!(report.skipped, 0);
+        }
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.updated, 0, "second run should not rewrite session");
+        assert_eq!(report.skipped, 1, "unchanged session should be skipped");
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_handles_missing_roots_and_single_file_providers() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.child("missing");
+        let single = temp.child("single.jsonl");
+        single.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ping\"}}\n",
+        )?;
+
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "echo".into(),
+                flags: Vec::new(),
+                env: Vec::new(),
+                session_roots: vec![missing.path().to_path_buf(), single.path().to_path_buf()],
+                stdin: None,
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.updated, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_removes_stale_sessions_when_files_deleted() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+        let session_file = sessions_dir.child("obsolete.jsonl");
+        session_file.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        )?;
+
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        {
+            let mut indexer = Indexer::new(&mut db, &config);
+            let report = indexer.run()?;
+            assert_eq!(report.updated, 1);
+            assert_eq!(db.count_sessions()?, 1);
+        }
+
+        fs::remove_file(session_file.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.removed, 1, "stale session should be removed");
+        assert_eq!(db.count_sessions()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn compute_session_id_normalizes_paths() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        let nested = sessions_dir.child("nested");
+        nested.create_dir_all()?;
+        let file = nested.child("conversation.jsonl");
+        file.write_str("{}\n")?;
+        let provider = provider_with_root(sessions_dir.path());
+        let (id, relative) = compute_session_id(&provider, file.path());
+        assert_eq!(id, format!("{}/nested/conversation.jsonl", provider.name));
+        assert_eq!(relative, "nested/conversation.jsonl");
+        Ok(())
+    }
+
+    #[test]
+    fn compute_session_id_falls_back_to_filename() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+        let file = temp.child("orphan.jsonl");
+        file.write_str("{}\n")?;
+        let provider = provider_with_root(sessions_dir.path());
+        let (id, relative) = compute_session_id(&provider, file.path());
+        assert_eq!(id, "codex/orphan.jsonl");
+        assert_eq!(relative, "orphan.jsonl");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compute_session_id_handles_canonical_roots() -> Result<()> {
+        use std::os::unix::fs as unix_fs;
+
+        let temp = TempDir::new()?;
+        let real_dir = temp.child("real");
+        real_dir.create_dir_all()?;
+        let file = real_dir.child("symlinked.jsonl");
+        file.write_str("{}\n")?;
+
+        let link = temp.child("link");
+        unix_fs::symlink(real_dir.path(), link.path())?;
+        let provider = provider_with_root(link.path());
+        let (id, relative) = compute_session_id(&provider, file.path());
+        assert_eq!(id, format!("{}/symlinked.jsonl", provider.name));
+        assert_eq!(relative, "symlinked.jsonl");
+        Ok(())
+    }
+
+    #[test]
+    fn update_existing_source_prefers_response_item() {
+        let mut record = MessageRecord::new(
+            "sess",
+            0,
+            "assistant",
+            "reply",
+            Some("event_msg".into()),
+            None,
+        );
+        update_existing_source(&mut record, Some(&"response_item".to_string()));
+        assert_eq!(record.source.as_deref(), Some("response_item"));
+
+        update_existing_source(&mut record, Some(&"other".to_string()));
+        assert_eq!(record.source.as_deref(), Some("response_item"));
+
+        let mut missing = MessageRecord::new("sess", 1, "assistant", "text", None, None);
+        update_existing_source(&mut missing, Some(&"event_msg".to_string()));
+        assert_eq!(missing.source.as_deref(), Some("event_msg"));
+    }
+
+    #[test]
+    fn extract_text_handles_nested_payloads() {
+        let nested = json!({
+            "payload": {
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "text", "text": " world"}
+                ]
+            }
+        });
+        assert_eq!(extract_text(&nested), Some("Hello world".into()));
+
+        let message = json!({
+            "message": "fallback"
+        });
+        assert_eq!(extract_text(&message), Some("fallback".into()));
+    }
+
+    #[test]
+    fn extract_messages_covers_event_and_response() {
+        let event = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Hello"
+            }
+        });
+        let mut results = extract_messages(&event);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "user");
+
+        let response = json!({
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi"}]
+            }
+        });
+        results = extract_messages(&response);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "assistant");
+
+        let direct = json!({
+            "role": "system",
+            "content": [{"type": "text", "text": "System"}]
+        });
+        results = extract_messages(&direct);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "system");
     }
 }

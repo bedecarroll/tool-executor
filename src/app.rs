@@ -23,7 +23,7 @@ use crate::indexer::{IndexError, IndexReport, Indexer};
 use crate::pipeline::{Invocation, PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::{PromptAssembler, PromptStatus};
 use crate::providers;
-use crate::session::{SessionSummary, Transcript};
+use crate::session::{SearchHit, SessionSummary, Transcript};
 use crate::tui;
 use crate::util;
 
@@ -60,9 +60,13 @@ impl<'cli> App<'cli> {
         let db_path = loaded.directories.data_dir.join("tx.sqlite3");
         let mut db = Database::open(&db_path)?;
 
-        let mut indexer = Indexer::new(&mut db, &loaded.config);
-        let index_report = indexer.run()?;
-        log_index_report(&index_report);
+        if std::env::var_os("TX_SKIP_INDEX").is_none() {
+            let mut indexer = Indexer::new(&mut db, &loaded.config);
+            let index_report = indexer.run()?;
+            log_index_report(&index_report);
+        } else {
+            tracing::debug!("skipping indexer run due to TX_SKIP_INDEX");
+        }
 
         let prompt = loaded
             .config
@@ -132,31 +136,13 @@ impl<'cli> App<'cli> {
 
         let role_filter = cmd.role.as_deref();
 
-        let mut detailed = Vec::new();
-        for hit in hits {
-            if let Some(filter) = role_filter
-                && !hit
-                    .role
-                    .as_deref()
-                    .is_some_and(|role| role.eq_ignore_ascii_case(filter))
-            {
-                continue;
-            }
-            if let Some(summary) = self.db.session_summary(&hit.session_id)? {
-                if let Some(cutoff) = since_epoch
-                    && summary.last_active.is_some_and(|last| last < cutoff)
-                {
-                    continue;
-                }
-                detailed.push((hit, summary));
-            }
-        }
-
-        if let Some(limit) = cmd.limit
-            && detailed.len() > limit
-        {
-            detailed.truncate(limit);
-        }
+        let detailed = Self::collate_search_results(
+            hits,
+            since_epoch,
+            role_filter,
+            cmd.limit,
+            |session_id| self.db.session_summary(session_id),
+        )?;
 
         let payload: Vec<_> = detailed
             .iter()
@@ -168,6 +154,46 @@ impl<'cli> App<'cli> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&payload)?);
         Ok(())
+    }
+
+    fn collate_search_results<F>(
+        hits: Vec<SearchHit>,
+        since_epoch: Option<i64>,
+        role_filter: Option<&str>,
+        limit: Option<usize>,
+        mut summary_lookup: F,
+    ) -> Result<Vec<(SearchHit, SessionSummary)>>
+    where
+        F: FnMut(&str) -> Result<Option<SessionSummary>>,
+    {
+        let mut detailed = Vec::new();
+        for hit in hits {
+            if let Some(filter) = role_filter
+                && !hit
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case(filter))
+            {
+                continue;
+            }
+            let Some(summary) = summary_lookup(&hit.session_id)? else {
+                continue;
+            };
+            if let Some(cutoff) = since_epoch
+                && summary.last_active.is_some_and(|last| last < cutoff)
+            {
+                continue;
+            }
+            detailed.push((hit, summary));
+        }
+
+        if let Some(limit) = limit
+            && detailed.len() > limit
+        {
+            detailed.truncate(limit);
+        }
+
+        Ok(detailed)
     }
 
     /// Build and optionally execute a pipeline to resume an existing session.
@@ -503,10 +529,21 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
 }
 
 pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
-    let stdin_is_terminal = io::stdin().is_terminal();
-    let should_prompt = plan.needs_stdin_prompt && stdin_is_terminal;
-    let capture_input = if should_prompt {
-        Some(prompt_for_stdin(plan.stdin_prompt_label.as_deref())?)
+    execute_plan_with_prompt(plan, io::stdin().is_terminal(), |label| {
+        prompt_for_stdin(label).map(Some)
+    })
+}
+
+fn execute_plan_with_prompt<P>(
+    plan: &PipelinePlan,
+    stdin_is_terminal: bool,
+    mut prompt: P,
+) -> Result<()>
+where
+    P: FnMut(Option<&str>) -> Result<Option<String>>,
+{
+    let capture_input = if plan.needs_stdin_prompt && stdin_is_terminal {
+        prompt(plan.stdin_prompt_label.as_deref())?
     } else {
         None
     };
@@ -527,7 +564,7 @@ pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
             cmd.arg("-c").arg(command);
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
-            if let Some(input) = capture_input.as_deref() {
+            if let Some(ref input) = capture_input {
                 cmd.env("TX_CAPTURE_STDIN_DATA", input);
             }
             let status = cmd.status()?;
@@ -543,7 +580,7 @@ pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
             cmd.args(&argv[1..]);
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
-            if let Some(input) = capture_input.as_deref() {
+            if let Some(ref input) = capture_input {
                 cmd.env("TX_CAPTURE_STDIN_DATA", input);
             }
             let status = cmd.status()?;
@@ -568,6 +605,12 @@ fn parse_vars(vars: &[String]) -> Result<HashMap<String, String>> {
 }
 
 fn prompt_for_stdin(label: Option<&str>) -> Result<String> {
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    prompt_for_stdin_with_reader(label, &mut handle)
+}
+
+fn prompt_for_stdin_with_reader<R: BufRead>(label: Option<&str>, reader: &mut R) -> Result<String> {
     if let Some(name) = label {
         eprintln!(
             "tx: {name} can accept extra context. Enter text and press Enter (leave blank to skip):"
@@ -579,9 +622,7 @@ fn prompt_for_stdin(label: Option<&str>) -> Result<String> {
     io::stderr().flush()?;
 
     let mut buffer = String::new();
-    let stdin = io::stdin();
-    let mut handle = stdin.lock();
-    handle.read_line(&mut buffer)?;
+    reader.read_line(&mut buffer)?;
 
     if buffer.ends_with("\r\n") {
         buffer.truncate(buffer.len() - 2);
@@ -695,5 +736,948 @@ fn check_prompt_assembler(cfg: &PromptAssemblerConfig) {
             println!("✘ prompt assembler unavailable: {message}");
         }
         PromptStatus::Disabled => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{
+        ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
+    };
+    use crate::config::model::{
+        Config, ConfigDiagnostic, Defaults, DiagnosticLevel, EnvVar, FeatureConfig, ProfileConfig,
+        ProviderConfig, SearchMode, Snippet, SnippetConfig, WrapperConfig, WrapperMode,
+    };
+    use crate::config::{AppDirectories, ConfigSource, ConfigSourceKind, LoadedConfig};
+    use crate::db::Database;
+    use crate::indexer::IndexError;
+    use crate::session::{MessageRecord, SearchHit, SessionIngest, SessionSummary};
+    use assert_fs::TempDir;
+    use assert_fs::prelude::*;
+    use color_eyre::eyre::eyre;
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+    use std::env;
+    use std::fs;
+    use std::io::{Cursor, Write};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{LazyLock, Mutex};
+    use time::OffsetDateTime;
+    use toml::Value;
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvOverride {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvOverride {
+        fn set_path(key: &'static str, path: &Path) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, path);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn sample_summary() -> SessionSummary {
+        SessionSummary {
+            id: "id".into(),
+            provider: "codex".into(),
+            label: Some("demo".into()),
+            path: PathBuf::from("/tmp/file.jsonl"),
+            uuid: Some("abc".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(1),
+            started_at: Some(2),
+            last_active: Some(3),
+            size: 4,
+            mtime: 5,
+        }
+    }
+
+    #[test]
+    fn parse_vars_splits_key_value_pairs() -> Result<()> {
+        let vars = vec!["FOO=bar".into(), "BAZ=qux=quux".into()];
+        let parsed = parse_vars(&vars)?;
+        assert_eq!(parsed.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(parsed.get("BAZ"), Some(&"qux=quux".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_vars_rejects_missing_equals() {
+        let err = parse_vars(&["invalid".into()]).unwrap_err();
+        assert!(err.to_string().contains("expected KEY=VALUE"));
+    }
+
+    #[test]
+    fn prompt_for_stdin_with_reader_appends_newline() -> Result<()> {
+        let mut reader = Cursor::new("value");
+        let captured = prompt_for_stdin_with_reader(None, &mut reader)?;
+        assert_eq!(captured, "value\n");
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_for_stdin_with_reader_normalizes_crlf() -> Result<()> {
+        let mut reader = Cursor::new("value\r\n");
+        let captured = prompt_for_stdin_with_reader(Some("Label"), &mut reader)?;
+        assert_eq!(captured, "value\n");
+        Ok(())
+    }
+
+    #[test]
+    fn summary_to_json_includes_snippet() {
+        let summary = sample_summary();
+        let value = summary_to_json(&summary, Some("snippet"), Some("user"));
+        assert_eq!(value["id"], "id");
+        assert_eq!(value["snippet"], "snippet");
+        assert_eq!(value["snippet_role"], "user");
+    }
+
+    #[test]
+    fn collate_search_results_applies_filters_and_limit() -> Result<()> {
+        let hits = vec![
+            SearchHit {
+                session_id: "keep-1".into(),
+                provider: "codex".into(),
+                label: None,
+                role: Some("user".into()),
+                snippet: Some("hello".into()),
+                last_active: Some(120),
+                actionable: true,
+            },
+            SearchHit {
+                session_id: "skip-role".into(),
+                provider: "codex".into(),
+                label: None,
+                role: Some("assistant".into()),
+                snippet: None,
+                last_active: Some(140),
+                actionable: true,
+            },
+            SearchHit {
+                session_id: "stale".into(),
+                provider: "codex".into(),
+                label: None,
+                role: Some("user".into()),
+                snippet: None,
+                last_active: Some(10),
+                actionable: true,
+            },
+            SearchHit {
+                session_id: "keep-2".into(),
+                provider: "codex".into(),
+                label: None,
+                role: Some("USER".into()),
+                snippet: None,
+                last_active: Some(200),
+                actionable: true,
+            },
+        ];
+
+        let mut summaries = HashMap::new();
+        let mut summary_one = sample_summary();
+        summary_one.id = "keep-1".into();
+        summary_one.last_active = Some(120);
+        summaries.insert(summary_one.id.clone(), summary_one);
+
+        let mut summary_two = sample_summary();
+        summary_two.id = "skip-role".into();
+        summary_two.last_active = Some(140);
+        summaries.insert(summary_two.id.clone(), summary_two);
+
+        let mut summary_three = sample_summary();
+        summary_three.id = "stale".into();
+        summary_three.last_active = Some(10);
+        summaries.insert(summary_three.id.clone(), summary_three);
+
+        let mut summary_four = sample_summary();
+        summary_four.id = "keep-2".into();
+        summary_four.last_active = Some(200);
+        summaries.insert(summary_four.id.clone(), summary_four);
+
+        let mut lookup =
+            |id: &str| -> Result<Option<SessionSummary>> { Ok(summaries.get(id).cloned()) };
+
+        let detailed =
+            App::collate_search_results(hits, Some(100), Some("user"), Some(1), &mut lookup)?;
+        assert_eq!(detailed.len(), 1);
+        assert_eq!(detailed[0].0.session_id, "keep-1");
+        Ok(())
+    }
+
+    #[test]
+    fn collate_search_results_skips_missing_summary() -> Result<()> {
+        let hits = vec![SearchHit {
+            session_id: "missing".into(),
+            provider: "codex".into(),
+            label: None,
+            role: Some("user".into()),
+            snippet: None,
+            last_active: Some(50),
+            actionable: true,
+        }];
+
+        let mut lookup = |_id: &str| -> Result<Option<SessionSummary>> { Ok(None) };
+        let detailed = App::collate_search_results(hits, None, None, None, &mut lookup)?;
+        assert!(detailed.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn log_index_report_emits_warnings_for_errors() {
+        let mut report = IndexReport {
+            scanned: 1,
+            updated: 0,
+            skipped: 0,
+            removed: 0,
+            errors: vec![IndexError {
+                path: PathBuf::from("missing.jsonl"),
+                error: eyre!("boom"),
+            }],
+        };
+        log_index_report(&report);
+        report.errors.clear();
+        log_index_report(&report);
+    }
+
+    fn setup_directories(temp: &TempDir) -> Result<AppDirectories> {
+        let directories = AppDirectories {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+        };
+        directories.ensure_all()?;
+        Ok(directories)
+    }
+
+    fn create_session_artifacts(temp: &TempDir) -> Result<(PathBuf, PathBuf)> {
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir)?;
+        let session_path = sessions_dir.join("session.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"test\"}\n")?;
+        Ok((sessions_dir, session_path))
+    }
+
+    fn fixture_config(sessions_dir: &Path) -> Config {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "echo".into(),
+                flags: vec!["--from-config".into()],
+                env: vec![EnvVar {
+                    key: "TEST_PRESENT".into(),
+                    value_template: "${env:TEST_PRESENT}".into(),
+                }],
+                session_roots: vec![sessions_dir.to_path_buf()],
+                stdin: None,
+            },
+        );
+        providers.insert(
+            "alt".into(),
+            ProviderConfig {
+                name: "alt".into(),
+                bin: "echo".into(),
+                flags: Vec::new(),
+                env: vec![EnvVar {
+                    key: "TEST_MISSING".into(),
+                    value_template: "${env:TEST_MISSING}".into(),
+                }],
+                session_roots: vec![sessions_dir.to_path_buf()],
+                stdin: None,
+            },
+        );
+
+        let mut pre_snippets = IndexMap::new();
+        pre_snippets.insert(
+            "pre".into(),
+            Snippet {
+                name: "pre".into(),
+                command: "echo pre".into(),
+            },
+        );
+
+        let snippets = SnippetConfig {
+            pre: pre_snippets,
+            post: IndexMap::new(),
+        };
+
+        let mut profiles = IndexMap::new();
+        profiles.insert(
+            "default".into(),
+            ProfileConfig {
+                name: "default".into(),
+                provider: "codex".into(),
+                description: Some("Primary profile".into()),
+                pre: vec!["pre".into()],
+                post: Vec::new(),
+                wrap: Some("wrap".into()),
+            },
+        );
+        profiles.insert(
+            "mismatch".into(),
+            ProfileConfig {
+                name: "mismatch".into(),
+                provider: "alt".into(),
+                description: None,
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+            },
+        );
+
+        let mut wrappers = IndexMap::new();
+        wrappers.insert(
+            "wrap".into(),
+            WrapperConfig {
+                name: "wrap".into(),
+                mode: WrapperMode::Shell {
+                    command: "echo {{CMD}}".into(),
+                },
+            },
+        );
+        wrappers.insert(
+            "execwrap".into(),
+            WrapperConfig {
+                name: "execwrap".into(),
+                mode: WrapperMode::Exec {
+                    argv: vec!["exec-binary".into()],
+                },
+            },
+        );
+
+        Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: Some("default".into()),
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: Some(vec!["cat".into()]),
+            },
+            providers,
+            snippets,
+            wrappers,
+            profiles,
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        }
+    }
+
+    fn fixture_sources(directories: &AppDirectories) -> Vec<ConfigSource> {
+        vec![
+            ConfigSource {
+                kind: ConfigSourceKind::Main,
+                path: directories.config_dir.join("config.toml"),
+            },
+            ConfigSource {
+                kind: ConfigSourceKind::DropIn,
+                path: directories.config_dir.join("conf.d/10-extra.toml"),
+            },
+            ConfigSource {
+                kind: ConfigSourceKind::Project,
+                path: directories.config_dir.join("..").join("project.toml"),
+            },
+            ConfigSource {
+                kind: ConfigSourceKind::ProjectDropIn,
+                path: directories
+                    .config_dir
+                    .join("..")
+                    .join("project.d")
+                    .join("00-extra.toml"),
+            },
+        ]
+    }
+
+    fn seed_database(
+        directories: &AppDirectories,
+        session_path: PathBuf,
+    ) -> Result<(Database, SessionSummary)> {
+        let db_path = directories.data_dir.join("tx.sqlite3");
+        let mut db = Database::open(&db_path)?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "sess-1".into(),
+            provider: "codex".into(),
+            label: Some("Demo Session".into()),
+            path: session_path,
+            uuid: Some("uuid-1".into()),
+            first_prompt: Some("Hello world".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 42,
+            mtime: now,
+        };
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Hello world",
+            Some("event_msg".into()),
+            Some(now),
+        );
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+        Ok((db, summary))
+    }
+
+    fn configure_provider_env() {
+        unsafe {
+            std::env::set_var("TEST_PRESENT", "1");
+            std::env::remove_var("TEST_MISSING");
+        }
+    }
+
+    fn build_app_fixture(
+        diagnostics: Vec<ConfigDiagnostic>,
+    ) -> Result<(TempDir, App<'static>, SessionSummary)> {
+        let temp = TempDir::new()?;
+        let directories = setup_directories(&temp)?;
+        let (sessions_dir, session_path) = create_session_artifacts(&temp)?;
+        let config = fixture_config(&sessions_dir);
+        let sources = fixture_sources(&directories);
+        let (db, summary) = seed_database(&directories, session_path)?;
+
+        let mut merged = toml::map::Map::new();
+        merged.insert("provider".into(), Value::String("codex".into()));
+        let loaded = LoadedConfig {
+            config: config.clone(),
+            merged: Value::Table(merged),
+            directories: directories.clone(),
+            sources,
+            diagnostics,
+        };
+
+        configure_provider_env();
+
+        let cli = Box::leak(Box::new(Cli {
+            config_dir: Some(directories.config_dir.clone()),
+            verbose: 0,
+            quiet: false,
+            command: None,
+        }));
+
+        let app = App {
+            cli,
+            loaded,
+            db,
+            prompt: None,
+        };
+
+        Ok((temp, app, summary))
+    }
+
+    #[test]
+    fn app_search_and_export_paths() -> Result<()> {
+        let (_temp, app, summary) = build_app_fixture(Vec::new())?;
+        let mut search_cmd = SearchCommand {
+            term: None,
+            full_text: false,
+            provider: None,
+            since: None,
+            role: None,
+            limit: None,
+        };
+        app.search(&search_cmd)?;
+
+        search_cmd.term = Some("Hello".into());
+        app.search(&search_cmd)?;
+
+        search_cmd.full_text = true;
+        search_cmd.role = Some("user".into());
+        search_cmd.since = Some(60);
+        app.search(&search_cmd)?;
+
+        let export_cmd = ExportCommand {
+            session_id: summary.id.clone(),
+        };
+        app.export(&export_cmd)?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_search_rejects_role_without_full_text() -> Result<()> {
+        let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+        let cmd = SearchCommand {
+            term: Some("hello".into()),
+            full_text: false,
+            provider: None,
+            since: None,
+            role: Some("user".into()),
+            limit: None,
+        };
+        let err = app.search(&cmd).expect_err("role requires full-text");
+        assert!(err.to_string().contains("--role requires --full-text"));
+        Ok(())
+    }
+
+    #[test]
+    fn app_resume_and_config_commands() -> Result<()> {
+        let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+        let mut resume_cmd = ResumeCommand {
+            session_id: summary.uuid.clone().unwrap(),
+            profile: Some("default".into()),
+            pre_snippets: vec!["pre".into()],
+            post_snippets: Vec::new(),
+            wrap: None,
+            emit_command: true,
+            emit_json: true,
+            vars: vec!["KEY=value".into()],
+            dry_run: false,
+            provider_args: vec!["--flag".into()],
+        };
+        app.resume(&resume_cmd)?;
+
+        resume_cmd.profile = Some("mismatch".into());
+        let err = app.resume(&resume_cmd).unwrap_err();
+        assert!(err.to_string().contains("provider mismatch"));
+
+        app.config(&ConfigCommand::List)?;
+        app.config(&ConfigCommand::Dump)?;
+        app.config(&ConfigCommand::Where)?;
+        app.config(&ConfigCommand::Default(ConfigDefaultCommand { raw: false }))?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_resume_requires_emit_json_companion_flag() -> Result<()> {
+        let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+        let cmd = ResumeCommand {
+            session_id: summary.uuid.clone().unwrap(),
+            profile: Some("default".into()),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrap: None,
+            emit_command: false,
+            emit_json: true,
+            vars: Vec::new(),
+            dry_run: false,
+            provider_args: Vec::new(),
+        };
+        let err = app
+            .resume(&cmd)
+            .expect_err("emit-json should require dry-run or emit-command");
+        assert!(
+            err.to_string()
+                .contains("--emit-json requires --dry-run or --emit-command")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_config_default_supports_raw_mode() -> Result<()> {
+        let (_temp, app, _) = build_app_fixture(Vec::new())?;
+        app.config(&ConfigCommand::Default(ConfigDefaultCommand { raw: true }))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_plan_shell_succeeds() -> Result<()> {
+        let _env = ENV_LOCK.lock().unwrap();
+        let original_shell = std::env::var("SHELL").ok();
+        unsafe {
+            std::env::set_var("SHELL", "/bin/sh");
+        }
+
+        let cwd = std::env::current_dir()?;
+        let plan = PipelinePlan {
+            pipeline: "true".into(),
+            display: "true".into(),
+            friendly_display: "true".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: "true".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd,
+        };
+
+        execute_plan(&plan)?;
+
+        if let Some(shell) = original_shell {
+            unsafe {
+                std::env::set_var("SHELL", shell);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SHELL");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_plan_shell_propagates_failure() -> Result<()> {
+        let _env = ENV_LOCK.lock().unwrap();
+        let original_shell = std::env::var("SHELL").ok();
+        unsafe {
+            std::env::set_var("SHELL", "/bin/sh");
+        }
+
+        let cwd = std::env::current_dir()?;
+        let plan = PipelinePlan {
+            pipeline: "false".into(),
+            display: "false".into(),
+            friendly_display: "false".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: "false".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd,
+        };
+
+        let err = execute_plan(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("command exited with status"),
+            "unexpected error: {err:?}"
+        );
+
+        if let Some(shell) = original_shell {
+            unsafe {
+                std::env::set_var("SHELL", shell);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SHELL");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn execute_plan_shell_captures_prompt_input() -> Result<()> {
+        let _env = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let output = temp.child("captured.txt");
+        let script = temp.child("capture.sh");
+        script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms)?;
+        }
+
+        let plan = PipelinePlan {
+            pipeline: format!("{} {}", script.path().display(), output.path().display()),
+            display: "capture".into(),
+            friendly_display: "capture".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: format!("{} {}", script.path().display(), output.path().display()),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: true,
+            stdin_prompt_label: Some("Prompt".into()),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        execute_plan_with_prompt(&plan, true, |_| Ok(Some("payload".into())))?;
+        assert_eq!(std::fs::read_to_string(output.path())?, "payload");
+        Ok(())
+    }
+
+    #[test]
+    fn execute_plan_emits_capture_warning_for_internal_pipeline() -> Result<()> {
+        let plan = PipelinePlan {
+            pipeline: "internal capture-arg".into(),
+            display: "capture".into(),
+            friendly_display: "capture".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: "/bin/true".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd: std::env::current_dir()?,
+        };
+
+        execute_plan_with_prompt(&plan, true, |_| Ok(None))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_plan_exec_succeeds_and_failures() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let mut success_plan = PipelinePlan {
+            pipeline: "exec success".into(),
+            display: "exec success".into(),
+            friendly_display: "exec success".into(),
+            env: Vec::new(),
+            invocation: Invocation::Exec {
+                argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd: cwd.clone(),
+        };
+
+        execute_plan(&success_plan)?;
+
+        success_plan.invocation = Invocation::Exec {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 5".into()],
+        };
+        let err = execute_plan(&success_plan).unwrap_err();
+        assert!(
+            err.to_string().contains("command exited with status"),
+            "unexpected error: {err:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn app_doctor_and_config_lint() -> Result<()> {
+        let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+        app.doctor()?;
+        app.config(&ConfigCommand::Lint)?;
+
+        let diag = ConfigDiagnostic {
+            level: DiagnosticLevel::Error,
+            message: "bad configuration".into(),
+        };
+        let (_temp, app_with_error, _) = build_app_fixture(vec![diag])?;
+        let err = app_with_error.config(&ConfigCommand::Lint).unwrap_err();
+        assert!(err.to_string().contains("configuration contains errors"));
+        Ok(())
+    }
+
+    #[test]
+    fn emit_command_covers_all_modes() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let plan = PipelinePlan {
+            pipeline: "echo hi".into(),
+            display: "echo hi".into(),
+            friendly_display: "friendly hi".into(),
+            env: vec![("KEY".into(), "VALUE".into())],
+            invocation: Invocation::Shell {
+                command: "true".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd,
+        };
+
+        emit_command(&plan, EmitMode::Json)?;
+        emit_command(
+            &plan,
+            EmitMode::Plain {
+                newline: false,
+                friendly: false,
+            },
+        )?;
+        emit_command(
+            &plan,
+            EmitMode::Plain {
+                newline: true,
+                friendly: true,
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn config_lint_emits_warnings_without_error() -> Result<()> {
+        let warning = ConfigDiagnostic {
+            level: DiagnosticLevel::Warning,
+            message: "deprecated option".into(),
+        };
+        let (_temp, app, _) = build_app_fixture(vec![warning])?;
+        app.config(&ConfigCommand::Lint)?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_requires_full_text_for_role() -> Result<()> {
+        let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+        let cmd = SearchCommand {
+            term: Some("hello".into()),
+            full_text: false,
+            provider: None,
+            since: None,
+            role: Some("user".into()),
+            limit: None,
+        };
+        let err = app
+            .search(&cmd)
+            .expect_err("role filter without full-text should error");
+        assert!(
+            err.to_string().contains("--role requires --full-text"),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_run_ui_starts_event_loop() -> Result<()> {
+        let (_temp, mut app, _) = build_app_fixture(Vec::new())?;
+        app.run_ui()?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_export_errors_when_session_missing() -> Result<()> {
+        let (_temp, app, _) = build_app_fixture(Vec::new())?;
+        let cmd = ExportCommand {
+            session_id: "missing".into(),
+        };
+        let err = app.export(&cmd).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        Ok(())
+    }
+
+    #[test]
+    fn run_doctor_reports_missing_session_root() -> Result<()> {
+        let (temp, app, _summary) = build_app_fixture(Vec::new())?;
+        let sessions_dir = app
+            .loaded
+            .config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .clone();
+        if sessions_dir.exists() {
+            fs::remove_dir_all(&sessions_dir)?;
+        }
+        run_doctor(&app.loaded, &app.db)?;
+        temp.close()?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_prompt_assembler_handles_unavailable() -> Result<()> {
+        let temp = TempDir::new()?;
+        let script = temp.child("pa");
+        script.write_str("#!/bin/sh\nexit 1\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms)?;
+
+        let mut paths =
+            env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+        paths.insert(0, script.path().parent().unwrap().to_path_buf());
+        let joined = env::join_paths(paths)?;
+        unsafe {
+            std::env::set_var("PATH", joined);
+        }
+
+        let cfg = PromptAssemblerConfig {
+            namespace: "tests".into(),
+        };
+        check_prompt_assembler(&cfg);
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_initializes_prompt_feature() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let sessions_dir = config_dir.child("sessions");
+        sessions_dir.create_dir_all()?;
+        let codex_home = temp.child("codex-home");
+        codex_home.create_dir_all()?;
+        let home_dir = temp.child("home");
+        home_dir.create_dir_all()?;
+        let config_toml = format!(
+            r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+session_roots = ["{root}"]
+
+[features.pa]
+enabled = true
+namespace = "tests"
+"#,
+            root = sessions_dir.path().display(),
+        );
+        config_dir.child("config.toml").write_str(&config_toml)?;
+
+        let data_dir = temp.child("data");
+        data_dir.create_dir_all()?;
+        let cache_dir = temp.child("cache");
+        cache_dir.create_dir_all()?;
+
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+        let _codex_guard = EnvOverride::set_path("CODEX_HOME", codex_home.path());
+        let _home_guard = EnvOverride::set_path("HOME", home_dir.path());
+        let _profile_guard = EnvOverride::set_path("USERPROFILE", home_dir.path());
+
+        let cli = Cli {
+            config_dir: Some(config_dir.path().to_path_buf()),
+            verbose: 0,
+            quiet: false,
+            command: None,
+        };
+
+        let app = App::bootstrap(&cli)?;
+        assert!(app.prompt.is_some());
+        assert_eq!(app.loaded.directories.config_dir, config_dir.path());
+        assert_eq!(app.loaded.directories.data_dir, data_dir.path());
+        assert_eq!(app.loaded.directories.cache_dir, cache_dir.path());
+        assert_eq!(app.db.count_sessions()?, 0);
+        Ok(())
     }
 }

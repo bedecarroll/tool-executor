@@ -595,16 +595,52 @@ fn map_search_hit(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_fs::TempDir;
+    use assert_fs::prelude::*;
     use std::path::PathBuf;
     use time::OffsetDateTime;
 
-    #[test]
-    fn full_text_search_is_case_insensitive() -> Result<()> {
+    fn create_db() -> Result<Database> {
         let conn = Connection::open_in_memory()?;
-        let mut db = Database { conn };
+        let db = Database { conn };
         db.configure()?;
         db.migrate()?;
+        Ok(db)
+    }
 
+    fn insert_session(
+        db: &mut Database,
+        id: &str,
+        provider: &str,
+        prompt: &str,
+        actionable: bool,
+        now: i64,
+    ) -> Result<()> {
+        let summary = SessionSummary {
+            id: id.into(),
+            provider: provider.into(),
+            label: Some(prompt.into()),
+            path: PathBuf::from(format!("{id}.jsonl")),
+            uuid: None,
+            first_prompt: Some(prompt.into()),
+            actionable,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", prompt, None, Some(now));
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_text_search_is_case_insensitive() -> Result<()> {
+        let mut db = create_db()?;
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let summary = SessionSummary {
             id: "session-1".into(),
@@ -668,6 +704,173 @@ mod tests {
             upper_hit.snippet.as_deref(),
             Some("Context awareness should be case insensitive.")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn search_first_prompt_filters_by_provider_and_actionable() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "sess-1", "codex", "Shared context A", true, now)?;
+        insert_session(&mut db, "sess-2", "alt", "Shared context B", false, now)?;
+
+        let all = db.search_first_prompt("Shared", None, false)?;
+        assert_eq!(
+            all.len(),
+            2,
+            "expected both sessions when actionable_only=false"
+        );
+
+        let filtered = db.search_first_prompt("Shared", Some("codex"), false)?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].provider, "codex");
+
+        let actionable_only = db.search_first_prompt("Shared", None, true)?;
+        assert_eq!(
+            actionable_only.len(),
+            1,
+            "expected non-actionable sessions to be filtered"
+        );
+        assert_eq!(actionable_only[0].session_id, "sess-1");
+        Ok(())
+    }
+
+    #[test]
+    fn search_full_text_respects_actionable_flag() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "sess-1", "codex", "Alpha prompt", true, now)?;
+        insert_session(&mut db, "sess-2", "codex", "Beta prompt", false, now)?;
+
+        let matches = db.search_full_text("prompt", None, false)?;
+        assert_eq!(matches.len(), 2);
+
+        let actionable = db.search_full_text("prompt", None, true)?;
+        assert_eq!(actionable.len(), 1);
+        assert_eq!(actionable[0].session_id, "sess-1");
+        Ok(())
+    }
+
+    #[test]
+    fn database_open_initializes_and_reuses_schema() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("tx.sqlite3");
+
+        {
+            let db = Database::open(db_path.path())?;
+            assert_eq!(db.count_sessions()?, 0);
+        }
+
+        let db = Database::open(db_path.path())?;
+        assert_eq!(db.count_sessions()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_by_path_and_sessions_for_provider() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "sess-1", "codex", "Prompt", true, now)?;
+        insert_session(&mut db, "sess-2", "alt", "Other", true, now)?;
+
+        let summary = db
+            .existing_by_path("sess-1.jsonl")?
+            .expect("expected summary");
+        assert_eq!(summary.id, "sess-1");
+
+        let sessions = db.sessions_for_provider("codex")?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "sess-1");
+        Ok(())
+    }
+
+    #[test]
+    fn list_sessions_applies_filters() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "fresh", "codex", "Recent", true, now)?;
+        insert_session(&mut db, "stale", "codex", "Older", true, now - 86_400)?;
+        insert_session(&mut db, "inactive", "codex", "Skip", false, now)?;
+
+        let recent = db.list_sessions(Some("codex"), true, Some(now - 1), Some(10))?;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, "fresh");
+
+        let limited = db.list_sessions(None, false, None, Some(1))?;
+        assert_eq!(limited.len(), 1, "limit should restrict rows");
+        assert_eq!(limited[0].id, "fresh");
+        Ok(())
+    }
+
+    #[test]
+    fn session_summary_for_identifier_uses_uuid() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "sess-uuid".into(),
+            provider: "codex".into(),
+            label: Some("UUID".into()),
+            path: PathBuf::from("sess-uuid.jsonl"),
+            uuid: Some("abc-123".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(now));
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+
+        assert!(db.session_summary("missing")?.is_none());
+        let fetched = db
+            .session_summary_for_identifier("abc-123")?
+            .expect("expected lookup by uuid");
+        assert_eq!(fetched.id, summary.id);
+
+        assert_eq!(db.provider_for("sess-uuid")?, Some("codex".into()));
+        assert!(db.provider_for("missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_transcript_returns_none_for_unknown_identifier() -> Result<()> {
+        let db = create_db()?;
+        assert!(db.fetch_transcript("missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_transcript_uses_uuid_fallback() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "uuid-session".into(),
+            provider: "codex".into(),
+            label: Some("By UUID".into()),
+            path: PathBuf::from("uuid-session.jsonl"),
+            uuid: Some("uuid-lookup".into()),
+            first_prompt: Some("payload".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "payload", None, Some(now));
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+        let transcript = db
+            .fetch_transcript("uuid-lookup")?
+            .expect("expected transcript via uuid fallback");
+        assert_eq!(transcript.session.id, "uuid-session");
+        assert_eq!(transcript.messages.len(), 1);
         Ok(())
     }
 }

@@ -16,6 +16,7 @@ default-run = "tx"
 [features]
 default = []
 self-update = ["dep:self_update"]
+benchmarks = []
 
 [[bin]]
 name = "tx"
@@ -72,8 +73,15 @@ unicode-width = "0.1"
 [dev-dependencies]
 assert_cmd = "2.0"
 assert_fs = "1.1"
+insta = { version = "1.41", features = ["filters"] }
 predicates = "3.1"
 tempfile = "3.10"
+criterion = { version = "0.5" }
+
+[[bench]]
+name = "pipeline"
+harness = false
+required-features = ["benchmarks"]
 
 # Config for 'dist'
 [workspace.metadata.dist]

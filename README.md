@@ -75,6 +75,30 @@ $ tx doctor
 $ tx export <session-id> > notes.md
 ```
 
+## Coverage
+
+Run the coverage suite with `mise`:
+
+```bash
+mise run coverage
+```
+
+The task runs `cargo llvm-cov` against the full test matrix, writes HTML output under `coverage/html/`, emits an lcov file, and fails the build when line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` in a browser to inspect the annotated sources.
+
+## Benchmarks
+
+Measure pipeline construction performance with Criterion:
+
+```bash
+mise run bench
+```
+
+Benchmark outputs land in `target/criterion/`. The task enables the `benchmarks` feature automatically; run `cargo bench --features benchmarks --bench pipeline` if you prefer raw cargo commands. Keep `tmux` and other interactive dependencies closed while benching so results stay consistent. Add new benchmarks under `benches/` to track other hotspots.
+
+## TUI Smoke Test
+
+The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and verifies it exits cleanly when `Esc` is sent. The test skips automatically when `tmux` is unavailable or when the `CI` environment variable is set, so continuous integration environments are safe. To exercise the smoke test locally, install `tmux` and run `cargo test --test tui_tmux` (or `mise run test`).
+
 ## TUI Shortcuts
 
 - `↑/↓`, `PgUp/PgDn` – move around the active list.

@@ -630,7 +630,161 @@ fn expand_path(raw: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::CommandSpec;
+    use super::*;
+    use color_eyre::Result;
+    use indexmap::IndexMap;
+    use toml::Value;
+
+    #[test]
+    fn config_from_value_requires_provider_bin() {
+        let value: Value = toml::from_str(
+            r#"
+            [providers.codex]
+            flags = ["--search"]
+        "#,
+        )
+        .expect("parse toml");
+
+        let error = Config::from_value(&value).expect_err("missing bin should error");
+        let message = format!("{error:?}");
+        assert!(message.contains("provider 'codex' is missing required field 'bin'"));
+    }
+
+    #[test]
+    fn search_mode_as_str_reports_variants() {
+        assert_eq!(SearchMode::FirstPrompt.as_str(), "first_prompt");
+        assert_eq!(SearchMode::FullText.as_str(), "full_text");
+    }
+
+    #[test]
+    fn raw_defaults_rejects_unknown_search_mode() {
+        let defaults = RawDefaults {
+            provider: None,
+            profile: None,
+            search_mode: "invalid".into(),
+            preview_filter: None,
+        };
+        let err = defaults
+            .into_defaults()
+            .expect_err("unknown search mode should fail");
+        assert!(
+            err.to_string().contains("unknown search_mode 'invalid'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn config_from_value_parses_preview_filter_and_stdin_mode() {
+        let value: Value = toml::from_str(
+            r#"
+            provider = "codex"
+            search_mode = "full_text"
+            preview_filter = "glow -s dark"
+
+            [providers.codex]
+            bin = "codex"
+            stdin_mode = "capture-arg"
+            stdin_to = "codex: jq -r .prompt -"
+
+            [profiles.default]
+            provider = "codex"
+        "#,
+        )
+        .expect("parse toml");
+
+        let config = Config::from_value(&value).expect("config parses");
+        assert!(matches!(config.defaults.search_mode, SearchMode::FullText));
+        let expected_filter = vec!["glow".to_string(), "-s".to_string(), "dark".to_string()];
+        assert_eq!(
+            config
+                .defaults
+                .preview_filter
+                .as_ref()
+                .expect("preview filter"),
+            &expected_filter
+        );
+
+        let provider = config.providers.get("codex").expect("provider");
+        let stdin = provider.stdin.as_ref().expect("stdin mapping");
+        assert!(matches!(stdin.mode, StdinMode::CaptureArg));
+        assert_eq!(stdin.args, vec!["jq", "-r", ".prompt"]);
+    }
+
+    #[test]
+    fn config_from_value_rejects_malformed_env_entry() {
+        let value: Value = toml::from_str(
+            r#"
+            [providers.codex]
+            bin = "codex"
+            env = ["=VALUE"]
+        "#,
+        )
+        .expect("parse toml");
+
+        let error = Config::from_value(&value).expect_err("env key required");
+        let message = format!("{error:?}");
+        assert!(message.contains("environment entry '=VALUE' is missing a key"));
+    }
+
+    #[test]
+    fn parse_stdin_variants_cover_success_and_errors() {
+        let args = parse_stdin("codex: jq .prompt -", "codex").expect("parse args");
+        assert_eq!(args, vec!["jq", ".prompt"]);
+
+        let error = parse_stdin("other: jq .prompt", "codex").expect_err("mismatch");
+        let message = format!("{error:?}");
+        assert!(message.contains("stdin_to refers to provider 'other'"));
+    }
+
+    #[test]
+    fn parse_command_args_reports_invalid_syntax() {
+        let error = parse_command_args("\"unterminated").expect_err("expected error");
+        let message = format!("{error:?}");
+        assert!(message.contains("failed to parse command line"));
+    }
+
+    #[test]
+    fn config_lint_reports_unknown_entries() {
+        let config = lint_fixture_config();
+        let diagnostics = config.lint();
+        let messages: Vec<_> = diagnostics
+            .iter()
+            .map(|diag| diag.message.as_str())
+            .collect();
+
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("default provider 'missing'"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("default profile 'absent-profile'"))
+        );
+        assert!(messages
+            .iter()
+            .any(|msg| msg.contains("profile 'default' references unknown pre snippet 'setup'")));
+        assert!(messages.iter().any(|msg| {
+            msg.contains("profile 'default' references unknown post snippet 'teardown'")
+        }));
+        assert!(messages.iter().any(|msg| {
+            msg.contains("profile 'default' references unknown wrapper 'missing-wrap'")
+        }));
+    }
+
+    #[test]
+    fn config_lint_reports_unknown_provider_reference() {
+        let mut config = lint_fixture_config();
+        config.providers.clear();
+        let messages: Vec<_> = config.lint().into_iter().map(|diag| diag.message).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("references unknown provider")),
+            "missing provider diagnostic not found: {messages:?}"
+        );
+    }
 
     #[test]
     fn command_spec_string_splits_with_shlex() {
@@ -653,5 +807,143 @@ mod tests {
         .expect("parsing succeeds")
         .expect("non-empty command");
         assert_eq!(args, ["glow", "-s", "dark"]);
+    }
+
+    #[test]
+    fn command_spec_string_returns_none_for_blank() -> Result<()> {
+        let result = CommandSpec::String("   ".into()).into_args()?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn command_spec_list_returns_none_for_whitespace_only() -> Result<()> {
+        let result = CommandSpec::List(vec![" ".into(), "\t".into()]).into_args()?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_stdin_returns_empty_for_blank_input() -> Result<()> {
+        let args = parse_stdin("   ", "codex")?;
+        assert!(args.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_stdin_mode_rejects_unknown_value() {
+        let err = parse_stdin_mode(Some("weird")).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown stdin_mode 'weird'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_env_var_parses_key_and_template() -> Result<()> {
+        let var = parse_env_var("API_KEY=${env:API_KEY}")?;
+        assert_eq!(var.key, "API_KEY");
+        assert_eq!(var.value_template, "${env:API_KEY}");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_env_var_rejects_missing_equals() {
+        let err = parse_env_var("MISSING").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("environment entry 'MISSING' must be in KEY=VALUE form")
+        );
+    }
+
+    #[test]
+    fn raw_wrapper_into_shell_mode() -> Result<()> {
+        let wrapper = RawWrapper {
+            shell: Some(true),
+            cmd: Value::String("echo hello".into()),
+        };
+        let config = wrapper.into_wrapper("shellwrap".into())?;
+        match config.mode {
+            WrapperMode::Shell { command } => assert_eq!(command, "echo hello"),
+            WrapperMode::Exec { .. } => panic!("expected shell mode"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_wrapper_into_exec_mode() -> Result<()> {
+        let wrapper = RawWrapper {
+            shell: Some(false),
+            cmd: Value::Array(vec![
+                Value::String("ls".into()),
+                Value::String("-la".into()),
+            ]),
+        };
+        let config = wrapper.into_wrapper("execwrap".into())?;
+        match config.mode {
+            WrapperMode::Exec { argv } => assert_eq!(argv, vec!["ls", "-la"]),
+            WrapperMode::Shell { .. } => panic!("expected exec mode"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_wrapper_into_wrapper_reports_type_mismatch() {
+        let wrapper = RawWrapper {
+            shell: Some(true),
+            cmd: Value::Array(vec![Value::String("ls".into())]),
+        };
+        let err = wrapper.into_wrapper("bad".into()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("wrapper 'bad' sets shell=true but cmd is not a string")
+        );
+    }
+
+    fn lint_fixture_config() -> Config {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: Vec::new(),
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: None,
+            },
+        );
+
+        let mut profiles = IndexMap::new();
+        profiles.insert(
+            "default".into(),
+            ProfileConfig {
+                name: "default".into(),
+                provider: "codex".into(),
+                description: None,
+                pre: vec!["setup".into()],
+                post: vec!["teardown".into()],
+                wrap: Some("missing-wrap".into()),
+            },
+        );
+
+        Config {
+            defaults: Defaults {
+                provider: Some("missing".into()),
+                profile: Some("absent-profile".into()),
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles,
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        }
     }
 }

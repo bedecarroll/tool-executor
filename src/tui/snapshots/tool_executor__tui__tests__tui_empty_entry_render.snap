@@ -1,0 +1,20 @@
+---
+source: src/tui/mod.rs
+expression: empty_snapshot
+---
+┌Sessions & Profiles─────────┐┌No Sessions─────────────────┐
+│▶ No Sessions               ││Use tx search to populate   │
+│  Wrapped Profile  Run codex││sessions.                   │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+└────────────────────────────┘└────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ Press R to reindex                                       │
+└──────────────────────────────────────────────────────────┘

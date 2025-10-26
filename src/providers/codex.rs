@@ -54,8 +54,27 @@ fn extract_session_uuid(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionSummary;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
+
+    fn sample_summary() -> SessionSummary {
+        SessionSummary {
+            id: "sess-1".into(),
+            provider: "codex".into(),
+            label: Some("demo".into()),
+            path: PathBuf::from("/tmp/session.jsonl"),
+            uuid: None,
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(1),
+            started_at: Some(1),
+            last_active: Some(1),
+            size: 1,
+            mtime: 1,
+        }
+    }
 
     #[test]
     fn extracts_uuid_from_payload() -> Result<()> {
@@ -79,5 +98,36 @@ mod tests {
         let path = Path::new("/tmp/abcd-ef.jsonl");
         let uuid = fallback_session_uuid(path).expect("uuid");
         assert_eq!(uuid, "abcd-ef");
+    }
+
+    #[test]
+    fn resume_info_uses_existing_uuid() -> Result<()> {
+        let mut summary = sample_summary();
+        summary.uuid = Some("known-uuid".into());
+        let plan = resume_info(&summary)?.expect("resume plan");
+        assert_eq!(plan.args, vec!["resume".to_string(), "known-uuid".into()]);
+        assert_eq!(plan.resume_token.as_deref(), Some("known-uuid"));
+        Ok(())
+    }
+
+    #[test]
+    fn resume_info_falls_back_when_log_missing() -> Result<()> {
+        let mut summary = sample_summary();
+        summary.path = PathBuf::from("/tmp/fallback-log.jsonl");
+        summary.uuid = None;
+        let plan = resume_info(&summary)?.expect("resume plan");
+        assert_eq!(plan.args, vec!["resume".to_string(), "fallback-log".into()]);
+        assert_eq!(plan.resume_token.as_deref(), Some("fallback-log"));
+        Ok(())
+    }
+
+    #[test]
+    fn resume_info_returns_none_when_no_identifier() -> Result<()> {
+        let mut summary = sample_summary();
+        summary.path = PathBuf::new();
+        summary.uuid = None;
+        let plan = resume_info(&summary)?;
+        assert!(plan.is_none());
+        Ok(())
     }
 }

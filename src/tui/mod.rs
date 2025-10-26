@@ -1,17 +1,28 @@
+#![allow(unexpected_cfgs)]
+
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io::{self, Stdout, Write};
+#[cfg(all(not(test), not(coverage)))]
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
 use color_eyre::Result;
+#[cfg(all(not(test), not(coverage)))]
+use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::eyre;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(all(not(test), not(coverage)))]
+use crossterm::event;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(all(not(test), not(coverage)))]
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+#[cfg(all(not(test), not(coverage)))]
 use crossterm::{ExecutableCommand, execute};
+#[cfg(all(not(test), not(coverage)))]
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -27,7 +38,7 @@ use crate::indexer::Indexer;
 use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::PromptStatus;
 use crate::providers;
-use crate::session::{SearchHit, SessionQuery};
+use crate::session::{SearchHit, SessionQuery, Transcript};
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
@@ -47,6 +58,10 @@ const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 ///
 /// Returns an error if terminal IO fails or database interactions within the UI
 /// produce an error.
+// The production TUI loop manipulates terminal state and is validated via the
+// tmux smoke test; instrumenting it for coverage would require nested pseudo
+// terminals, so we exclude it from coverage accounting.
+#[cfg(all(not(test), not(coverage)))]
 pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -55,7 +70,8 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let result = run_app(ctx, &mut terminal);
+    let mut events = CrosstermEvents;
+    let outcome = run_with_terminal(ctx, &mut terminal, &mut events);
 
     disable_raw_mode()?;
     terminal
@@ -63,7 +79,111 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
         .execute(crossterm::terminal::LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    match result? {
+    let outcome = outcome?;
+    dispatch_outcome(outcome)
+}
+
+#[cfg(any(test, coverage))]
+pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend)?;
+    let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    ))]);
+    let outcome = run_with_terminal(ctx, &mut terminal, &mut events)?;
+    dispatch_outcome(outcome)
+}
+
+trait EventSource {
+    fn poll(&mut self, timeout: Duration) -> Result<bool>;
+    fn read(&mut self) -> Result<Event>;
+}
+
+#[cfg(all(not(test), not(coverage)))]
+struct CrosstermEvents;
+
+#[cfg(all(not(test), not(coverage)))]
+impl EventSource for CrosstermEvents {
+    fn poll(&mut self, timeout: Duration) -> Result<bool> {
+        event::poll(timeout).wrap_err("failed to poll input events")
+    }
+
+    fn read(&mut self) -> Result<Event> {
+        event::read().wrap_err("failed to read input event")
+    }
+}
+
+#[cfg(any(test, coverage))]
+struct FakeEvents {
+    events: Vec<Event>,
+}
+
+#[cfg(any(test, coverage))]
+impl FakeEvents {
+    fn new(events: Vec<Event>) -> Self {
+        Self { events }
+    }
+}
+
+#[cfg(any(test, coverage))]
+impl EventSource for FakeEvents {
+    fn poll(&mut self, _timeout: Duration) -> Result<bool> {
+        Ok(!self.events.is_empty())
+    }
+
+    fn read(&mut self) -> Result<Event> {
+        if let Some(event) = self.events.first().cloned() {
+            self.events.remove(0);
+            Ok(event)
+        } else {
+            Err(eyre!("no more events"))
+        }
+    }
+}
+
+fn run_app<'a, B, E>(
+    ctx: &'a mut UiContext<'a>,
+    terminal: &mut Terminal<B>,
+    events: &mut E,
+) -> Result<Option<Outcome>>
+where
+    B: ratatui::backend::Backend,
+    E: EventSource,
+{
+    let mut state = AppState::new(ctx)?;
+    loop {
+        state.expire_status_message();
+        terminal.draw(|frame| draw(frame, &mut state))?;
+        if let Some(outcome) = state.outcome {
+            return Ok(Some(outcome));
+        }
+
+        if events.poll(Duration::from_millis(200))?
+            && let Event::Key(event) = events.read()?
+            && state.handle_key(event)?
+        {
+            return Ok(state.outcome);
+        }
+    }
+}
+
+fn run_with_terminal<'a, B, E>(
+    ctx: &'a mut UiContext<'a>,
+    terminal: &mut Terminal<B>,
+    events: &mut E,
+) -> Result<Option<Outcome>>
+where
+    B: ratatui::backend::Backend,
+    E: EventSource,
+{
+    run_app(ctx, terminal, events)
+}
+
+fn dispatch_outcome(outcome: Option<Outcome>) -> Result<()> {
+    match outcome {
         Some(Outcome::Emit(plan)) => app::emit_command(
             &plan,
             EmitMode::Plain {
@@ -73,27 +193,6 @@ pub fn run<'a>(ctx: &'a mut UiContext<'a>) -> Result<()> {
         ),
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
         None => Ok(()),
-    }
-}
-
-fn run_app<'a>(
-    ctx: &'a mut UiContext<'a>,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<Option<Outcome>> {
-    let mut state = AppState::new(ctx)?;
-    loop {
-        state.expire_status_message();
-        terminal.draw(|frame| draw(frame, &mut state))?;
-        if let Some(outcome) = state.outcome {
-            return Ok(Some(outcome));
-        }
-
-        if event::poll(Duration::from_millis(200))?
-            && let Event::Key(event) = event::read()?
-            && state.handle_key(event)?
-        {
-            return Ok(state.outcome);
-        }
     }
 }
 
@@ -1138,57 +1237,11 @@ impl<'ctx> AppState<'ctx> {
         }
 
         let preview = match entry {
-            Entry::Session(session) => match self.ctx.db.fetch_transcript(&session.id) {
-                Ok(Some(transcript)) => {
-                    let mut lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
-                    let styled = if let Some(filtered) = apply_preview_filter(
-                        self.ctx.config.defaults.preview_filter.as_ref(),
-                        &lines,
-                    ) {
-                        let styled = lines_to_ansi_text(&filtered)
-                            .or_else(|| lines_to_plain_text(&filtered));
-                        lines = filtered;
-                        styled
-                    } else {
-                        lines_to_plain_text(&lines)
-                    };
-                    let title = transcript
-                        .session
-                        .uuid
-                        .clone()
-                        .unwrap_or_else(|| session.id.clone());
-
-                    Preview {
-                        lines,
-                        styled,
-                        title: Some(title),
-                        timestamp: format_dual_time(session.last_active),
-                        updated_at: Instant::now(),
-                    }
-                }
-                Ok(None) => {
-                    let lines = vec!["No transcript available".to_string()];
-                    let styled = lines_to_plain_text(&lines);
-                    Preview {
-                        lines,
-                        styled,
-                        title: Some(session.id.clone()),
-                        timestamp: format_dual_time(session.last_active),
-                        updated_at: Instant::now(),
-                    }
-                }
-                Err(err) => {
-                    let lines = vec![format!("preview error: {err}")];
-                    let styled = lines_to_plain_text(&lines);
-                    Preview {
-                        lines,
-                        styled,
-                        title: Some(session.id.clone()),
-                        timestamp: format_dual_time(session.last_active),
-                        updated_at: Instant::now(),
-                    }
-                }
-            },
+            Entry::Session(session) => Self::session_preview_from_result(
+                &session,
+                self.ctx.db.fetch_transcript(&session.id),
+                self.ctx.config.defaults.preview_filter.as_ref(),
+            ),
             Entry::Profile(profile) => {
                 let mut lines = Vec::new();
                 lines.push(format!("Provider: {}", profile.provider));
@@ -1224,6 +1277,61 @@ impl<'ctx> AppState<'ctx> {
 
         self.preview_cache.insert(key, preview.clone());
         preview
+    }
+
+    fn session_preview_from_result(
+        session: &SessionEntry,
+        result: Result<Option<Transcript>>,
+        filter: Option<&Vec<String>>,
+    ) -> Preview {
+        match result {
+            Ok(Some(transcript)) => {
+                let mut lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
+                let styled = if let Some(filtered) = apply_preview_filter(filter, &lines) {
+                    let styled =
+                        lines_to_ansi_text(&filtered).or_else(|| lines_to_plain_text(&filtered));
+                    lines = filtered;
+                    styled
+                } else {
+                    lines_to_plain_text(&lines)
+                };
+                let title = transcript
+                    .session
+                    .uuid
+                    .clone()
+                    .unwrap_or_else(|| session.id.clone());
+
+                Preview {
+                    lines,
+                    styled,
+                    title: Some(title),
+                    timestamp: format_dual_time(session.last_active),
+                    updated_at: Instant::now(),
+                }
+            }
+            Ok(None) => {
+                let lines = vec!["No transcript available".to_string()];
+                let styled = lines_to_plain_text(&lines);
+                Preview {
+                    lines,
+                    styled,
+                    title: Some(session.id.clone()),
+                    timestamp: format_dual_time(session.last_active),
+                    updated_at: Instant::now(),
+                }
+            }
+            Err(err) => {
+                let lines = vec![format!("preview error: {err}")];
+                let styled = lines_to_plain_text(&lines);
+                Preview {
+                    lines,
+                    styled,
+                    title: Some(session.id.clone()),
+                    timestamp: format_dual_time(session.last_active),
+                    updated_at: Instant::now(),
+                }
+            }
+        }
     }
 }
 
@@ -1440,5 +1548,1693 @@ fn truncate(input: &str, max: usize) -> String {
         let mut out = input.chars().take(max - 1).collect::<String>();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        unused_mut,
+        clippy::implicit_clone,
+        clippy::redundant_clone,
+        clippy::map_unwrap_or
+    )]
+    use super::*;
+    use assert_fs::TempDir;
+    use assert_fs::fixture::PathChild;
+    use assert_fs::prelude::*;
+    use color_eyre::Result;
+    use color_eyre::eyre::eyre;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use indexmap::IndexMap;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use std::fs;
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::time::Duration as StdDuration;
+    use time::{Duration, OffsetDateTime};
+
+    use crate::config::AppDirectories;
+    use crate::config::Config;
+    use crate::config::model::{
+        Defaults, FeatureConfig, ProfileConfig, PromptAssemblerConfig, ProviderConfig, SearchMode,
+        Snippet, SnippetConfig, WrapperConfig, WrapperMode,
+    };
+    use crate::db::Database;
+    use crate::pipeline::Invocation;
+    use crate::prompts::PromptAssembler;
+    use crate::session::{MessageRecord, SessionIngest, SessionSummary, Transcript};
+
+    static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct PathGuard {
+        original: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl PathGuard {
+        fn push(temp: &TempDir) -> Self {
+            let lock = PATH_LOCK.lock().unwrap();
+            let original = env::var("PATH").ok();
+            let mut paths = vec![temp.path().to_path_buf()];
+            if let Some(value) = &original {
+                paths.extend(env::split_paths(value).collect::<Vec<_>>());
+            }
+            let joined = env::join_paths(paths).expect("join paths");
+            unsafe {
+                env::set_var("PATH", joined);
+            }
+            Self {
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                unsafe {
+                    env::set_var("PATH", value);
+                }
+            } else {
+                unsafe {
+                    env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    fn provider_config(root: &Path) -> ProviderConfig {
+        ProviderConfig {
+            name: "codex".into(),
+            bin: "echo".into(),
+            flags: vec!["hello".into()],
+            env: Vec::new(),
+            session_roots: vec![root.join("sessions")],
+            stdin: None,
+        }
+    }
+
+    fn build_config(root: &Path) -> Config {
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), provider_config(root));
+
+        let snippets = SnippetConfig {
+            pre: IndexMap::new(),
+            post: IndexMap::new(),
+        };
+
+        let mut profiles = IndexMap::new();
+        profiles.insert(
+            "default".into(),
+            ProfileConfig {
+                name: "default".into(),
+                provider: "codex".into(),
+                description: Some("Default profile".into()),
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+            },
+        );
+
+        Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: Some("default".into()),
+                search_mode: SearchMode::FirstPrompt,
+                preview_filter: Some(vec!["cat".into()]),
+            },
+            providers,
+            snippets,
+            wrappers: IndexMap::new(),
+            profiles,
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        }
+    }
+
+    fn build_directories(temp: &TempDir) -> AppDirectories {
+        AppDirectories {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+        }
+    }
+
+    fn insert_session(db: &mut Database, path: &Path, id: &str) -> Result<SessionSummary> {
+        let summary = SessionSummary {
+            id: id.into(),
+            provider: "codex".into(),
+            label: Some(format!("Session {id}")),
+            path: path.to_path_buf(),
+            uuid: Some(format!("uuid-{id}")),
+            first_prompt: Some("Hello there".into()),
+            actionable: true,
+            created_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            started_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            last_active: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            size: 15,
+            mtime: 20,
+        };
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Hello there",
+            Some(format!("event_msg_{id}")),
+            Some(summary.last_active.unwrap()),
+        );
+        message.is_first = true;
+        let ingest = SessionIngest::new(summary.clone(), vec![message]);
+        db.upsert_session(&ingest)?;
+        Ok(summary)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_state_navigation_and_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .clone();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("demo.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{}")?;
+        insert_session(&mut db, &session_path, "sess-1")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        assert!(!state.entries.is_empty());
+
+        // Navigate list and toggle filter mode.
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+        // Cycle provider filters.
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+
+        // Build a plan for the selected session.
+        let plan = state.build_plan()?.expect("plan generated");
+        match plan.invocation {
+            Invocation::Shell { ref command } => assert!(command.contains("echo")),
+            Invocation::Exec { .. } => panic!("expected shell invocation"),
+        }
+
+        // Render the UI.
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| draw(frame, &mut state))?;
+        Ok(())
+    }
+
+    #[test]
+    fn session_entry_helpers_and_matching() {
+        let entry = SessionEntry {
+            id: "sess".into(),
+            provider: "codex".into(),
+            label: Some("Demo".into()),
+            first_prompt: Some("Hello prompt".into()),
+            actionable: true,
+            last_active: Some(0),
+            snippet: Some("Snippet line".into()),
+            snippet_role: Some("user".into()),
+        };
+        assert!(entry.matches("demo"));
+        assert!(entry.matches("codex"));
+        assert!(entry.matches("hello"));
+        assert!(entry.matches("snippet"));
+        assert!(entry.matches("#sess"));
+        assert_eq!(entry.display_label(), "Demo");
+        assert_eq!(entry.snippet_line().as_deref(), Some("Hello prompt"));
+        assert_eq!(entry.short_session_tag(), "#sess");
+    }
+
+    #[test]
+    fn profile_entry_matching() {
+        let entry = ProfileEntry {
+            display: "Default".into(),
+            provider: "codex".into(),
+            pre: vec!["pre".into()],
+            post: vec!["post".into()],
+            wrap: None,
+            description: Some("helpful".into()),
+            tags: vec!["team".into()],
+            inline_pre: Vec::new(),
+            stdin_supported: true,
+            kind: ProfileKind::Config {
+                name: "default".into(),
+            },
+        };
+        assert!(entry.matches("help"));
+        assert!(entry.matches("team"));
+    }
+
+    #[test]
+    fn formatting_helpers_cover_paths() {
+        assert_eq!(truncate_len("hello", 10), "hello");
+        assert_eq!(truncate_len("longword", 4), "long");
+        assert_eq!(normalize_whitespace(" test\nvalue "), "test value");
+        assert_eq!(pad_relative_time("3m"), "3m      ");
+        assert_eq!(
+            format_rollout_label("rollout-2024-10-26T02-42-13-abcd"),
+            Some("2024-10-26 02:42:13 • abcd".into())
+        );
+        assert_eq!(rollout_suffix("custom-xyz"), Some("custom-xyz".into()));
+        assert_eq!(
+            meaningful_excerpt("   \n# Title\nContent line."),
+            Some("# Title Content line.".into())
+        );
+
+        let now = OffsetDateTime::from_unix_timestamp(1_000_000).unwrap();
+        let past = now - Duration::minutes(5);
+        assert_eq!(
+            format_relative_time(Some(past.unix_timestamp()), now),
+            Some("5m ago".into())
+        );
+        assert_eq!(format_relative_time(None, now), None);
+        assert_eq!(
+            format_relative_time(Some((now + Duration::seconds(30)).unix_timestamp()), now),
+            Some("in <1m".into())
+        );
+        assert_eq!(
+            format_relative_time(Some((now - Duration::seconds(20)).unix_timestamp()), now),
+            Some("just now".into())
+        );
+        assert_eq!(
+            format_relative_time(Some((now + Duration::hours(2)).unix_timestamp()), now),
+            Some("in 2h".into())
+        );
+        let days_ago = now - Duration::days(3);
+        assert!(
+            format_relative_time(Some(days_ago.unix_timestamp()), now)
+                .unwrap()
+                .contains(' ')
+        );
+        let last_year = now.replace_year(now.year() - 1).unwrap();
+        assert!(
+            format_relative_time(Some(last_year.unix_timestamp()), now)
+                .unwrap()
+                .contains('-')
+        );
+        assert!(format_dual_time(Some(now.unix_timestamp())).is_some());
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("truncate", 4), "tru…");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_filter_helpers_run_commands() {
+        let lines = vec!["line one".to_string(), "line two".to_string()];
+        let filtered =
+            apply_preview_filter(Some(&vec!["cat".into()]), &lines).expect("filter result");
+        assert_eq!(filtered, lines);
+
+        let plain = lines_to_plain_text(&lines).expect("plain text");
+        assert!(!plain.lines.is_empty());
+
+        let ansi_lines = vec!["\u{1b}[31mred\u{1b}[0m".to_string()];
+        let ansi = lines_to_ansi_text(&ansi_lines).expect("ansi text");
+        assert!(!ansi.lines.is_empty());
+
+        let output = run_preview_filter(&["cat".into()], "hello").expect("output");
+        assert!(output.contains("hello"));
+        assert!(run_preview_filter(&["false".into()], "ignored").is_none());
+        assert!(apply_preview_filter(None, &lines).is_none());
+        assert!(lines_to_plain_text(&[]).is_none());
+        assert!(lines_to_ansi_text(&[]).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_filtering_and_provider_cycle() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .clone();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("filter.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"filter\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-1")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.set_status_message("filter mode");
+        state.clear_status_message("filter mode");
+        state.set_temporary_status_message("temp".into(), StdDuration::from_secs(0));
+        state.expire_status_message();
+        let _ = state.status_message();
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+        state.filter = "Hello".into();
+        state.full_text = true;
+        state.refresh_entries()?;
+        state.move_selection(5);
+        state.move_selection(-5);
+        state.provider_filter = Some("alt".into());
+        state.refresh_entries()?;
+        state.provider_filter = None;
+        state.filter.clear();
+        state.refresh_entries()?;
+
+        state.full_text = false;
+        state.filter = "Demo".into();
+        state.refresh_entries()?;
+        state.filter.clear();
+        state.refresh_entries()?;
+
+        state.cycle_provider_filter()?;
+        state.cycle_provider_filter()?;
+
+        state.list_state.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+        state.reindex()?;
+
+        if let Some((idx, Entry::Profile(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Profile(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            let plan = state.build_plan()?.expect("profile plan");
+            if let Invocation::Shell { command } = plan.invocation {
+                assert!(command.contains("echo"));
+            }
+        }
+        Ok(())
+    }
+
+    fn make_session_entry(id: &str) -> SessionEntry {
+        SessionEntry {
+            id: id.into(),
+            provider: "codex".into(),
+            label: Some("Demo".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            last_active: Some(123),
+            snippet: None,
+            snippet_role: None,
+        }
+    }
+
+    fn make_transcript(id: &str) -> Transcript {
+        let summary = SessionSummary {
+            id: id.into(),
+            provider: "codex".into(),
+            label: Some("Demo".into()),
+            path: PathBuf::from("/tmp/demo.jsonl"),
+            uuid: Some("uuid-demo".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(1),
+            started_at: Some(1),
+            last_active: Some(2),
+            size: 42,
+            mtime: 2,
+        };
+        let message = MessageRecord::new(
+            id,
+            0,
+            "user",
+            "Hello world",
+            Some("event_msg".into()),
+            Some(2),
+        );
+        Transcript {
+            session: summary,
+            messages: vec![message],
+        }
+    }
+
+    #[test]
+    fn session_preview_from_result_success() {
+        let session = make_session_entry("sess-success");
+        let transcript = make_transcript("sess-success");
+        let preview = AppState::session_preview_from_result(
+            &session,
+            Ok(Some(transcript.clone())),
+            Some(&vec!["cat".into()]),
+        );
+        assert!(preview.lines.join("\n").contains("Hello world"));
+        assert!(preview.title.is_some());
+
+        let no_filter = AppState::session_preview_from_result(&session, Ok(Some(transcript)), None);
+        assert!(no_filter.lines.join(" ").contains("Hello"));
+    }
+
+    #[test]
+    fn session_preview_from_result_missing_transcript() {
+        let session = make_session_entry("sess-missing");
+        let preview = AppState::session_preview_from_result(&session, Ok(None), None);
+        assert_eq!(preview.lines, vec![String::from("No transcript available")]);
+        assert_eq!(preview.title.as_deref(), Some("sess-missing"));
+    }
+
+    #[test]
+    fn session_preview_from_result_error() {
+        let session = make_session_entry("sess-error");
+        let preview = AppState::session_preview_from_result(&session, Err(eyre!("boom")), None);
+        assert!(preview.lines[0].contains("boom"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_navigation_and_provider_cycle() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+
+        for idx in 0..12 {
+            let filename = format!("session-{idx}.jsonl");
+            let path = session_dir.join(&filename);
+            fs::File::create(&path)?.write_all(b"{\"event\":\"demo\"}\n")?;
+            insert_session(&mut db, &path, &format!("sess-{idx}"))?;
+        }
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.entries.len() >= 12);
+
+        state.filter = "hello".into();
+        state.set_status_message(MESSAGE_FILTER_MODE);
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "hell");
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT))?;
+        assert_eq!(state.filter, "he");
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert!(state.filter.is_empty());
+        assert!(state.message.is_none());
+
+        state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+        assert!(state.index >= 10);
+        let after_page_down = state.index;
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+        assert!(state.index <= after_page_down);
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+        assert_eq!(state.index, 0);
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+        assert_eq!(state.provider_filter.as_deref(), Some("codex"));
+        assert!(state.overlay_message.is_some());
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+        assert!(state.provider_filter.is_none());
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
+        assert_eq!(state.provider_filter.as_deref(), Some("codex"));
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))?;
+        assert!(state.full_text);
+        assert!(matches!(state.status_message(), Some(message) if message.contains("full-text")));
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_mode_backspace_and_escape() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+        assert_eq!(state.input_mode, InputMode::Filter);
+        state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SHIFT))?;
+        assert_eq!(state.filter, "xy");
+        assert_eq!(state.message.as_deref(), Some(MESSAGE_FILTER_MODE));
+
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "x");
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert!(state.filter.is_empty());
+        assert!(state.message.is_none());
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.message.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_cache_invalidation_and_profile_plans() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let pre_snippet_name = "prepare";
+        config.snippets.pre.insert(
+            pre_snippet_name.into(),
+            Snippet {
+                name: pre_snippet_name.into(),
+                command: "echo pre".into(),
+            },
+        );
+        config.wrappers.insert(
+            "shellwrap".into(),
+            WrapperConfig {
+                name: "shellwrap".into(),
+                mode: WrapperMode::Shell {
+                    command: "echo '{{CMD}} --wrapped'".into(),
+                },
+            },
+        );
+        if let Some(default_profile) = config.profiles.get_mut("default") {
+            default_profile.wrap = Some("shellwrap".into());
+            default_profile.pre = vec![pre_snippet_name.into()];
+        }
+
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.entries = vec![Entry::Empty(EmptyEntry {
+            title: "Nothing here".into(),
+            preview: vec!["No entries found".into()],
+            status: Some("refresh to load".into()),
+        })];
+        state.index = 0;
+        state.list_state.select(Some(0));
+
+        let first_preview = state.preview();
+        assert_eq!(first_preview.lines, vec!["No entries found".to_string()]);
+
+        if let Some(cached) = state.preview_cache.get_mut("empty:Nothing here") {
+            cached.lines = vec!["stale".into()];
+            cached.updated_at = cached
+                .updated_at
+                .checked_sub(StdDuration::from_secs(10))
+                .expect("cached preview timestamp should allow subtraction");
+        }
+
+        let refreshed_preview = state.preview();
+        assert_eq!(
+            refreshed_preview.lines,
+            vec!["No entries found".to_string()]
+        );
+
+        let profile_entry = state
+            .profiles
+            .iter()
+            .find(|entry| entry.display == "default")
+            .cloned()
+            .expect("default profile");
+        let wrapped_plan = state.plan_for_profile(&profile_entry)?.expect("plan");
+        assert_eq!(wrapped_plan.wrapper.as_deref(), Some("shellwrap"));
+        if let Invocation::Shell { command } = &wrapped_plan.invocation {
+            assert!(command.contains("--wrapped"));
+        } else {
+            panic!("expected shell invocation");
+        }
+
+        let provider_entry = state
+            .profiles
+            .iter()
+            .find(|entry| matches!(entry.kind, ProfileKind::Provider))
+            .cloned()
+            .expect("provider entry");
+        let provider_plan = state.plan_for_profile(&provider_entry)?.expect("plan");
+        assert!(provider_plan.wrapper.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_entry_for_state_variants() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+
+        {
+            let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+            let mut ctx = UiContext {
+                config: &config,
+                directories: &directories,
+                db: &mut db,
+                prompt: None,
+            };
+            let entry = EmptyEntry::for_state(&ctx);
+            assert_eq!(entry.title, "New session");
+            assert!(
+                entry
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status.contains("No sessions yet"))
+            );
+        }
+
+        let mut config_without = config.clone();
+        config_without.providers.clear();
+        {
+            let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+            let mut ctx = UiContext {
+                config: &config_without,
+                directories: &directories,
+                db: &mut db,
+                prompt: None,
+            };
+            let entry = EmptyEntry::for_state(&ctx);
+            assert_eq!(entry.title, "New session (configure tx)");
+            assert!(
+                entry
+                    .preview
+                    .iter()
+                    .any(|line| line.contains("Add a TOML file"))
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_normal_enter_executes_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("enter.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"enter\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-enter")?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, Entry::Session(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+            assert!(matches!(state.outcome, Some(Outcome::Execute(_))));
+        } else {
+            panic!("expected session entry");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_plan_empty_entry_sets_message() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        state.entries = vec![Entry::Empty(EmptyEntry {
+            title: "Nothing".into(),
+            preview: vec![],
+            status: Some("Select a session".into()),
+        })];
+        state.index = 0;
+        state.list_state.select(Some(0));
+        assert!(state.build_plan()?.is_none());
+        assert_eq!(state.message.as_deref(), Some("Select a session"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_renders_session_with_filter_and_cache() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("preview.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"preview\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-preview")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        let first = state.preview();
+        assert!(!first.lines.is_empty());
+        assert!(first.title.is_some());
+
+        if let Some(preview) = state.preview_cache.values_mut().next() {
+            preview.updated_at = Instant::now();
+        }
+        let cached = state.preview();
+        assert!(!cached.lines.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn run_with_terminal_emits_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+        let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ))]);
+        let outcome = run_with_terminal(&mut ctx, &mut terminal, &mut events)?;
+        match outcome {
+            Some(Outcome::Emit(plan)) => assert!(!plan.display.is_empty()),
+            other => panic!("expected emit outcome, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_message_prefers_overlay_then_filter() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("overlay.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"overlay\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-overlay")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.set_temporary_status_message("overlay".into(), StdDuration::from_secs(60));
+        assert_eq!(state.status_message().as_deref(), Some("overlay"));
+
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            draw_status(frame, area, &state);
+        })?;
+
+        state.overlay_message = Some((
+            "expired".into(),
+            Instant::now()
+                .checked_sub(StdDuration::from_secs(1))
+                .expect("now should be later than the duration"),
+        ));
+        state.expire_status_message();
+        state.input_mode = InputMode::Filter;
+        state.filter = "filter text".into();
+        assert_eq!(state.status_message().as_deref(), Some("filter text"));
+
+        state.filter.clear();
+        state.input_mode = InputMode::Normal;
+        state.message = Some("custom status".into());
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            draw_status(frame, area, &state);
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn cycle_provider_filter_wraps_and_resets() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.providers.insert(
+            "alpha".into(),
+            ProviderConfig {
+                name: "alpha".into(),
+                bin: "echo".into(),
+                flags: Vec::new(),
+                env: Vec::new(),
+                session_roots: vec![temp.child("alpha-sessions").path().to_path_buf()],
+                stdin: None,
+            },
+        );
+
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        assert_eq!(
+            state.provider_order,
+            vec!["alpha".to_string(), "codex".to_string()]
+        );
+        assert!(state.provider_filter.is_none());
+
+        state.cycle_provider_filter()?;
+        assert_eq!(state.provider_filter.as_deref(), Some("alpha"));
+        assert_eq!(state.status_message().as_deref(), Some("provider: alpha"));
+        assert_eq!(state.status_banner(), "provider: alpha");
+
+        state.cycle_provider_filter()?;
+        assert_eq!(state.provider_filter.as_deref(), Some("codex"));
+        assert_eq!(state.status_message().as_deref(), Some("provider: codex"));
+
+        state.cycle_provider_filter()?;
+        assert!(state.provider_filter.is_none());
+        assert_eq!(state.status_message().as_deref(), Some("provider: all"));
+
+        state.provider_filter = Some("ghost".into());
+        state.cycle_provider_filter()?;
+        assert_eq!(state.provider_filter.as_deref(), Some("alpha"));
+
+        state.provider_order.clear();
+        state.cycle_provider_filter()?;
+        assert!(state.provider_filter.is_none());
+        assert_eq!(state.status_message().as_deref(), Some("provider: all"));
+        Ok(())
+    }
+
+    #[test]
+    fn status_message_handles_all_sources() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+
+        state.set_temporary_status_message("overlay".into(), StdDuration::from_secs(60));
+        assert_eq!(state.status_message().as_deref(), Some("overlay"));
+
+        state.overlay_message = Some((
+            "expired".into(),
+            Instant::now()
+                .checked_sub(StdDuration::from_secs(1))
+                .expect("now should be later than the duration"),
+        ));
+        state.input_mode = InputMode::Filter;
+        state.filter = "typing".into();
+        assert_eq!(state.status_message().as_deref(), Some("typing"));
+        assert_eq!(state.status_banner(), "typing");
+
+        state.filter.clear();
+        assert_eq!(state.status_message().as_deref(), Some(""));
+
+        state.input_mode = InputMode::Normal;
+        state.entries = vec![Entry::Empty(EmptyEntry {
+            title: "empty".into(),
+            preview: Vec::new(),
+            status: Some("entry-status".into()),
+        })];
+        state.index = 0;
+        assert_eq!(state.status_message().as_deref(), Some("entry-status"));
+
+        state.entries = vec![Entry::Empty(EmptyEntry {
+            title: "empty".into(),
+            preview: Vec::new(),
+            status: None,
+        })];
+        state.message = Some("manual message".into());
+        assert_eq!(state.status_message().as_deref(), Some("manual message"));
+
+        state.message = Some(MESSAGE_FILTER_MODE.to_string());
+        state.filter = "residual".into();
+        assert_eq!(state.status_message().as_deref(), Some("residual"));
+
+        state.filter.clear();
+        state.message = None;
+        state.entries.clear();
+        assert_eq!(state.status_message(), None);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_filter_handles_empty_and_failure() {
+        let lines = vec!["alpha line".to_string()];
+        assert!(apply_preview_filter(None, &lines).is_none());
+
+        let empty_args: Vec<String> = Vec::new();
+        assert!(apply_preview_filter(Some(&empty_args), &lines).is_none());
+
+        let no_output = vec!["/bin/sh".into(), "-c".into(), "true".into()];
+        assert!(apply_preview_filter(Some(&no_output), &lines).is_none());
+
+        let failing = vec!["/bin/false".into()];
+        assert!(apply_preview_filter(Some(&failing), &lines).is_none());
+
+        let echo = vec!["/bin/sh".into(), "-c".into(), "cat".into()];
+        assert_eq!(
+            apply_preview_filter(Some(&echo), &lines),
+            Some(vec!["alpha line".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draw_preview_uses_cached_styled_content() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("preview.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"preview\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-preview")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        let key = match &state.entries[state.index] {
+            Entry::Session(session) => format!("session:{}", session.id),
+            Entry::Profile(profile) => format!("profile:{}", profile.display),
+            Entry::Empty(empty) => format!("empty:{}", empty.title),
+        };
+        state.preview_cache.insert(
+            key,
+            Preview {
+                lines: vec!["cached".into()],
+                styled: Some(Text::styled("cached", Style::default().fg(Color::Yellow))),
+                title: Some("Cached Preview".into()),
+                timestamp: Some("2025-10-26".into()),
+                updated_at: Instant::now(),
+            },
+        );
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            draw_preview(frame, area, &mut state);
+        })?;
+
+        if let Some(preview) = state.preview_cache.values_mut().next() {
+            preview.updated_at = Instant::now()
+                .checked_sub(StdDuration::from_secs(10))
+                .expect("now should be later than the duration");
+        }
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| {
+            let area = frame.area();
+            draw_preview(frame, area, &mut state);
+        })?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_exits_on_escape_event() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))]);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend)?;
+        let result = run_app(&mut ctx, &mut terminal, &mut events)?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_emits_plan_on_tab_event() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("planned.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"plan\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-plan")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ))]);
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend)?;
+        let result = run_app(&mut ctx, &mut terminal, &mut events)?;
+        assert!(matches!(result, Some(Outcome::Emit(_))));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_profiles_handles_prompt_statuses() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.profiles.insert(
+            "ALPHA".into(),
+            ProfileConfig {
+                name: "ALPHA".into(),
+                provider: "codex".into(),
+                description: None,
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+            },
+        );
+        config.profiles.insert(
+            "alpha".into(),
+            ProfileConfig {
+                name: "alpha".into(),
+                provider: "codex".into(),
+                description: None,
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+            },
+        );
+
+        let alpha_root = temp.path().join("alpha_sessions");
+        fs::create_dir_all(&alpha_root)?;
+        config.providers.insert(
+            "alpha".into(),
+            ProviderConfig {
+                name: "alpha".into(),
+                bin: "echo".into(),
+                flags: vec!["--alpha".into()],
+                env: Vec::new(),
+                session_roots: vec![alpha_root],
+                stdin: None,
+            },
+        );
+
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("profile.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"profile\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-profile")?;
+
+        let script = temp.child("pa");
+        script.write_str(
+            "#!/bin/sh\necho '[{\"name\":\"virtual\",\"description\":\"Virtual entry\",\"stdin_supported\":true}]'\n",
+        )?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms.clone())?;
+        }
+
+        let _guard = PathGuard::push(&temp);
+        let mut prompt = PromptAssembler::new(PromptAssemblerConfig {
+            namespace: "tests".into(),
+        });
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: Some(&mut prompt),
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        let alpha_count = state
+            .profiles
+            .iter()
+            .filter(|entry| entry.display.eq_ignore_ascii_case("alpha"))
+            .count();
+        assert_eq!(alpha_count, 1);
+        assert!(
+            state
+                .profiles
+                .iter()
+                .any(|entry| matches!(entry.kind, ProfileKind::Virtual))
+        );
+
+        script.write_str("#!/bin/sh\nexit 1\n")?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms)?;
+        }
+
+        state.load_profiles();
+        assert!(
+            state
+                .message
+                .as_deref()
+                .is_some_and(|msg| msg.contains("prompt assembler unavailable"))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn preview_handles_missing_and_profile_entries() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("preview.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"preview\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-preview")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.preview_cache.clear();
+        state.entries = vec![Entry::Session(SessionEntry {
+            id: "missing".into(),
+            provider: "codex".into(),
+            label: Some("missing".into()),
+            first_prompt: None,
+            actionable: true,
+            last_active: Some(0),
+            snippet: None,
+            snippet_role: None,
+        })];
+        state.index = 0;
+        let missing_preview = state.preview();
+        assert_eq!(
+            missing_preview.lines,
+            vec![String::from("No transcript available")]
+        );
+
+        state.preview_cache.clear();
+        if let Some(profile) = state
+            .profiles
+            .iter()
+            .find(|entry| matches!(entry.kind, ProfileKind::Config { .. }))
+            .cloned()
+        {
+            let mut profile_entry = profile;
+            profile_entry.tags = vec!["alpha".into(), "beta".into()];
+            state.entries = vec![Entry::Profile(profile_entry)];
+            let profile_preview = state.preview();
+            assert!(
+                profile_preview
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Tags: alpha, beta"))
+            );
+        }
+
+        state.entries = vec![Entry::Empty(EmptyEntry {
+            title: "Empty".into(),
+            preview: vec![String::from("Nothing to show")],
+            status: None,
+        })];
+        let empty_preview = state.preview();
+        assert_eq!(empty_preview.lines, vec![String::from("Nothing to show")]);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_for_session_builds_resume_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("resume.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"resume\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-resume")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        let session_entry = state
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Session(session) => Some(session.clone()),
+                _ => None,
+            })
+            .expect("session entry");
+        let plan = state.plan_for_session(&session_entry)?;
+        assert!(plan.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn plan_for_profile_marks_stdin_prompt() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some(profile) = state
+            .profiles
+            .iter()
+            .find(|entry| matches!(entry.kind, ProfileKind::Config { .. }))
+            .cloned()
+        {
+            let mut profile_entry = profile;
+            profile_entry.stdin_supported = true;
+            let plan = state.plan_for_profile(&profile_entry)?.expect("plan");
+            assert!(plan.needs_stdin_prompt);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_normal_triggers_reindex() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_draw_snapshots() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.entries = vec![
+            Entry::Empty(EmptyEntry {
+                title: "No Sessions".into(),
+                preview: vec!["Use tx search to populate sessions.".into()],
+                status: Some("Press R to reindex".into()),
+            }),
+            Entry::Profile(ProfileEntry {
+                display: "Wrapped Profile".into(),
+                provider: "codex".into(),
+                pre: vec!["echo prepare".into()],
+                post: vec!["echo cleanup".into()],
+                wrap: Some("shellwrap".into()),
+                description: Some("Run codex with helpers".into()),
+                tags: vec!["team".into(), "demo".into()],
+                inline_pre: vec!["pa demo".into()],
+                stdin_supported: true,
+                kind: ProfileKind::Config {
+                    name: "wrapped".into(),
+                },
+            }),
+        ];
+        state.index = 0;
+        state.list_state.select(Some(0));
+        state.preview_cache.clear();
+
+        let empty_snapshot = render_to_string(&mut state, 60, 16)?;
+        insta::assert_snapshot!("tui_empty_entry_render", empty_snapshot);
+
+        state.index = 1;
+        state.list_state.select(Some(1));
+        state.preview_cache.clear();
+        let profile_snapshot = render_to_string(&mut state, 60, 16)?;
+        insta::assert_snapshot!("tui_profile_entry_render", profile_snapshot);
+
+        state.overlay_message = Some((
+            "provider: codex".into(),
+            Instant::now() + StdDuration::from_secs(60),
+        ));
+        let overlay_snapshot = render_to_string(&mut state, 60, 10)?;
+        insta::assert_snapshot!("tui_status_overlay_render", overlay_snapshot);
+
+        state.overlay_message = None;
+        state.input_mode = InputMode::Filter;
+        state.filter = "codex".into();
+        state.message = Some("doctor: missing CODEX_TOKEN".into());
+        let filter_snapshot = render_to_string(&mut state, 60, 10)?;
+        insta::assert_snapshot!("tui_filter_status_render", filter_snapshot);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_draw_search_results_snapshot() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.entries.clear();
+        state.preview_cache.clear();
+        let snapshot = render_search_results_snapshot(&mut state)?;
+        insta::assert_snapshot!("tui_search_results_render", snapshot);
+        Ok(())
+    }
+
+    fn render_search_results_snapshot(state: &mut AppState<'_>) -> Result<String> {
+        state.input_mode = InputMode::Normal;
+        state.full_text = true;
+        state.filter = "refactor".into();
+        state.message = Some("search: 2 matches".into());
+        state.entries = vec![
+            Entry::Session(SessionEntry {
+                id: "codex/refactor-feature".into(),
+                provider: "codex".into(),
+                label: Some("Refactor Feature".into()),
+                first_prompt: Some("refactor feature layout".into()),
+                actionable: true,
+                last_active: Some(1_697_000_000),
+                snippet: Some("Assistant suggested extracting helpers".into()),
+                snippet_role: Some("assistant".into()),
+            }),
+            Entry::Session(SessionEntry {
+                id: "codex/refactor-tests".into(),
+                provider: "codex".into(),
+                label: Some("Refactor Tests".into()),
+                first_prompt: Some("improve test names".into()),
+                actionable: true,
+                last_active: Some(1_697_050_000),
+                snippet: Some("User requested clearer snapshot titles".into()),
+                snippet_role: Some("user".into()),
+            }),
+        ];
+        state.index = 0;
+        state.list_state.select(Some(0));
+        state.preview_cache.clear();
+
+        let preview_lines = vec![
+            "Session: Refactor Feature".into(),
+            String::new(),
+            "Assistant suggested extracting helpers".into(),
+        ];
+        state.preview_cache.insert(
+            "session:codex/refactor-feature".into(),
+            Preview {
+                lines: preview_lines.clone(),
+                styled: lines_to_plain_text(&preview_lines),
+                title: Some("codex/refactor-feature".into()),
+                timestamp: Some("2023-10-22 19:00 UTC".into()),
+                updated_at: Instant::now(),
+            },
+        );
+
+        render_to_string(state, 60, 16)
+    }
+
+    fn render_to_string(state: &mut AppState<'_>, width: u16, height: u16) -> Result<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| draw(frame, state))?;
+        let buffer = terminal.backend_mut().buffer().clone();
+        Ok(buffer_to_string(&buffer))
+    }
+
+    fn buffer_to_string(buffer: &Buffer) -> String {
+        let area = buffer.area();
+        let mut lines = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                let symbol = buffer
+                    .cell((x, y))
+                    .map_or(" ", ratatui::buffer::Cell::symbol);
+                if symbol.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(symbol);
+                }
+            }
+            while line.ends_with(' ') {
+                line.pop();
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn empty_entry_placeholder_when_no_providers() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.providers.clear();
+        config.profiles.clear();
+        config.defaults.provider = None;
+        config.defaults.profile = None;
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let placeholder = EmptyEntry::for_state(&ctx);
+        let state = AppState::new(&mut ctx)?;
+        assert!(matches!(state.entries.first(), Some(Entry::Empty(_))));
+        assert!(placeholder.status.is_some());
+        Ok(())
     }
 }

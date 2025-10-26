@@ -168,3 +168,82 @@ pub struct SelfUpdateCommand {
     #[arg(long, value_name = "TAG")]
     pub version: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_search_with_full_text_role_and_since() {
+        let cli = Cli::try_parse_from([
+            "tx",
+            "search",
+            "--full-text",
+            "--role",
+            "user",
+            "--since",
+            "5m",
+            "--limit",
+            "10",
+            "context",
+        ])
+        .expect("parse search command");
+
+        let Command::Search(cmd) = cli.command.expect("search command") else {
+            panic!("expected search command");
+        };
+        assert!(cmd.full_text);
+        assert_eq!(cmd.term.as_deref(), Some("context"));
+        assert_eq!(cmd.role.as_deref(), Some("user"));
+        assert_eq!(cmd.since, Some(300));
+        assert_eq!(cmd.limit, Some(10));
+    }
+
+    #[test]
+    fn parse_search_rejects_invalid_role() {
+        let err = Cli::try_parse_from(["tx", "search", "--full-text", "--role", "admin", "term"])
+            .expect_err("invalid role should fail");
+        let message = err.to_string();
+        assert!(message.contains("invalid role 'admin'"));
+    }
+
+    #[test]
+    fn parse_search_rejects_bad_since() {
+        let err = Cli::try_parse_from(["tx", "search", "--since", "later"])
+            .expect_err("invalid duration should fail");
+        let message = err.to_string();
+        assert!(message.contains("invalid duration 'later'"));
+    }
+
+    #[test]
+    fn parse_resume_collects_provider_args() {
+        let cli = Cli::try_parse_from([
+            "tx",
+            "resume",
+            "sess-1",
+            "--emit-command",
+            "--",
+            "--flag",
+            "value",
+        ])
+        .expect("parse resume");
+
+        let Command::Resume(cmd) = cli.command.expect("resume command") else {
+            panic!("expected resume command");
+        };
+        assert_eq!(cmd.session_id, "sess-1");
+        assert!(cmd.emit_command);
+        assert_eq!(cmd.provider_args, vec!["--flag", "value"]);
+    }
+
+    #[test]
+    fn parse_config_default_raw_flag() {
+        let cli = Cli::try_parse_from(["tx", "config", "default", "--raw"])
+            .expect("parse config default");
+        let Command::Config(ConfigCommand::Default(cmd)) = cli.command.expect("config command")
+        else {
+            panic!("expected config default command");
+        };
+        assert!(cmd.raw);
+    }
+}
