@@ -10,7 +10,7 @@ Top-level scalar keys set application-wide defaults.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | `codex` | Provider used when launching a new session with no explicit provider flag. Must match a key under `[providers]`. |
+| `provider` | `string` | `codex` | Provider used when starting a new session in the TUI without an explicit profile. Must match a key under `[providers]`. |
 | `profile` | `string` | _unset_ | Preferred profile when creating sessions. Must match a key under `[profiles]`. |
 | `search_mode` | `string` | `first_prompt` | Chooses the initial search strategy in the TUI: `first_prompt` (default, prefix search on the first user message) or `full_text` (FTS across the whole transcript). |
 | `preview_filter` | `string` or `array` | _unset_ | Optional command that post-processes preview text. A string is parsed with `shlex` (e.g. `"glow -s dark"`). An array form (e.g. `["glow","-s","dark"]`) remains accepted for compatibility. Empty strings or arrays disable the filter. |
@@ -19,7 +19,7 @@ Sessions that the indexer marks as _unactionable_ stay hidden from default listi
 
 ## Provider Definitions (`[providers.<name>]`)
 
-Each provider entry defines how to launch an external tool.
+Each provider entry defines how to invoke an external tool.
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -52,8 +52,8 @@ Profiles bundle providers with optional snippets and wrappers.
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | ✅ | Provider key to launch. |
-| `description` | `string` | | Short label shown in the TUI next to the profile name. Provide launch guidance here. |
+| `provider` | `string` | ✅ | Provider key to run. |
+| `description` | `string` | | Short label shown in the TUI next to the profile name. Provide guidance here. |
 | `pre` | `array<string>` | | Ordered list of snippet names from `[snippets.pre]` to run beforehand. |
 | `post` | `array<string>` | | Snippet names from `[snippets.post]` to run after the session. |
 | `wrap` | `string` | | Name of a wrapper from `[wrappers]`. |

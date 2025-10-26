@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use color_eyre::Result;
@@ -21,10 +21,25 @@ pub fn run(command: &InternalCommand) -> Result<()> {
 }
 
 fn capture_arg(cmd: &InternalCaptureArgCommand) -> Result<()> {
+    let capture_input = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
     let prompt = if cmd.pre_commands.is_empty() {
-        read_stdin(cmd.prompt_limit).wrap_err("failed to read prompt from stdin")?
+        if let Some(input) = capture_input.clone() {
+            if input.len() > cmd.prompt_limit {
+                return Err(eyre!(
+                    "captured prompt exceeds configured limit of {} bytes",
+                    cmd.prompt_limit
+                ));
+            }
+            input
+        } else {
+            read_stdin(cmd.prompt_limit).wrap_err("failed to read prompt from stdin")?
+        }
     } else {
-        run_pre_pipeline(&cmd.pre_commands, cmd.prompt_limit)?
+        run_pre_pipeline(
+            &cmd.pre_commands,
+            capture_input.as_deref(),
+            cmd.prompt_limit,
+        )?
     };
 
     let resolved_args = resolve_provider_args(&cmd.provider_args, &prompt);
@@ -48,19 +63,38 @@ fn capture_arg(cmd: &InternalCaptureArgCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_pre_pipeline(commands: &[String], limit: usize) -> Result<String> {
+fn run_pre_pipeline(commands: &[String], input: Option<&str>, limit: usize) -> Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let pipeline = commands.join(" | ");
 
     let mut child = Command::new(shell);
     child.arg("-c").arg(&pipeline);
-    child.stdin(Stdio::inherit());
+    if input.is_some() {
+        child.stdin(Stdio::piped());
+    } else {
+        child.stdin(Stdio::inherit());
+    }
     child.stdout(Stdio::piped());
     child.stderr(Stdio::inherit());
 
     let mut process = child
         .spawn()
         .wrap_err_with(|| format!("failed to spawn pre pipeline '{pipeline}'"))?;
+
+    if let Some(data) = input {
+        if data.len() > limit {
+            return Err(eyre!(
+                "captured prompt exceeds configured limit of {limit} bytes"
+            ));
+        }
+        let mut stdin = process
+            .stdin
+            .take()
+            .ok_or_else(|| eyre!("failed to write to pre pipeline stdin"))?;
+        stdin
+            .write_all(data.as_bytes())
+            .wrap_err("failed to write prompt data to pre pipeline")?;
+    }
 
     let mut stdout = process
         .stdout

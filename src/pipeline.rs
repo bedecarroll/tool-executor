@@ -47,6 +47,8 @@ pub struct PipelinePlan {
     pub pre_snippets: Vec<String>,
     pub post_snippets: Vec<String>,
     pub wrapper: Option<String>,
+    pub needs_stdin_prompt: bool,
+    pub stdin_prompt_label: Option<String>,
     pub cwd: PathBuf,
 }
 
@@ -143,6 +145,8 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         pre_snippets: pre_snippet_names,
         post_snippets: post_snippet_names,
         wrapper: wrap_name,
+        needs_stdin_prompt: false,
+        stdin_prompt_label: None,
         cwd: request.cwd.clone(),
     })
 }

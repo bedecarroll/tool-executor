@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,8 +14,7 @@ use which::which;
 #[cfg(feature = "self-update")]
 use crate::cli::SelfUpdateCommand;
 use crate::cli::{
-    Cli, ConfigCommand, ConfigDefaultCommand, ExportCommand, LaunchCommand, ResumeCommand,
-    SearchCommand,
+    Cli, ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
 };
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
@@ -171,50 +170,6 @@ impl<'cli> App<'cli> {
         Ok(())
     }
 
-    /// Build and optionally execute a pipeline for launching a new provider session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if variables are invalid, the pipeline cannot be constructed,
-    /// or the resulting command fails to run.
-    pub fn launch(&mut self, cmd: &LaunchCommand) -> Result<()> {
-        let vars = parse_vars(&cmd.vars)?;
-        let request = PipelineRequest {
-            config: &self.loaded.config,
-            provider_hint: Some(cmd.provider.as_str()),
-            profile: cmd.profile.as_deref(),
-            additional_pre: cmd.pre_snippets.clone(),
-            additional_post: cmd.post_snippets.clone(),
-            inline_pre: Vec::new(),
-            wrap: cmd.wrap.as_deref(),
-            provider_args: cmd.provider_args.clone(),
-            capture_prompt: true,
-            vars,
-            session: SessionContext::default(),
-            cwd: std::env::current_dir()?,
-        };
-
-        let plan = build_pipeline(&request)?;
-        if cmd.emit_json && !(cmd.dry_run || cmd.emit_command) {
-            return Err(eyre!("--emit-json requires --dry-run or --emit-command"));
-        }
-
-        if cmd.dry_run || cmd.emit_command {
-            let mode = if cmd.emit_json {
-                EmitMode::Json
-            } else {
-                EmitMode::Plain {
-                    newline: true,
-                    friendly: false,
-                }
-            };
-            emit_command(&plan, mode)?;
-            return Ok(());
-        }
-
-        execute_plan(&plan).wrap_err("failed to execute pipeline")
-    }
-
     /// Build and optionally execute a pipeline to resume an existing session.
     ///
     /// # Errors
@@ -224,7 +179,7 @@ impl<'cli> App<'cli> {
     pub fn resume(&mut self, cmd: &ResumeCommand) -> Result<()> {
         let summary = self
             .db
-            .session_summary(&cmd.session_id)?
+            .session_summary_for_identifier(&cmd.session_id)?
             .ok_or_else(|| eyre!("session '{}' not found", cmd.session_id))?;
 
         if let Some(profile_name) = &cmd.profile {
@@ -548,6 +503,23 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
 }
 
 pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let should_prompt = plan.needs_stdin_prompt && stdin_is_terminal;
+    let capture_input = if should_prompt {
+        Some(prompt_for_stdin(plan.stdin_prompt_label.as_deref())?)
+    } else {
+        None
+    };
+
+    if capture_input.is_none()
+        && plan.pipeline.contains("internal capture-arg")
+        && stdin_is_terminal
+    {
+        eprintln!(
+            "tx: capturing prompt input. Type your prompt, then press Ctrl-D (Ctrl-Z on Windows) to continue."
+        );
+    }
+
     match &plan.invocation {
         Invocation::Shell { command } => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -555,6 +527,9 @@ pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
             cmd.arg("-c").arg(command);
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
+            if let Some(input) = capture_input.as_deref() {
+                cmd.env("TX_CAPTURE_STDIN_DATA", input);
+            }
             let status = cmd.status()?;
             if !status.success() {
                 return Err(eyre!("command exited with status {status}"));
@@ -568,6 +543,9 @@ pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
             cmd.args(&argv[1..]);
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
+            if let Some(input) = capture_input.as_deref() {
+                cmd.env("TX_CAPTURE_STDIN_DATA", input);
+            }
             let status = cmd.status()?;
             if !status.success() {
                 return Err(eyre!("command exited with status {status}"));
@@ -587,6 +565,34 @@ fn parse_vars(vars: &[String]) -> Result<HashMap<String, String>> {
         map.insert(key.trim().to_string(), value.to_string());
     }
     Ok(map)
+}
+
+fn prompt_for_stdin(label: Option<&str>) -> Result<String> {
+    if let Some(name) = label {
+        eprintln!(
+            "tx: {name} can accept extra context. Enter text and press Enter (leave blank to skip):"
+        );
+    } else {
+        eprintln!("tx: enter prompt input and press Enter (leave blank to skip).");
+    }
+    eprint!("› ");
+    io::stderr().flush()?;
+
+    let mut buffer = String::new();
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    handle.read_line(&mut buffer)?;
+
+    if buffer.ends_with("\r\n") {
+        buffer.truncate(buffer.len() - 2);
+        buffer.push('\n');
+    }
+
+    if !buffer.ends_with('\n') {
+        buffer.push('\n');
+    }
+
+    Ok(buffer)
 }
 
 fn summary_to_json(

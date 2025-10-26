@@ -13,6 +13,7 @@ pub struct VirtualProfile {
     pub name: String,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    pub stdin_supported: bool,
 }
 
 #[derive(Debug)]
@@ -90,12 +91,17 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let stdin_supported = entry
+            .get("stdin_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         profiles.push(VirtualProfile {
             key: format!("{}/{}", config.namespace, name),
             name: name.to_string(),
             description,
             tags,
+            stdin_supported,
         });
     }
 

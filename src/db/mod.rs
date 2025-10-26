@@ -520,6 +520,22 @@ impl Database {
             .map_err(|err| eyre!("failed to fetch session summary for {id}: {err}"))
     }
 
+    /// Retrieve a session summary by identifier, accepting either the internal ID or UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn session_summary_for_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<SessionSummary>> {
+        if let Some(summary) = self.session_summary(identifier)? {
+            return Ok(Some(summary));
+        }
+
+        self.session_summary_by_uuid(identifier)
+    }
+
     /// Determine the provider associated with a session identifier.
     ///
     /// # Errors

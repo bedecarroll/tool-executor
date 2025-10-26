@@ -158,6 +158,7 @@ struct ProfileEntry {
     description: Option<String>,
     tags: Vec<String>,
     inline_pre: Vec<String>,
+    stdin_supported: bool,
     kind: ProfileKind,
 }
 
@@ -468,10 +469,11 @@ impl EmptyEntry {
                 .join(", ");
             let preview = vec![
                 "No sessions indexed yet.".to_string(),
-                format!("Run `tx launch <provider>` using one of: {providers}"),
-                "The list will populate once session logs are ingested.".to_string(),
+                format!("Available providers: {providers}"),
+                "Select one in the TUI and press Enter to begin.".to_string(),
             ];
-            let status = Some("No sessions yet — launch a provider to get started.".to_string());
+            let status =
+                Some("No sessions yet — start a provider from the TUI to get started.".to_string());
             Self {
                 title: "New session".to_string(),
                 preview,
@@ -634,12 +636,13 @@ impl<'ctx> AppState<'ctx> {
                 wrap: profile.wrap.clone(),
                 description: profile.description.clone().or_else(|| {
                     Some(format!(
-                        "Launch via 'tx launch {} --profile {}'",
+                        "Press Enter to start {} with profile {}.",
                         profile.provider, profile_name
                     ))
                 }),
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
+                stdin_supported: false,
                 kind: ProfileKind::Config { name: profile_name },
             });
         }
@@ -654,7 +657,7 @@ impl<'ctx> AppState<'ctx> {
                 );
                 continue;
             }
-            let mut description = format!("Launch via 'tx launch {name}' using {}", provider.bin);
+            let mut description = format!("Press Enter to start {name} via {}", provider.bin);
             if provider.flags.is_empty() {
                 description.push('.');
             } else {
@@ -671,6 +674,7 @@ impl<'ctx> AppState<'ctx> {
                 description: Some(description),
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
+                stdin_supported: false,
                 kind: ProfileKind::Provider,
             });
         }
@@ -709,6 +713,7 @@ impl<'ctx> AppState<'ctx> {
                                     "pa {}",
                                     shell_escape(Cow::Borrowed(vp.name.as_str()))
                                 )],
+                                stdin_supported: vp.stdin_supported,
                                 kind: ProfileKind::Virtual,
                             });
                         }
@@ -996,92 +1001,8 @@ impl<'ctx> AppState<'ctx> {
         };
 
         match entry {
-            Entry::Session(session) => {
-                let summary = self
-                    .ctx
-                    .db
-                    .session_summary(&session.id)?
-                    .ok_or_else(|| eyre!("session '{}' not found", session.id))?;
-
-                let resume_plan = providers::resume_info(&summary)?;
-                let mut provider_args = Vec::new();
-                let mut resume_token = None;
-                if let Some(mut plan) = resume_plan {
-                    resume_token = plan.resume_token.take();
-                    provider_args.extend(plan.args);
-                }
-
-                let request = PipelineRequest {
-                    config: self.ctx.config,
-                    provider_hint: Some(summary.provider.as_str()),
-                    profile: None,
-                    additional_pre: Vec::new(),
-                    additional_post: Vec::new(),
-                    inline_pre: Vec::new(),
-                    wrap: None,
-                    provider_args,
-                    capture_prompt: false,
-                    vars: HashMap::new(),
-                    session: SessionContext {
-                        id: Some(summary.id.clone()),
-                        label: summary.label.clone(),
-                        path: Some(summary.path.to_string_lossy().to_string()),
-                        resume_token,
-                    },
-                    cwd: summary.path.parent().map_or_else(
-                        || env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                        Path::to_path_buf,
-                    ),
-                };
-                Ok(Some(build_pipeline(&request)?))
-            }
-            Entry::Profile(profile) => {
-                let request = match profile.kind {
-                    ProfileKind::Config { ref name } => PipelineRequest {
-                        config: self.ctx.config,
-                        provider_hint: Some(profile.provider.as_str()),
-                        profile: Some(name.as_str()),
-                        additional_pre: Vec::new(),
-                        additional_post: Vec::new(),
-                        inline_pre: Vec::new(),
-                        wrap: profile.wrap.as_deref(),
-                        provider_args: Vec::new(),
-                        capture_prompt: true,
-                        vars: HashMap::new(),
-                        session: SessionContext::default(),
-                        cwd: env::current_dir()?,
-                    },
-                    ProfileKind::Virtual => PipelineRequest {
-                        config: self.ctx.config,
-                        provider_hint: Some(profile.provider.as_str()),
-                        profile: None,
-                        additional_pre: profile.pre.clone(),
-                        additional_post: profile.post.clone(),
-                        inline_pre: profile.inline_pre.clone(),
-                        wrap: profile.wrap.as_deref(),
-                        provider_args: Vec::new(),
-                        capture_prompt: true,
-                        vars: HashMap::new(),
-                        session: SessionContext::default(),
-                        cwd: env::current_dir()?,
-                    },
-                    ProfileKind::Provider => PipelineRequest {
-                        config: self.ctx.config,
-                        provider_hint: Some(profile.provider.as_str()),
-                        profile: None,
-                        additional_pre: Vec::new(),
-                        additional_post: Vec::new(),
-                        inline_pre: Vec::new(),
-                        wrap: None,
-                        provider_args: Vec::new(),
-                        capture_prompt: true,
-                        vars: HashMap::new(),
-                        session: SessionContext::default(),
-                        cwd: env::current_dir()?,
-                    },
-                };
-                Ok(Some(build_pipeline(&request)?))
-            }
+            Entry::Session(session) => self.plan_for_session(&session),
+            Entry::Profile(profile) => self.plan_for_profile(&profile),
             Entry::Empty(empty) => {
                 if let Some(message) = &empty.status {
                     self.message = Some(message.clone());
@@ -1089,6 +1010,103 @@ impl<'ctx> AppState<'ctx> {
                 Ok(None)
             }
         }
+    }
+
+    fn plan_for_session(&mut self, session: &SessionEntry) -> Result<Option<PipelinePlan>> {
+        let summary = self
+            .ctx
+            .db
+            .session_summary(&session.id)?
+            .ok_or_else(|| eyre!("session '{}' not found", session.id))?;
+
+        let resume_plan = providers::resume_info(&summary)?;
+        let mut provider_args = Vec::new();
+        let mut resume_token = None;
+        if let Some(mut plan) = resume_plan {
+            resume_token = plan.resume_token.take();
+            provider_args.extend(plan.args);
+        }
+
+        let request = PipelineRequest {
+            config: self.ctx.config,
+            provider_hint: Some(summary.provider.as_str()),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args,
+            capture_prompt: false,
+            vars: HashMap::new(),
+            session: SessionContext {
+                id: Some(summary.id.clone()),
+                label: summary.label.clone(),
+                path: Some(summary.path.to_string_lossy().to_string()),
+                resume_token,
+            },
+            cwd: summary.path.parent().map_or_else(
+                || env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                Path::to_path_buf,
+            ),
+        };
+
+        let plan = build_pipeline(&request)?;
+        Ok(Some(plan))
+    }
+
+    fn plan_for_profile(&mut self, profile: &ProfileEntry) -> Result<Option<PipelinePlan>> {
+        let capture_prompt = !profile.pre.is_empty() || !profile.inline_pre.is_empty();
+        let request = match &profile.kind {
+            ProfileKind::Config { name } => PipelineRequest {
+                config: self.ctx.config,
+                provider_hint: Some(profile.provider.as_str()),
+                profile: Some(name.as_str()),
+                additional_pre: Vec::new(),
+                additional_post: Vec::new(),
+                inline_pre: Vec::new(),
+                wrap: profile.wrap.as_deref(),
+                provider_args: Vec::new(),
+                capture_prompt,
+                vars: HashMap::new(),
+                session: SessionContext::default(),
+                cwd: env::current_dir()?,
+            },
+            ProfileKind::Virtual => PipelineRequest {
+                config: self.ctx.config,
+                provider_hint: Some(profile.provider.as_str()),
+                profile: None,
+                additional_pre: profile.pre.clone(),
+                additional_post: profile.post.clone(),
+                inline_pre: profile.inline_pre.clone(),
+                wrap: profile.wrap.as_deref(),
+                provider_args: Vec::new(),
+                capture_prompt,
+                vars: HashMap::new(),
+                session: SessionContext::default(),
+                cwd: env::current_dir()?,
+            },
+            ProfileKind::Provider => PipelineRequest {
+                config: self.ctx.config,
+                provider_hint: Some(profile.provider.as_str()),
+                profile: None,
+                additional_pre: Vec::new(),
+                additional_post: Vec::new(),
+                inline_pre: Vec::new(),
+                wrap: None,
+                provider_args: Vec::new(),
+                capture_prompt,
+                vars: HashMap::new(),
+                session: SessionContext::default(),
+                cwd: env::current_dir()?,
+            },
+        };
+
+        let mut plan = build_pipeline(&request)?;
+        if profile.stdin_supported {
+            plan.needs_stdin_prompt = true;
+            plan.stdin_prompt_label = Some(profile.display.clone());
+        }
+        Ok(Some(plan))
     }
 
     #[allow(clippy::too_many_lines)]

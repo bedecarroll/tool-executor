@@ -22,8 +22,6 @@ pub struct Cli {
 pub enum Command {
     /// Search session transcripts.
     Search(SearchCommand),
-    /// Launch a new session pipeline.
-    Launch(LaunchCommand),
     /// Resume an existing session pipeline.
     Resume(ResumeCommand),
     /// Export a session transcript.
@@ -60,39 +58,6 @@ pub struct SearchCommand {
     /// Maximum number of sessions to return.
     #[arg(long)]
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Args)]
-pub struct LaunchCommand {
-    /// Provider to launch (overridden by --profile when specified).
-    pub provider: String,
-    /// Profile to apply (pre/post/wrap/provider overrides).
-    #[arg(long)]
-    pub profile: Option<String>,
-    /// Append an additional pre snippet by name (repeatable).
-    #[arg(long = "pre", action = ArgAction::Append)]
-    pub pre_snippets: Vec<String>,
-    /// Append an additional post snippet by name (repeatable).
-    #[arg(long = "post", action = ArgAction::Append)]
-    pub post_snippets: Vec<String>,
-    /// Override the wrapper by name.
-    #[arg(long)]
-    pub wrap: Option<String>,
-    /// Print the fully-resolved command instead of executing it.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub emit_command: bool,
-    /// Emit pipeline details as JSON when combined with --dry-run or --emit-command.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub emit_json: bool,
-    /// Provide a variable binding (KEY=VALUE).
-    #[arg(long = "var", action = ArgAction::Append)]
-    pub vars: Vec<String>,
-    /// Print the final command and exit without running it.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub dry_run: bool,
-    /// Arguments forwarded to the provider after `--`.
-    #[arg(last = true)]
-    pub provider_args: Vec<String>,
 }
 
 #[derive(Debug, Args)]

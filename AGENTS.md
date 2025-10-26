@@ -4,6 +4,10 @@
 
 This document describes how automated agents should interact with this repository. Follow every instruction unless the user explicitly overrides it.
 
+## Instructions
+
+- Once work is complete run `mise run fmt`, `mise run lint` and `mise run test` to ensure code quality.
+
 ## Quickstart
 
 0. If this project was regenerated, choose a `project_name` with alphanumerics so the derived slug remains valid.
@@ -88,7 +92,3 @@ Run tasks with `mise run <task>`:
 - Keep `rust-toolchain.toml`, `Cargo.toml`, and `mise.toml` in sync when bumping the MSRV.
 - To adopt a new stable Rust release: `rustup update stable`, update the pinned versions in `rust-toolchain.toml`, `Cargo.toml (rust-version)`, and `mise.toml`, refresh documentation that cites the version, then rerun `mise run fmt`, `mise run lint`, and `mise run test`.
 - Confirm `AGENTS.md` stays current whenever tooling changes.
-
-## Escalations
-
-If a task requires new tooling or significant workflow changes, open an issue tagged `workflow` and document the proposal before implementing.

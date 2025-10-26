@@ -1,5 +1,4 @@
 provider = "codex"
-search_mode = "first_prompt"
 # preview_filter = "glow -s dark" # Optional: pipe TUI preview through an external command.
 
 [providers.codex]

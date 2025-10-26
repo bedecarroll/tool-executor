@@ -33,7 +33,6 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
 
     let outcome = match &cli.command {
         Some(Command::Search(cmd)) => app.search(cmd),
-        Some(Command::Launch(cmd)) => app.launch(cmd),
         Some(Command::Resume(cmd)) => app.resume(cmd),
         Some(Command::Export(cmd)) => app.export(cmd),
         Some(Command::Config(cmd)) => app.config(cmd),
