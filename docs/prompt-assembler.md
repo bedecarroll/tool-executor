@@ -77,24 +77,11 @@ tx internal capture-arg --provider codex --bin codex \
 `tx` runs the `pa hello` pipeline, captures its stdout, and substitutes it for
 `{prompt}` so the provider launches as `codex --search "<PA output>"`.
 
-### Manual CLI launches
+### Manual CLI runs
 
-Prefer to stay in the shell? Assemble the prompt first, then hand it to `tx`:
-
-```bash
-pa support-ticket | tx launch codex
-```
-
-If the prompt expects additional arguments, pass them straight to `pa` before
-piping:
-
-```bash
-pa support-ticket abc-123 | tx launch codex
-```
-
-`pa` still receives stdin as `{0}` (the text you piped in), followed by any
-positional arguments you supplied. If you forget a required value, `pa` exits
-non-zero and `tx` surfaces its error output so you can fix the command.
+Prefer to stay in the shell? Press `Tab` in the TUI to print the assembled
+command, or script `pa` and your provider directly. The standalone `tx launch`
+subcommand no longer exists, so the TUI-driven workflow is the primary path.
 
 ## Cool Things to Try
 
@@ -105,7 +92,7 @@ non-zero and `tx` surfaces its error output so you can fix the command.
   the current directory or Git remotes. Combine this with wrapper snippets that
   set environment variables before launching your provider.
 - **One-shot runbooks:** Use `pa` entries to describe emergency procedures.
-  Launching the virtual profile preps context, sets log capture, and opens the
+  Starting the virtual profile preps context, sets log capture, and opens the
   right dashboard with a single keypress inside `tx`.
 - **Workspace scaffolding:** Pair `pa` with a post-snippet that writes files or
   records metadata so every session starts with a structured brief.
@@ -127,7 +114,7 @@ non-zero and `tx` surfaces its error output so you can fix the command.
   snippets must fetch additional data on demand.
 - Virtual profiles currently inherit the default provider (`[defaults] provider`
   or the first configured provider). Set that default explicitly if you want
-  PA entries to always launch with a specific backend.
+  PA entries to always start with a specific backend.
 
 Feedback and contributions are welcome—open an issue or PR if you need more
 flexibility from the integration.

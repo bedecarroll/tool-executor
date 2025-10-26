@@ -128,8 +128,7 @@ tx search asset                   # first user-prompt only
 tx search asset --full-text       # full-text FTS search (JSON output by default)
 tx search context --full-text --role assistant   # filter FTS hits to assistant replies
 
-# Launch / resume (non-TUI paths also supported)
-tx launch <provider> [--profile NAME] [--pre NAME...] [--post NAME...] [--wrap NAME] [--] [provider-args...]
+# Resume (non-TUI path)
 tx resume <session-id> [--profile NAME] [--pre ...] [--post ...] [--wrap NAME] [--] [provider-args...]
 
 # Export transcript
@@ -144,6 +143,8 @@ tx doctor
 # Self-update (requires `--features self-update`)
 tx self-update [--version TAG]
 ```
+
+New sessions are started from the TUI; the CLI paths above focus on discovery, resume, and tooling helpers.
 
 ### Search output
 

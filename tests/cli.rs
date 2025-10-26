@@ -57,40 +57,6 @@ fn search_reports_empty_when_no_matches() -> color_eyre::Result<()> {
 }
 
 #[test]
-fn launch_dry_run_prints_pipeline() -> color_eyre::Result<()> {
-    let temp = TempDir::new()?;
-    let config_dir = temp.child("config-root");
-    config_dir.create_dir_all()?;
-    let config_path = config_dir.child("config.toml");
-    let mut root = toml::map::Map::new();
-    let mut providers = toml::map::Map::new();
-    let mut echo = toml::map::Map::new();
-    echo.insert("bin".into(), toml::Value::String("echo".into()));
-    echo.insert(
-        "flags".into(),
-        toml::Value::Array(Vec::<toml::Value>::new()),
-    );
-    echo.insert("env".into(), toml::Value::Array(Vec::<toml::Value>::new()));
-    providers.insert("echo".into(), toml::Value::Table(echo));
-    root.insert("providers".into(), toml::Value::Table(providers));
-    let config_contents = toml::to_string(&toml::Value::Table(root))?;
-    std::fs::write(config_path.path(), config_contents)?;
-    let written = std::fs::read_to_string(config_path.path())?;
-    toml::from_str::<toml::Value>(&written).expect("valid launch config");
-
-    let mut cmd = base_command(&temp);
-    cmd.arg("launch")
-        .arg("echo")
-        .arg("--dry-run")
-        .assert()
-        .success()
-        .stdout(contains("echo"));
-
-    temp.close()?;
-    Ok(())
-}
-
-#[test]
 fn config_dump_outputs_merged_toml() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let config_dir = temp.child("config-root");
@@ -168,63 +134,6 @@ fn search_help_omits_json_and_emit_flags() -> color_eyre::Result<()> {
 }
 
 #[test]
-fn launch_emit_command_prints_pipeline() -> color_eyre::Result<()> {
-    let temp = TempDir::new()?;
-    let config_dir = temp.child("config-root");
-    config_dir.create_dir_all()?;
-    let config_path = config_dir.child("config.toml");
-    let mut root = toml::map::Map::new();
-    let mut providers = toml::map::Map::new();
-    let mut echo = toml::map::Map::new();
-    echo.insert("bin".into(), toml::Value::String("echo".into()));
-    echo.insert(
-        "flags".into(),
-        toml::Value::Array(Vec::<toml::Value>::new()),
-    );
-    echo.insert("env".into(), toml::Value::Array(Vec::<toml::Value>::new()));
-    providers.insert("echo".into(), toml::Value::Table(echo));
-    root.insert("providers".into(), toml::Value::Table(providers));
-    let config_contents = toml::to_string(&toml::Value::Table(root))?;
-    std::fs::write(config_path.path(), config_contents)?;
-
-    let mut cmd = base_command(&temp);
-    cmd.args(["launch", "echo", "--emit-command"])
-        .assert()
-        .success()
-        .stdout(contains("echo"));
-
-    temp.close()?;
-    Ok(())
-}
-
-#[test]
-fn launch_with_capture_arg_runs_internal_helper() -> color_eyre::Result<()> {
-    let temp = TempDir::new()?;
-    let config_dir = temp.child("config-root");
-    config_dir.create_dir_all()?;
-    let config_path = config_dir.child("config.toml");
-    std::fs::write(
-        config_path.path(),
-        r#"[providers.codex]
-bin = "codex"
-flags = ["--search"]
-stdin_mode = "capture-arg"
-stdin_to = "codex:--prompt {prompt}"
-"#,
-    )?;
-
-    let mut cmd = base_command(&temp);
-    cmd.args(["launch", "codex", "--emit-command"])
-        .assert()
-        .success()
-        .stdout(contains("internal capture-arg"))
-        .stdout(contains("--arg --search"));
-
-    temp.close()?;
-    Ok(())
-}
-
-#[test]
 fn search_role_requires_term() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
@@ -244,6 +153,35 @@ fn search_role_requires_full_text() -> color_eyre::Result<()> {
         .assert()
         .failure()
         .stderr(contains("--role requires --full-text"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_accepts_uuid_identifier() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+
+    let codex_home = temp.child("codex-home");
+    codex_home.create_dir_all()?;
+    let session_dir = codex_home.child("session");
+    session_dir.create_dir_all()?;
+    let payload = format!(
+        "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"id\":\"{uuid}\",\
+         \"text\":\"Ping\"}}}}\n\
+         {{\"type\":\"message\",\"payload\":{{\"role\":\"assistant\",\"content\":[{{\"text\":\
+         \"Pong\"}}]}}}}\n"
+    );
+    session_dir.child("resume.jsonl").write_str(&payload)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.arg("resume")
+        .arg(uuid)
+        .arg("--emit-command")
+        .assert()
+        .success()
+        .stdout(contains(uuid));
+
     temp.close()?;
     Ok(())
 }
