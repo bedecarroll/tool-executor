@@ -1,286 +1,115 @@
-# tx -- Tool eXecutor
+# tx
 
-A thin, configurable launcher that starts, resumes, and searches **AI code-assistant sessions** (e.g., Codex, Claude Code, Aider). It gives you an Atuin-style TUI, composable **pre/post** pipelines, and **wrappers** (e.g., tmux, docker) -- all via simple `conf.d/` drop-ins.
+tx is a terminal-first launcher for AI code-assistant sessions. It keeps your pipelines reproducible, lets you hop between conversations instantly, and gives you tooling hooks to automate prompt assembly, logging, and resume flows.
 
-* **Binary:** `tx`
-* **Repo:** `tool-executor`
+## Features
 
-## Highlights
+- **Focused TUI** – launch `tx` to browse recent sessions and saved profiles, preview transcripts, and run pipelines without touching shell history.
+- **Rich search** – filter by prompt or toggle into full-text search for transcripts, then resume exactly where you left off.
+- **Composable pipelines** – stitch pre/post snippets, wrappers, and providers together declaratively; tx reuses the recorded pipeline when you resume a session.
+- **Virtual profiles** – surface external prompt catalogs (e.g. prompt-assembler) beside static profiles so teams share the same launch menu.
+- **Safety rails** – `tx doctor`, configuration linting, and explicit resume tokens keep pipelines predictable across machines.
 
-* **One-command TUI**: run `tx`, pick a recent session or a profile, **Tab** to insert the command into your shell, **Enter** to run.
-* **Search**: first-prompt (fast) or **full-text** (FTS) across stored session logs.
-* **Pipelines**: `pre | provider <args> | post` -- stdin flows naturally.
-* **Wrappers**: run the assembled pipeline inside tmux/nohup/docker/etc. via `{{CMD}}` templates.
-* **Drop-in config**: `~/.config/tx/conf.d/*.toml` overrides/extends without mode switches.
-* **Prompt-assembler integration (optional)**: discover prompts via `pa list --json` and treat them as virtual profiles.
-* **Provider safety**: resuming a session always uses its original provider.
+## Installation
 
----
+### Download a release
 
-## Install
+Prebuilt archives are produced with `cargo dist`. Grab the latest release from this repository’s **Releases** page, unpack it somewhere on your `PATH`, and run `tx doctor` to verify dependencies.
 
-```bash
-cargo install --path .              # from a clone
-# or once published:
-# cargo install tool-executor
-```
-
-### Shell keybinding (Atuin-style insertion)
-
-Bind **Alt-t** to open `tx`, select an item, then **Tab** to insert the resolved command into your current line (it will not run).
-
-Inside the TUI, press **Tab** to emit the assembled command to stdout and exit. You can wire that into your shell so the command replaces the current line:
-
-#### bash
+### Build from source
 
 ```bash
-# Add to ~/.bashrc
-_tx_insert() {
-  local cmd
-  cmd="$(tx 2>/dev/null)" || return  # launch the TUI, pick an entry, press Tab
-  READLINE_LINE="$cmd"
-  READLINE_POINT=${#READLINE_LINE}
-}
-bind -x '"\et":"_tx_insert"'
+git clone https://github.com/bedecarroll/tool-executor.git
+cd tool-executor
+cargo build --release
+./target/release/tx doctor
 ```
 
-#### zsh
+The repository pins Rust 1.90 in `rust-toolchain.toml`, so `cargo` will automatically use the correct toolchain.
 
-```zsh
-# Add to ~/.zshrc
-_tx_insert() {
-  local cmd
-  cmd="$(tx 2>/dev/null)" || return   # launch the TUI, pick an entry, press Tab
-  LBUFFER="$cmd"
-  CURSOR=${#LBUFFER}
-}
-zle -N _tx_insert
-bindkey "\et" _tx_insert
-```
+## First Run
 
-#### fish
+1. Run `tx doctor` once to bootstrap the configuration/data directories and confirm your environment.
+2. Inspect the bundled template with `tx config default --raw` and save the parts you need to `~/.config/tx/config.toml` (the directory is created for you).
+3. Add at least one provider definition. A minimal example:
 
-```fish
-# Add to ~/.config/fish/config.fish
-function _tx_insert
-  set -l cmd (tx 2>/dev/null)
-  test -n "$cmd"; or return
-  commandline -r -- $cmd
-end
-bind \et '_tx_insert'
-```
+   ```toml
+   # ~/.config/tx/config.toml
+   provider = "codex"
 
----
+   [providers.codex]
+   bin = "codex"
+   flags = ["--search"]
+   env = ["CODEX_TOKEN=${env:CODEX_TOKEN}"]
+   ```
 
-## Quick Start
+4. Launch `tx` and pick a profile or previous session. The preview pane shows a transcript snippet or the assembled pipeline before you run it.
 
-1. Create config directories:
+Additional configuration patterns—wrappers, snippets, prompt-assembler integration, and environment overrides—are covered in the mdBook under `docs/src/`.
 
-```bash
-mkdir -p ~/.config/tx/conf.d ~/.local/share/tx ~/.cache/tx
-```
-
-1. Drop a minimal provider config (example):
-
-```toml
-# ~/.config/tx/conf.d/00-providers.toml
-[providers.codex]
-bin = "codex"
-flags = ["--search"]
-env = ["CODEX_TOKEN=${env:CODEX_TOKEN}"]
-# Session logs are discovered automatically from $CODEX_HOME (defaults to ~/.codex).
-
-[providers.claude]
-bin = "claude-code"
-flags = []
-env = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"]
-# Session discovery is not yet implemented.
-```
-
-1. (Optional) Add wrappers and a profile:
-
-```toml
-# ~/.config/tx/conf.d/10-profiles.toml
-[wrappers.tmux_simple]
-shell = true
-cmd   = "tmux new -s tx-{{session.id}} '{{CMD}}'"
-
-[profiles.kickoff]
-provider = "codex"
-pre  = []
-post = []
-wrap = "tmux_simple"
-```
-
-1. Run `tx`, pick **kickoff** or a recent session; **Enter** runs; **Tab** inserts.
-
----
-
-## Usage
+## CLI Overview
 
 ```text
-# TUI
-tx                     # open UI: recent sessions + profiles (new sessions)
+# Terminal UI
+$ tx
 
-# Search
-tx search                         # list recent sessions (archived entries stay hidden)
-tx search asset                   # first user-prompt only
-tx search asset --full-text       # full-text FTS search (JSON output by default)
-tx search context --full-text --role assistant   # filter FTS hits to assistant replies
+# Search (prompt mode by default)
+$ tx search refactor
+$ tx search refactor --full-text --role assistant
 
-# Resume (non-TUI path)
-tx resume <session-id> [--profile NAME] [--pre ...] [--post ...] [--wrap NAME] [--] [provider-args...]
+# Resume and inspect pipelines
+$ tx resume <session-id>
+$ tx resume <session-id> --emit-command --emit-json
 
-# Export transcript
-tx export <session-id>
-
-# Config helpers
-tx config list|dump|where|lint
+# Configuration helpers
+$ tx config list
+$ tx config dump
+$ tx config where
+$ tx config lint
+$ tx config default --raw > ~/.config/tx/config.toml
 
 # Diagnostics
-tx doctor
+$ tx doctor
 
-# Self-update (requires `--features self-update`)
-tx self-update [--version TAG]
+# Transcript export
+$ tx export <session-id> > notes.md
 ```
 
-New sessions are started from the TUI; the CLI paths above focus on discovery, resume, and tooling helpers.
+## TUI Shortcuts
 
-### Search output
+- `↑/↓`, `PgUp/PgDn` – move around the active list.
+- `/` – start typing to filter; `Backspace` edits the filter.
+- `Ctrl+F` – toggle between prompt search and full-text search.
+- `Ctrl+P` – cycle provider filters when multiple backends are configured.
+- `R` – re-run the indexer and refresh listings.
+- `Tab` – emit the assembled pipeline to stdout (useful for scripting).
+- `Enter` – launch the selected session or profile.
+- `Esc` – leave filter mode or close the TUI.
 
-`tx search` always emits pretty JSON. For full-text hits, the payload includes:
+## Documentation
 
-* `snippet`: the full message line that matched.
-* `snippet_role`: `"user"` or `"assistant"` so you can filter or style results.
-* `last_active`: seconds since epoch (UTC) for easy recency sorting.
+Browse the rendered mdBook at [tx.bedecarroll.com](https://tx.bedecarroll.com), or read the Markdown sources locally under `docs/`. Run `mdbook serve docs --open` (requires `mdbook`) for a live preview.
 
-Prompt-only searches populate `snippet` with the first user prompt and omit `snippet_role`.
+- Getting started: `docs/src/getting-started/`
+- Configuration guide: `docs/src/configuration/`
+- Advanced topics: `docs/src/advanced/`
+- Reference material: `docs/src/reference/`
 
-### Keys inside TUI
+## Contributing
 
-* `Up/Down` move
-* `/` filter
-* `Tab` insert
-* `Enter` run
-* `Ctrl-F` toggle full-text
-* `p` provider filter
-* `R` reindex
-* `e` export
-* `?` help
+1. Install the toolchain referenced by `rust-toolchain.toml` (Rust 1.90). Using [`mise`](https://mise.jdx.dev/) is recommended: `mise trust && mise install`.
+2. Run the guard tasks in a red–green–refactor loop:
 
----
+   ```bash
+   mise run fmt
+   mise run lint
+   mise run test
+   ```
 
-## Configuration (TOML)
+3. Keep docs up to date alongside code (`mdbook build docs`).
 
-`tx` loads in order (later overrides earlier):
-
-```text
-~/.config/tx/config.toml           # optional base
-~/.config/tx/conf.d/*.toml         # lexicographic order (00-... 50-... 99-...)
-./.tx.toml                         # project-local (optional)
-./.tx.d/*.toml                     # project-local drop-ins (optional)
-```
-
-### Merge rules
-
-* Tables deep-merge; scalars overwrite.
-* Arrays replace unless you use the `+` form to append: `pre+ = ["assemble"]`.
-* Set a key to `null` to delete it.
-
-### Schema overview
-
-```toml
-provider = "codex"
-profile  = "kickoff"           # default profile for new sessions
-search_mode = "first_prompt"   # or "full_text"
-# preview_filter = "glow -s dark"  # optional: pipe the preview pane through an external formatter
-# preview_filter = ["glow", "-p"]  # array form also accepted
-
-[providers.<name>]
-bin = "codex"                  # executable name or path
-flags = ["--search"]           # ordered default flags
-env = ["KEY=${env:KEY}"]      # per-provider env vars (expanded)
-# Session logs for Codex are discovered automatically from $CODEX_HOME.
-stdin_mode = "capture-arg"      # capture stdin and pass as positional prompt
-stdin_to = "codex:--prompt {prompt}"
-
-[snippets.pre]
-assemble = "prompt-tool --from-stdin"
-
-[snippets.post]
-save_md  = "tee session.md"
-
-[wrappers.<name>]
-shell = true|false
-cmd   = "tmux new -s tx-{{session.id}} '{{CMD}}'"     # if shell=true
-# or cmd = ["docker","run","-i","...","/bin/sh","-lc","{{CMD}}"]   # if shell=false
-
-[profiles.<name>]
-provider = "codex"
-pre  = ["assemble"]
-post = ["save_md"]
-wrap = "tmux_simple"
-```
-
-### Variables available in templates
-
-* `{{CMD}}` -- the fully assembled pipeline string
-* `{{provider}}`, `{{session.id}}`, `{{session.label}}`, `{{cwd}}`
-* `{{var:NAME}}` -- from `--var NAME=VALUE` or TUI prompts
-
----
-
-## Prompt-assembler (optional)
-
-```toml
-# ~/.config/tx/conf.d/20-pa.toml
-[features.pa]
-enabled = true
-namespace = "pa"
-```
-
-* When enabled, `tx` calls `pa list --json`, turning each prompt into a virtual profile `pa/<name>` that runs `pa <prompt>` before your provider.
-* Configure your provider to capture the assembled text, e.g. `stdin_mode = "capture-arg"` and `stdin_to = "codex:{prompt}"` so the PA output becomes the final positional argument.
-* If `pa` is missing or `list` fails, `tx` hides PA items and shows a small header notice.
-
----
-
-## Optional Features
-
-Enable the `self-update` cargo feature to build the `tx self-update` command:
-
-```bash
-cargo install --path . --features self-update
-```
-
----
-
-## Data locations (XDG)
-
-* Config: `${XDG_CONFIG_HOME:-~/.config}/tx/`
-* Database: `${XDG_DATA_HOME:-~/.local/share}/tx/tx.sqlite3`
-* Cache: `${XDG_CACHE_HOME:-~/.cache}/tx/`
-
----
-
-## Export
-
-```bash
-tx export <session-id>   # prints Markdown to stdout
-```
-
----
-
-## Safety
-
-* Resuming a session always uses its original provider; forcing a different provider fails with exit code 2.
-* `--dry-run` prints the final command or wrapper (after substitutions) and exits 0.
-* For `shell=true` wrappers, `{{CMD}}` is safely single-quoted; embedded single quotes are escaped.
-
----
+Issues and pull requests are welcome. Please avoid committing `coverage/` artefacts.
 
 ## License
 
 MIT
-
----
