@@ -9,6 +9,7 @@ This document describes how automated agents should interact with this repositor
 - Follow Test-Driven Development (TDD) Red-Green-Refactor development methodology.
 - Once work is complete run `mise run fmt`, `mise run lint` and `mise run test` to ensure code quality.
 - Use `tmux` to test functionality.
+- Maintain 95%+ unit test coverage, check with `mise run coverage`.
 
 ## ExecPlans
 

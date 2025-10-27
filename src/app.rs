@@ -1427,7 +1427,7 @@ mod tests {
             friendly_display: "capture".into(),
             env: Vec::new(),
             invocation: Invocation::Shell {
-                command: "/bin/true".into(),
+                command: "true".into(),
             },
             provider: "codex".into(),
             pre_snippets: Vec::new(),

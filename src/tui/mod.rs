@@ -3063,6 +3063,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn render_search_results_snapshot(state: &mut AppState<'_>) -> Result<String> {
         state.full_text = true;
         state.filter = "refactor".into();
@@ -3112,6 +3113,7 @@ mod tests {
         render_to_string(state, 60, 16)
     }
 
+    #[cfg(unix)]
     fn render_to_string(state: &mut AppState<'_>, width: u16, height: u16) -> Result<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend)?;
@@ -3120,6 +3122,7 @@ mod tests {
         Ok(buffer_to_string(&buffer))
     }
 
+    #[cfg(unix)]
     fn buffer_to_string(buffer: &Buffer) -> String {
         let area = buffer.area();
         let mut lines = Vec::new();
