@@ -34,6 +34,7 @@ use std::borrow::Cow;
 
 use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
+#[cfg(any(test, coverage))]
 use crate::indexer::Indexer;
 use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::PromptStatus;
@@ -47,7 +48,7 @@ use unicode_width::UnicodeWidthStr;
 
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
-const MESSAGE_FILTER_MODE: &str = "Filter mode: type to narrow results, Enter to apply, Esc to stop editing (Esc again from the list to quit).";
+const MESSAGE_FILTER_MODE: &str = "Filtering results";
 const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-P cycle provider filter  •  Ctrl-F toggle search mode  •  Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
 const PROFILE_IDENTIFIER_LIMIT: usize = 40;
@@ -211,7 +212,6 @@ struct AppState<'ctx> {
     provider_filter: Option<String>,
     provider_order: Vec<String>,
     full_text: bool,
-    input_mode: InputMode,
     message: Option<String>,
     overlay_message: Option<(String, Instant)>,
     preview_cache: HashMap<String, Preview>,
@@ -273,12 +273,6 @@ enum ProfileKind {
     Config { name: String },
     Virtual,
     Provider,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode {
-    Normal,
-    Filter,
 }
 
 #[derive(Debug, Clone)]
@@ -597,7 +591,6 @@ impl<'ctx> AppState<'ctx> {
             provider_filter: None,
             provider_order,
             full_text: matches!(defaults.search_mode, SearchMode::FullText),
-            input_mode: InputMode::Normal,
             message: None,
             overlay_message: None,
             preview_cache: HashMap::new(),
@@ -609,16 +602,6 @@ impl<'ctx> AppState<'ctx> {
         state.refresh_entries()?;
         state.list_state.select(Some(0));
         Ok(state)
-    }
-
-    fn set_status_message(&mut self, message: &'static str) {
-        self.message = Some(message.to_string());
-    }
-
-    fn clear_status_message(&mut self, message: &'static str) {
-        if self.message.as_deref() == Some(message) {
-            self.message = None;
-        }
     }
 
     fn set_temporary_status_message(&mut self, message: String, duration: Duration) {
@@ -670,14 +653,6 @@ impl<'ctx> AppState<'ctx> {
             return Some(text.clone());
         }
 
-        if matches!(self.input_mode, InputMode::Filter) {
-            return if self.filter.is_empty() {
-                Some(String::new())
-            } else {
-                Some(self.filter.clone())
-            };
-        }
-
         if let Some(message) = self.entries.get(self.index).and_then(|entry| match entry {
             Entry::Empty(empty) => empty.status.clone(),
             _ => None,
@@ -706,10 +681,7 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match self.input_mode {
-            InputMode::Normal => self.handle_key_normal(key),
-            InputMode::Filter => self.handle_key_filter(key),
-        }
+        self.handle_key_normal(key)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -983,11 +955,6 @@ impl<'ctx> AppState<'ctx> {
                 self.move_selection(-10);
                 Ok(false)
             }
-            (KeyCode::Char('/'), _) => {
-                self.input_mode = InputMode::Filter;
-                self.set_status_message(MESSAGE_FILTER_MODE);
-                Ok(false)
-            }
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                 self.cycle_provider_filter()?;
                 Ok(false)
@@ -996,9 +963,6 @@ impl<'ctx> AppState<'ctx> {
                 if !self.filter.is_empty() {
                     self.filter.pop();
                     self.refresh_entries()?;
-                    if self.filter.is_empty() {
-                        self.clear_status_message(MESSAGE_FILTER_MODE);
-                    }
                 }
                 Ok(false)
             }
@@ -1018,10 +982,6 @@ impl<'ctx> AppState<'ctx> {
                 self.set_temporary_status_message(mode_label.to_string(), Duration::from_secs(3));
                 Ok(false)
             }
-            (KeyCode::Char('R'), _) => {
-                self.reindex()?;
-                Ok(false)
-            }
             (KeyCode::Tab, _) => {
                 if let Some(plan) = self.build_plan()? {
                     self.outcome = Some(Outcome::Emit(plan));
@@ -1031,35 +991,6 @@ impl<'ctx> AppState<'ctx> {
             (KeyCode::Enter, _) => {
                 if let Some(plan) = self.build_plan()? {
                     self.outcome = Some(Outcome::Execute(plan));
-                }
-                Ok(false)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    fn handle_key_filter(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                self.input_mode = InputMode::Normal;
-                self.clear_status_message(MESSAGE_FILTER_MODE);
-                Ok(false)
-            }
-            KeyCode::Backspace => {
-                self.filter.pop();
-                self.refresh_entries()?;
-                if self.filter.is_empty() {
-                    self.clear_status_message(MESSAGE_FILTER_MODE);
-                }
-                Ok(false)
-            }
-            KeyCode::Char(ch) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if self.filter.is_empty() {
-                        self.set_status_message(MESSAGE_FILTER_MODE);
-                    }
-                    self.filter.push(ch);
-                    self.refresh_entries()?;
                 }
                 Ok(false)
             }
@@ -1080,6 +1011,7 @@ impl<'ctx> AppState<'ctx> {
         self.list_state.select(Some(self.index));
     }
 
+    #[cfg(any(test, coverage))]
     fn reindex(&mut self) -> Result<()> {
         let mut indexer = Indexer::new(self.ctx.db, self.ctx.config);
         let report = indexer.run()?;
@@ -1749,13 +1681,16 @@ mod tests {
         let mut state = AppState::new(&mut ctx)?;
         assert!(!state.entries.is_empty());
 
-        // Navigate list and toggle filter mode.
+        // Navigate list and type filter characters.
         state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
         state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
         state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
         state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))?;
-        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "/d");
+        assert!(state.message.is_none());
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert!(state.filter.is_empty());
 
         // Cycle provider filters.
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
@@ -1922,16 +1857,16 @@ mod tests {
         };
 
         let mut state = AppState::new(&mut ctx)?;
-        state.set_status_message("filter mode");
-        state.clear_status_message("filter mode");
+        state.message = Some("filter mode".into());
+        state.message = None;
         state.set_temporary_status_message("temp".into(), StdDuration::from_secs(0));
         state.expire_status_message();
         let _ = state.status_message();
 
         state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
         state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
-        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "/h");
+        assert!(state.message.is_none());
 
         state.filter = "Hello".into();
         state.full_text = true;
@@ -2079,11 +2014,10 @@ mod tests {
         };
 
         let mut state = AppState::new(&mut ctx)?;
-        assert_eq!(state.input_mode, InputMode::Normal);
         assert!(state.entries.len() >= 12);
 
         state.filter = "hello".into();
-        state.set_status_message(MESSAGE_FILTER_MODE);
+        state.message = Some(MESSAGE_FILTER_MODE.to_string());
         state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
         assert_eq!(state.filter, "hell");
         state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
@@ -2092,7 +2026,7 @@ mod tests {
         state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
         state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
         assert!(state.filter.is_empty());
-        assert!(state.message.is_none());
+        state.message = None;
 
         state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
         assert!(state.index >= 10);
@@ -2121,7 +2055,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn filter_mode_backspace_and_escape() -> Result<()> {
+    fn filter_typing_supports_slash_and_uppercase() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
         let directories = build_directories(&temp);
@@ -2136,21 +2070,21 @@ mod tests {
         };
 
         let mut state = AppState::new(&mut ctx)?;
-        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
-        assert_eq!(state.input_mode, InputMode::Filter);
-        state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
-        state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SHIFT))?;
-        assert_eq!(state.filter, "xy");
-        assert_eq!(state.message.as_deref(), Some(MESSAGE_FILTER_MODE));
-
-        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
-        assert_eq!(state.filter, "x");
-        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
         assert!(state.filter.is_empty());
         assert!(state.message.is_none());
 
-        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-        assert_eq!(state.input_mode, InputMode::Normal);
+        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "/");
+        assert!(state.message.is_none());
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "/R");
+        assert!(state.message.is_none());
+
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "/");
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+        assert!(state.filter.is_empty());
         assert!(state.message.is_none());
         Ok(())
     }
@@ -2473,12 +2407,10 @@ mod tests {
                 .expect("now should be later than the duration"),
         ));
         state.expire_status_message();
-        state.input_mode = InputMode::Filter;
         state.filter = "filter text".into();
         assert_eq!(state.status_message().as_deref(), Some("filter text"));
 
         state.filter.clear();
-        state.input_mode = InputMode::Normal;
         state.message = Some("custom status".into());
         let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend)?;
@@ -2574,15 +2506,13 @@ mod tests {
                 .checked_sub(StdDuration::from_secs(1))
                 .expect("now should be later than the duration"),
         ));
-        state.input_mode = InputMode::Filter;
         state.filter = "typing".into();
         assert_eq!(state.status_message().as_deref(), Some("typing"));
         assert_eq!(state.status_banner(), "typing");
 
         state.filter.clear();
-        assert_eq!(state.status_message().as_deref(), Some(""));
+        assert_eq!(state.status_message(), None);
 
-        state.input_mode = InputMode::Normal;
         state.entries = vec![Entry::Empty(EmptyEntry {
             title: "empty".into(),
             preview: Vec::new(),
@@ -3023,7 +2953,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn handle_key_normal_triggers_reindex() -> Result<()> {
+    fn typing_uppercase_r_in_normal_mode_updates_filter() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
         let directories = build_directories(&temp);
@@ -3036,7 +2966,10 @@ mod tests {
             prompt: None,
         };
         let mut state = AppState::new(&mut ctx)?;
+        assert!(state.filter.is_empty());
         state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))?;
+        assert_eq!(state.filter, "R");
+        assert!(state.message.is_none());
         Ok(())
     }
 
@@ -3061,7 +2994,7 @@ mod tests {
             Entry::Empty(EmptyEntry {
                 title: "No Sessions".into(),
                 preview: vec!["Use tx search to populate sessions.".into()],
-                status: Some("Press R to reindex".into()),
+                status: Some("Run tx index to refresh listings.".into()),
             }),
             Entry::Profile(ProfileEntry {
                 display: "Wrapped Profile".into(),
@@ -3099,7 +3032,6 @@ mod tests {
         insta::assert_snapshot!("tui_status_overlay_render", overlay_snapshot);
 
         state.overlay_message = None;
-        state.input_mode = InputMode::Filter;
         state.filter = "codex".into();
         state.message = Some("doctor: missing CODEX_TOKEN".into());
         let filter_snapshot = render_to_string(&mut state, 60, 10)?;
@@ -3132,7 +3064,6 @@ mod tests {
     }
 
     fn render_search_results_snapshot(state: &mut AppState<'_>) -> Result<String> {
-        state.input_mode = InputMode::Normal;
         state.full_text = true;
         state.filter = "refactor".into();
         state.message = Some("search: 2 matches".into());
