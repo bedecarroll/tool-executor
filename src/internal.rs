@@ -168,8 +168,11 @@ fn resolve_provider_args(args: &[String], prompt: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::cli::{InternalCaptureArgCommand, InternalCommand};
+    #[cfg(unix)]
     use assert_fs::TempDir;
+    #[cfg(unix)]
     use assert_fs::prelude::*;
     #[cfg(unix)]
     use std::fs::{self, File};
@@ -178,8 +181,10 @@ mod tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::sync::{LazyLock, Mutex};
 
+    #[cfg(unix)]
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]

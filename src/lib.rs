@@ -99,7 +99,9 @@ pub fn command() -> clap::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Command, InternalCaptureArgCommand, InternalCommand, ResumeCommand};
+    use crate::cli::{Command, ResumeCommand};
+    #[cfg(unix)]
+    use crate::cli::{InternalCaptureArgCommand, InternalCommand};
     use crate::db::Database;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
     use assert_fs::TempDir;

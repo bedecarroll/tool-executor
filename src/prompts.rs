@@ -108,7 +108,7 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
     Ok(profiles)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use assert_fs::TempDir;

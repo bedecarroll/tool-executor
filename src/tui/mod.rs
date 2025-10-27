@@ -1011,7 +1011,7 @@ impl<'ctx> AppState<'ctx> {
         self.list_state.select(Some(self.index));
     }
 
-    #[cfg(any(test, coverage))]
+    #[cfg(all(any(test, coverage), unix))]
     fn reindex(&mut self) -> Result<()> {
         let mut indexer = Indexer::new(self.ctx.db, self.ctx.config);
         let report = indexer.run()?;
@@ -1493,42 +1493,58 @@ mod tests {
     )]
     use super::*;
     use assert_fs::TempDir;
+    #[cfg(unix)]
     use assert_fs::fixture::PathChild;
+    #[cfg(unix)]
     use assert_fs::prelude::*;
     use color_eyre::Result;
     use color_eyre::eyre::eyre;
+    #[cfg(unix)]
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use indexmap::IndexMap;
+    #[cfg(unix)]
     use ratatui::Terminal;
+    #[cfg(unix)]
     use ratatui::backend::TestBackend;
+    #[cfg(unix)]
     use ratatui::buffer::Buffer;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::sync::{LazyLock, Mutex, MutexGuard};
+    #[cfg(unix)]
     use std::time::Duration as StdDuration;
     use time::{Duration, OffsetDateTime};
 
     use crate::config::AppDirectories;
     use crate::config::Config;
     use crate::config::model::{
-        Defaults, FeatureConfig, ProfileConfig, PromptAssemblerConfig, ProviderConfig, SearchMode,
-        Snippet, SnippetConfig, WrapperConfig, WrapperMode,
+        Defaults, FeatureConfig, ProfileConfig, ProviderConfig, SearchMode, SnippetConfig,
     };
+    #[cfg(unix)]
+    use crate::config::model::{PromptAssemblerConfig, Snippet, WrapperConfig, WrapperMode};
     use crate::db::Database;
+    #[cfg(unix)]
     use crate::pipeline::Invocation;
+    #[cfg(unix)]
     use crate::prompts::PromptAssembler;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary, Transcript};
 
+    #[cfg(unix)]
     static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+    #[cfg(unix)]
     struct PathGuard {
         original: Option<String>,
         _lock: MutexGuard<'static, ()>,
     }
 
+    #[cfg(unix)]
     impl PathGuard {
         fn push(temp: &TempDir) -> Self {
             let lock = PATH_LOCK.lock().unwrap();
@@ -1548,6 +1564,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for PathGuard {
         fn drop(&mut self) {
             if let Some(value) = &self.original {

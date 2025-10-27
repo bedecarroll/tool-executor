@@ -758,6 +758,7 @@ mod tests {
     use color_eyre::eyre::eyre;
     use indexmap::IndexMap;
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::env;
     use std::fs;
     use std::io::{Cursor, Write};
