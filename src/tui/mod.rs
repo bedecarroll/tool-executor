@@ -34,7 +34,7 @@ use std::borrow::Cow;
 
 use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
-#[cfg(any(test, coverage))]
+#[cfg(all(any(test, coverage), unix))]
 use crate::indexer::Indexer;
 use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::PromptStatus;
@@ -1483,7 +1483,7 @@ fn truncate(input: &str, max: usize) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(
         unused_mut,
