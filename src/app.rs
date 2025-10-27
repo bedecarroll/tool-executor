@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -559,9 +560,9 @@ where
 
     match &plan.invocation {
         Invocation::Shell { command } => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-            let mut cmd = Command::new(shell);
-            cmd.arg("-c").arg(command);
+            let shell = default_shell();
+            let mut cmd = Command::new(&shell.path);
+            cmd.arg(shell.flag).arg(command);
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
             if let Some(ref input) = capture_input {
@@ -602,6 +603,40 @@ fn parse_vars(vars: &[String]) -> Result<HashMap<String, String>> {
         map.insert(key.trim().to_string(), value.to_string());
     }
     Ok(map)
+}
+
+struct ShellCommand {
+    path: OsString,
+    flag: &'static str,
+}
+
+fn default_shell() -> ShellCommand {
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("SHELL")
+            .or_else(|_| std::env::var("COMSPEC"))
+            .unwrap_or_else(|_| "cmd.exe".to_string());
+        let flag = if shell.to_ascii_lowercase().ends_with("cmd.exe")
+            || shell.to_ascii_lowercase().ends_with("\\cmd")
+            || shell.eq_ignore_ascii_case("cmd")
+        {
+            "/C"
+        } else {
+            "-c"
+        };
+        ShellCommand {
+            path: OsString::from(shell),
+            flag,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        ShellCommand {
+            path: OsString::from(shell),
+            flag: "-c",
+        }
+    }
 }
 
 fn prompt_for_stdin(label: Option<&str>) -> Result<String> {
@@ -824,6 +859,14 @@ mod tests {
         assert_eq!(parsed.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(parsed.get("BAZ"), Some(&"qux=quux".to_string()));
         Ok(())
+    }
+
+    fn toml_path(path: &Path) -> String {
+        let mut rendered = path.to_string_lossy().to_string();
+        if cfg!(windows) {
+            rendered = rendered.replace('\\', "\\\\");
+        }
+        rendered
     }
 
     #[test]
@@ -1390,22 +1433,40 @@ mod tests {
         let _env = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
         let output = temp.child("captured.txt");
-        let script = temp.child("capture.sh");
-        script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
-        #[cfg(unix)]
-        {
-            let perms = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(script.path(), perms)?;
+        let script = temp.child(if cfg!(windows) {
+            "capture.cmd"
+        } else {
+            "capture.sh"
+        });
+        if cfg!(windows) {
+            script.write_str(
+                "@echo off\r\nsetlocal EnableExtensions EnableDelayedExpansion\r\n<nul set /p =\"%TX_CAPTURE_STDIN_DATA%\" > \"%~1\"\r\n",
+            )?;
+        } else {
+            script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+            #[cfg(unix)]
+            {
+                let perms = fs::Permissions::from_mode(0o755);
+                fs::set_permissions(script.path(), perms)?;
+            }
         }
 
+        let command = if cfg!(windows) {
+            format!(
+                "\"{}\" \"{}\"",
+                script.path().display(),
+                output.path().display()
+            )
+        } else {
+            format!("{} {}", script.path().display(), output.path().display())
+        };
+
         let plan = PipelinePlan {
-            pipeline: format!("{} {}", script.path().display(), output.path().display()),
+            pipeline: command.clone(),
             display: "capture".into(),
             friendly_display: "capture".into(),
             env: Vec::new(),
-            invocation: Invocation::Shell {
-                command: format!("{} {}", script.path().display(), output.path().display()),
-            },
+            invocation: Invocation::Shell { command },
             provider: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
@@ -1422,14 +1483,28 @@ mod tests {
 
     #[test]
     fn execute_plan_emits_capture_warning_for_internal_pipeline() -> Result<()> {
+        #[cfg(windows)]
+        let original_shell = std::env::var("SHELL").ok();
+        #[cfg(windows)]
+        unsafe {
+            if std::env::var_os("SHELL").is_none()
+                && let Ok(comspec) = std::env::var("COMSPEC")
+            {
+                std::env::set_var("SHELL", comspec);
+            }
+        }
+
+        let command = if cfg!(windows) {
+            "exit 0".to_string()
+        } else {
+            "true".to_string()
+        };
         let plan = PipelinePlan {
             pipeline: "internal capture-arg".into(),
             display: "capture".into(),
             friendly_display: "capture".into(),
             env: Vec::new(),
-            invocation: Invocation::Shell {
-                command: "true".into(),
-            },
+            invocation: Invocation::Shell { command },
             provider: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
@@ -1440,6 +1515,19 @@ mod tests {
         };
 
         execute_plan_with_prompt(&plan, true, |_| Ok(None))?;
+
+        #[cfg(windows)]
+        {
+            if let Some(shell) = original_shell {
+                unsafe {
+                    std::env::set_var("SHELL", shell);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("SHELL");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1651,7 +1739,7 @@ session_roots = ["{root}"]
 enabled = true
 namespace = "tests"
 "#,
-            root = sessions_dir.path().display(),
+            root = toml_path(sessions_dir.path()),
         );
         config_dir.child("config.toml").write_str(&config_toml)?;
 
