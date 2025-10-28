@@ -1475,15 +1475,7 @@ mod tests {
             }
         }
 
-        let command = if cfg!(windows) {
-            format!(
-                "\"{}\" \"{}\"",
-                script.path().display(),
-                output.path().display()
-            )
-        } else {
-            format!("{} {}", script.path().display(), output.path().display())
-        };
+        let command = format!("{} {}", script.path().display(), output.path().display());
 
         #[cfg(windows)]
         {
