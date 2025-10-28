@@ -1525,7 +1525,7 @@ mod tests {
         });
         if cfg!(windows) {
             script.write_str(
-                "@echo off\r\nsetlocal EnableExtensions EnableDelayedExpansion\r\n<nul set /p=\"%TX_CAPTURE_STDIN_DATA%\" > \"%~1\"\r\n",
+                "@echo off\r\nsetlocal EnableExtensions EnableDelayedExpansion\r\n<nul set /p=\"%TX_CAPTURE_STDIN_DATA%\" > \"%~1\"\r\nexit /B 0\r\n",
             )?;
         } else {
             script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
