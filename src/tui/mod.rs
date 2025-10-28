@@ -2353,6 +2353,77 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_outcome_handles_emit_and_execute() -> Result<()> {
+        let plan = PipelinePlan {
+            pipeline: "echo hi".into(),
+            display: "echo hi".into(),
+            friendly_display: "echo hi".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: "echo hi".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            stdin_prompt_label: None,
+            cwd: std::env::current_dir()?,
+        };
+
+        dispatch_outcome(Some(Outcome::Emit(plan.clone())))?;
+
+        let mut exec_plan = plan.clone();
+        exec_plan.invocation = Invocation::Exec {
+            argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+        };
+        dispatch_outcome(Some(Outcome::Execute(exec_plan)))?;
+        dispatch_outcome(None)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reindex_updates_message_and_refreshes_entries() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+
+        let sessions_dir = config
+            .providers
+            .get("codex")
+            .expect("provider present")
+            .session_roots
+            .first()
+            .expect("session root")
+            .clone();
+        fs::create_dir_all(&sessions_dir)?;
+        let session_path = sessions_dir.join("reindex.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"index\"}\n")?;
+
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        insert_session(&mut db, &session_path, "sess-reindex")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        state.reindex()?;
+        assert!(
+            state
+                .message
+                .as_ref()
+                .is_some_and(|msg| msg.contains("Indexed")),
+            "expected reindex to emit status message"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn run_with_terminal_emits_plan() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());

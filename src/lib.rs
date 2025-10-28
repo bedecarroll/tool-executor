@@ -11,6 +11,8 @@ pub mod session;
 mod app;
 pub mod cli;
 pub mod internal;
+#[doc(hidden)]
+pub mod test_support;
 mod tui;
 mod util;
 
@@ -104,6 +106,7 @@ mod tests {
     use crate::cli::{InternalCaptureArgCommand, InternalCommand};
     use crate::db::Database;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
+    use crate::test_support::toml_path;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     #[cfg(unix)]
@@ -169,7 +172,7 @@ provider = "codex"
 bin = "echo"
 session_roots = ["{root}"]
 "#,
-            root = sessions_dir.path().display(),
+            root = toml_path(sessions_dir.path()),
         );
         config_dir.child("config.toml").write_str(&config_toml)?;
 
@@ -228,7 +231,7 @@ provider = "codex"
 bin = "echo"
 session_roots = ["{root}"]
 "#,
-            root = sessions_dir.path().display(),
+            root = toml_path(sessions_dir.path()),
         );
         config_dir.child("config.toml").write_str(&config_toml)?;
 
@@ -339,7 +342,7 @@ provider = "demo"
 [profiles.alt]
 provider = "alt"
 "#,
-            root = sessions_dir.path().display(),
+            root = toml_path(sessions_dir.path()),
         );
         config_dir.child("config.toml").write_str(&config_toml)?;
 

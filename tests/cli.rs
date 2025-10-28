@@ -7,6 +7,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use tool_executor::db::Database;
 use tool_executor::session::{MessageRecord, SessionIngest, SessionSummary};
+use tool_executor::test_support::toml_path;
 
 fn base_command(temp: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("tx").expect("binary exists");
@@ -182,7 +183,7 @@ pre = ["setup"]
 post = ["finish"]
 wrap = "wrap"
 "#,
-        sessions = sessions_dir.path().display()
+        sessions = toml_path(sessions_dir.path())
     );
     std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
 
@@ -226,7 +227,7 @@ provider = "demo"
 bin = "echo"
 session_roots = ["{sessions}"]
 "#,
-        sessions = sessions_dir.path().display()
+        sessions = toml_path(sessions_dir.path())
     );
     std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
 

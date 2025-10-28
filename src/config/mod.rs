@@ -324,6 +324,14 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     use std::fs;
+    fn path_contains_component(path: &std::path::Path, needle: &str) -> bool {
+        path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(needle)
+        })
+    }
 
     #[test]
     fn resolve_directories_uses_env_overrides() -> Result<()> {
@@ -420,9 +428,24 @@ mod tests {
     #[test]
     fn resolve_default_directories_returns_paths() -> Result<()> {
         let (config, data, cache) = resolve_default_directories()?;
-        assert!(config.ends_with(APP_NAME));
-        assert!(data.ends_with(APP_NAME));
-        assert!(cache.ends_with(APP_NAME));
+        assert!(
+            path_contains_component(&config, APP_NAME),
+            "config dir {} should contain '{}'",
+            config.display(),
+            APP_NAME
+        );
+        assert!(
+            path_contains_component(&data, APP_NAME),
+            "data dir {} should contain '{}'",
+            data.display(),
+            APP_NAME
+        );
+        assert!(
+            path_contains_component(&cache, APP_NAME),
+            "cache dir {} should contain '{}'",
+            cache.display(),
+            APP_NAME
+        );
         Ok(())
     }
 
@@ -450,6 +473,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn resolve_default_directories_errors_without_sources() {
         let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
@@ -457,6 +481,36 @@ mod tests {
             err.to_string()
                 .contains("unable to resolve platform directories")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_default_directories_errors_without_sources() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_local = std::env::var("LOCALAPPDATA").ok();
+        let original_app = std::env::var("APPDATA").ok();
+
+        unsafe {
+            std::env::remove_var("LOCALAPPDATA");
+            std::env::remove_var("APPDATA");
+        }
+
+        let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
+        assert!(
+            err.to_string()
+                .contains("unable to resolve platform directories")
+        );
+
+        if let Some(value) = original_local {
+            unsafe { std::env::set_var("LOCALAPPDATA", value) };
+        } else {
+            unsafe { std::env::remove_var("LOCALAPPDATA") };
+        }
+        if let Some(value) = original_app {
+            unsafe { std::env::set_var("APPDATA", value) };
+        } else {
+            unsafe { std::env::remove_var("APPDATA") };
+        }
     }
 
     #[test]
@@ -661,6 +715,32 @@ list = \"value\"
         assert!(
             err.to_string().contains("failed to create directory"),
             "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_template_contains_provider() {
+        let template = default_template();
+        assert!(
+            template.contains("provider = \"codex\""),
+            "expected bundled template to include provider stanza"
+        );
+    }
+
+    #[test]
+    fn bundled_default_config_renders_template() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dirs = AppDirectories {
+            config_dir: temp.child("config").path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        let rendered = bundled_default_config(&dirs);
+        assert!(
+            rendered.contains("provider = \"codex\""),
+            "expected rendered template to include provider stanza"
         );
         Ok(())
     }

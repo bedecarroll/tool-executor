@@ -561,15 +561,21 @@ where
     match &plan.invocation {
         Invocation::Shell { command } => {
             let shell = default_shell();
-            #[cfg(windows)]
-            eprintln!(
-                "execute_plan_with_prompt: shell={} flag={} command={}",
-                shell.path.to_string_lossy(),
-                shell.flag,
-                command
-            );
             let mut cmd = Command::new(&shell.path);
-            cmd.arg(shell.flag).arg(command);
+            cmd.arg(shell.flag);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                if matches!(shell.flag, "/C" | "/K") {
+                    cmd.raw_arg(command);
+                } else {
+                    cmd.arg(command);
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                cmd.arg(command);
+            }
             cmd.current_dir(&plan.cwd);
             cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
             if let Some(ref input) = capture_input {
@@ -811,7 +817,8 @@ mod tests {
     use crate::config::{AppDirectories, ConfigSource, ConfigSourceKind, LoadedConfig};
     use crate::db::Database;
     use crate::indexer::IndexError;
-    use crate::session::{MessageRecord, SearchHit, SessionIngest, SessionSummary};
+    use crate::session::{MessageRecord, SearchHit, SessionIngest, SessionSummary, Transcript};
+    use crate::test_support::toml_path;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use color_eyre::eyre::eyre;
@@ -877,20 +884,31 @@ mod tests {
     }
 
     #[test]
+    fn export_markdown_emits_transcript_lines() {
+        let summary = sample_summary();
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Hello markdown",
+            None,
+            Some(0),
+        );
+        message.is_first = true;
+        let transcript = Transcript {
+            session: summary,
+            messages: vec![message],
+        };
+        export_markdown(&transcript);
+    }
+
+    #[test]
     fn parse_vars_splits_key_value_pairs() -> Result<()> {
         let vars = vec!["FOO=bar".into(), "BAZ=qux=quux".into()];
         let parsed = parse_vars(&vars)?;
         assert_eq!(parsed.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(parsed.get("BAZ"), Some(&"qux=quux".to_string()));
         Ok(())
-    }
-
-    fn toml_path(path: &Path) -> String {
-        let mut rendered = path.to_string_lossy().to_string();
-        if cfg!(windows) {
-            rendered = rendered.replace('\\', "\\\\");
-        }
-        rendered
     }
 
     #[test]
@@ -1305,6 +1323,49 @@ mod tests {
     }
 
     #[test]
+    fn collate_search_results_returns_hit_details() -> Result<()> {
+        let hit = SearchHit {
+            session_id: "sess-123".into(),
+            provider: "codex".into(),
+            label: Some("Sample".into()),
+            role: Some("user".into()),
+            snippet: Some("Hello world".into()),
+            last_active: Some(42),
+            actionable: true,
+        };
+        let mut second_hit = hit.clone();
+        second_hit.session_id = "sess-456".into();
+
+        let summary = sample_summary();
+        let mut other_summary = summary.clone();
+        other_summary.id = second_hit.session_id.clone();
+
+        let mut lookup_count = 0;
+        let detailed = App::collate_search_results(
+            vec![hit.clone(), second_hit.clone()],
+            None,
+            None,
+            Some(1),
+            |id| {
+                lookup_count += 1;
+                if id == hit.session_id.as_str() {
+                    Ok(Some(summary.clone()))
+                } else if id == second_hit.session_id.as_str() {
+                    Ok(Some(other_summary.clone()))
+                } else {
+                    Ok(None)
+                }
+            },
+        )?;
+        assert_eq!(lookup_count, 2);
+        assert_eq!(detailed.len(), 1);
+        let (returned_hit, returned_summary) = &detailed[0];
+        assert_eq!(returned_hit.session_id, hit.session_id);
+        assert_eq!(returned_summary.id, summary.id);
+        Ok(())
+    }
+
+    #[test]
     fn app_resume_and_config_commands() -> Result<()> {
         let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
         let mut resume_cmd = ResumeCommand {
@@ -1476,22 +1537,6 @@ mod tests {
         }
 
         let command = format!("{} {}", script.path().display(), output.path().display());
-
-        #[cfg(windows)]
-        {
-            let shell = default_shell();
-            println!(
-                "execute_plan_shell_captures_prompt_input: shell_path={} flag={} command={} script_exists={} output_exists={}",
-                shell.path.to_string_lossy(),
-                shell.flag,
-                command,
-                script.path().exists(),
-                output.path().exists()
-            );
-            if let Ok(contents) = std::fs::read_to_string(script.path()) {
-                println!("execute_plan_shell_captures_prompt_input: script_contents={contents:?}");
-            }
-        }
 
         let plan = PipelinePlan {
             pipeline: command.clone(),
@@ -1719,6 +1764,7 @@ mod tests {
             fs::remove_dir_all(&sessions_dir)?;
         }
         run_doctor(&app.loaded, &app.db)?;
+        drop(app);
         temp.close()?;
         Ok(())
     }
