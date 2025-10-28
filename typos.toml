@@ -6,3 +6,5 @@ extend-ignore-re = ["(?i)cli"]
 
 [default.extend-words]
 cli = "cli"
+ratatui = "ratatui"
+tru = "tru"

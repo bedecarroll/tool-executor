@@ -1,0 +1,20 @@
+---
+source: src/tui/mod.rs
+expression: profile_snapshot
+---
+┌Sessions & Profiles─────────┐┌Wrapped Profile─────────────┐
+│  No Sessions               ││Provider: codex             │
+│▶ Wrapped Profile  Run codex││                            │
+│                            ││Run codex with helpers      │
+│                            ││                            │
+│                            ││Tags: team, demo            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+└────────────────────────────┘└────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ ↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-P cycle pr│
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,20 @@
+---
+source: src/tui/mod.rs
+expression: search_snapshot
+---
+┌Sessions & Profiles─────────┐┌2023-10-22 19:00 UTC────────┐
+│▶ 2023-10-11  refactor featu││Session: Refactor Feature   │
+│  2023-10-11  improve test n││                            │
+│                            ││Assistant suggested         │
+│                            ││extracting helpers          │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+│                            ││                            │
+└────────────────────────────┘└────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ search: 2 matches                                        │
+└──────────────────────────────────────────────────────────┘

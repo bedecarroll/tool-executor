@@ -116,8 +116,12 @@ fn run_pre_pipeline(commands: &[String], input: Option<&str>, limit: usize) -> R
 fn read_stdin(limit: usize) -> Result<String> {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
+    read_reader(&mut handle, limit)
+}
+
+fn read_reader(reader: &mut dyn Read, limit: usize) -> Result<String> {
     let mut buffer = Vec::new();
-    read_with_limit(&mut handle, limit, &mut buffer)?;
+    read_with_limit(reader, limit, &mut buffer)?;
     buffer_to_string(buffer)
 }
 
@@ -159,4 +163,306 @@ fn resolve_provider_args(args: &[String], prompt: &str) -> Vec<String> {
         resolved.push(prompt.to_string());
     }
     resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use crate::cli::{InternalCaptureArgCommand, InternalCommand};
+    #[cfg(unix)]
+    use assert_fs::TempDir;
+    #[cfg(unix)]
+    use assert_fs::prelude::*;
+    #[cfg(unix)]
+    use std::fs::{self, File};
+    use std::io::Cursor;
+    #[cfg(unix)]
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::{LazyLock, Mutex};
+
+    #[cfg(unix)]
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[test]
+    fn resolve_provider_args_appends_prompt_when_missing_placeholder() {
+        let args = vec!["--flag".into(), "--prompt".into()];
+        let resolved = resolve_provider_args(&args, "hello");
+        assert_eq!(resolved, vec!["--flag", "--prompt", "hello"]);
+    }
+
+    #[test]
+    fn resolve_provider_args_replaces_placeholder() {
+        let args = vec!["--flag".into(), "{prompt}".into()];
+        let resolved = resolve_provider_args(&args, "hi");
+        assert_eq!(resolved, vec!["--flag", "hi"]);
+    }
+
+    #[test]
+    fn read_reader_consumes_data_within_limit() -> Result<()> {
+        let mut cursor = Cursor::new("payload");
+        let output = read_reader(&mut cursor, 16)?;
+        assert_eq!(output, "payload");
+        Ok(())
+    }
+
+    #[test]
+    fn read_reader_errors_when_limit_exceeded() {
+        let mut cursor = Cursor::new("payload");
+        let err = read_reader(&mut cursor, 3).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("captured prompt exceeds configured limit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_uses_stdin_input() -> Result<()> {
+        let commands = vec!["cat".to_string()];
+        let output = run_pre_pipeline(&commands, Some("ping"), 32)?;
+        assert_eq!(output, "ping");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_errors_when_output_exceeds_limit() {
+        let commands = vec!["printf 'abcdef'".to_string()];
+        let err = run_pre_pipeline(&commands, None, 3).unwrap_err();
+        assert!(err.to_string().contains("exceeds configured limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_propagates_non_zero_status() {
+        let commands = vec!["false".to_string()];
+        let err = run_pre_pipeline(&commands, None, 16).unwrap_err();
+        assert!(err.to_string().contains("pre pipeline exited with status"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_writes_input_to_command() -> Result<()> {
+        let temp = TempDir::new()?;
+        let log_path = temp.child("log.txt");
+        let script = temp.child("capture.sh");
+        script.write_str("#!/bin/sh\ncat > \"$1\"\n")?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms)?;
+        }
+
+        let commands = vec![format!(
+            "{} {}",
+            script.path().display(),
+            log_path.path().display()
+        )];
+        run_pre_pipeline(&commands, Some("payload"), 64)?;
+
+        let mut contents = String::new();
+        File::open(log_path.path())?.read_to_string(&mut contents)?;
+        assert_eq!(contents, "payload");
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_to_string_reports_invalid_utf8() {
+        let err = buffer_to_string(vec![0xff, 0xfe]).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_arg_uses_env_data_and_invokes_provider() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let output = temp.child("prompt.txt");
+        let script = temp.child("provider.sh");
+        script.write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms)?;
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: script.path().display().to_string(),
+            pre_commands: Vec::new(),
+            provider_args: vec![output.path().display().to_string(), "{prompt}".into()],
+            prompt_limit: 64,
+        };
+
+        let original = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
+        unsafe {
+            std::env::set_var("TX_CAPTURE_STDIN_DATA", "prompt payload");
+        }
+
+        capture_arg(&cmd)?;
+
+        let contents = std::fs::read_to_string(output.path())?;
+        assert_eq!(contents, "prompt payload");
+
+        if let Some(value) = original {
+            unsafe { std::env::set_var("TX_CAPTURE_STDIN_DATA", value) };
+        } else {
+            unsafe { std::env::remove_var("TX_CAPTURE_STDIN_DATA") };
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_arg_uses_pre_pipeline_output() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
+        }
+
+        let temp = TempDir::new()?;
+        let output = temp.child("prompt.txt");
+        let script = temp.child("provider.sh");
+        script.write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms)?;
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: script.path().display().to_string(),
+            pre_commands: vec!["printf 'filtered data'".into()],
+            provider_args: vec![output.path().display().to_string(), "{prompt}".into()],
+            prompt_limit: 128,
+        };
+
+        capture_arg(&cmd)?;
+        let contents = std::fs::read_to_string(output.path())?;
+        assert_eq!(contents, "filtered data");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_arg_errors_when_prompt_exceeds_limit() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().expect("temp dir");
+        let script = temp.child("provider.sh");
+        script
+            .write_str("#!/bin/sh\nexit 0\n")
+            .expect("write script");
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms).expect("set perms");
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: script.path().display().to_string(),
+            pre_commands: Vec::new(),
+            provider_args: Vec::new(),
+            prompt_limit: 4,
+        };
+
+        let original = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
+        unsafe {
+            std::env::set_var("TX_CAPTURE_STDIN_DATA", "exceeds");
+        }
+
+        let err = capture_arg(&cmd).unwrap_err();
+
+        if let Some(value) = original {
+            unsafe { std::env::set_var("TX_CAPTURE_STDIN_DATA", value) };
+        } else {
+            unsafe { std::env::remove_var("TX_CAPTURE_STDIN_DATA") };
+        }
+
+        assert!(
+            err.to_string().contains("exceeds configured limit"),
+            "unexpected error message: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_arg_propagates_provider_failure() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
+        }
+
+        let temp = TempDir::new()?;
+        let script = temp.child("provider.sh");
+        script.write_str("#!/bin/sh\nexit 42\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms)?;
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: script.path().display().to_string(),
+            pre_commands: vec!["printf 'prompt'".into()],
+            provider_args: Vec::new(),
+            prompt_limit: 64,
+        };
+
+        let err = capture_arg(&cmd).unwrap_err();
+        assert!(
+            err.to_string().contains("exited with status"),
+            "unexpected error message: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_errors_when_input_exceeds_limit() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
+        }
+
+        let err = run_pre_pipeline(&["cat".into()], Some("toolong"), 3).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds configured limit"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_dispatches_capture_arg_command() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
+        }
+
+        let temp = TempDir::new()?;
+        let output = temp.child("prompt.txt");
+        let script = temp.child("provider.sh");
+        script.write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(script.path(), perms)?;
+
+        let command = InternalCommand::CaptureArg(InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: script.path().display().to_string(),
+            pre_commands: vec!["printf 'pipeline data'".into()],
+            provider_args: vec![output.path().display().to_string(), "{prompt}".into()],
+            prompt_limit: 64,
+        });
+
+        run(&command)?;
+
+        let contents = std::fs::read_to_string(output.path())?;
+        assert_eq!(contents, "pipeline data");
+        Ok(())
+    }
+
+    #[test]
+    fn read_reader_errors_when_exceeding_limit() {
+        let mut cursor = std::io::Cursor::new(b"abcdef".to_vec());
+        let err = read_reader(&mut cursor, 3).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds configured limit"),
+            "unexpected error: {err:?}"
+        );
+    }
 }

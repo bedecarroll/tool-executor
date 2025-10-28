@@ -582,7 +582,8 @@ fn command_string(bin: &str, args: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::config::model::{
-        Defaults, FeatureConfig, ProviderConfig, SearchMode, SnippetConfig, StdinMapping,
+        Defaults, EnvVar, FeatureConfig, ProviderConfig, SearchMode, SnippetConfig, StdinMapping,
+        WrapperConfig, WrapperMode,
     };
     use indexmap::IndexMap;
     use std::collections::HashMap;
@@ -815,5 +816,291 @@ mod tests {
         let friendly = friendly_capture_display(&provider, &pre, &post, &args, "fallback");
 
         assert_eq!(friendly, "codex --prompt=\"$(cat prompt.txt)\"");
+    }
+
+    #[test]
+    fn render_wrapper_rejects_unknown_placeholder() {
+        let wrapper = WrapperConfig {
+            name: "bad".into(),
+            mode: WrapperMode::Shell {
+                command: "echo {{unknown}}".into(),
+            },
+        };
+        let ctx = TemplateContext {
+            pipeline: "echo hi",
+            provider: "codex",
+            session_id: None,
+            session_label: None,
+            session_path: None,
+            session_resume_token: None,
+            cwd: ".",
+            vars: &HashMap::new(),
+        };
+        let err = render_wrapper(&wrapper, &ctx).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown template placeholder '{{unknown}}'")
+        );
+    }
+
+    #[test]
+    fn resolve_placeholder_errors_on_missing_variable() {
+        let ctx = TemplateContext {
+            pipeline: "pipeline",
+            provider: "codex",
+            session_id: None,
+            session_label: None,
+            session_path: None,
+            session_resume_token: None,
+            cwd: ".",
+            vars: &HashMap::new(),
+        };
+        let err = resolve_placeholder("var:MISSING", &ctx, CmdMode::Raw).unwrap_err();
+        assert!(err.to_string().contains("missing value"));
+    }
+
+    #[test]
+    fn build_provider_args_adds_stdin_when_not_capture() {
+        let provider = ProviderConfig {
+            name: "codex".into(),
+            bin: "codex".into(),
+            flags: vec!["--flag".into()],
+            env: Vec::new(),
+            session_roots: Vec::new(),
+            stdin: Some(StdinMapping {
+                args: vec!["--stdin".into()],
+                mode: StdinMode::Pipe,
+            }),
+        };
+        let request = PipelineRequest {
+            config: &Config {
+                defaults: Defaults {
+                    provider: Some("codex".into()),
+                    profile: None,
+                    search_mode: SearchMode::FirstPrompt,
+                    preview_filter: None,
+                },
+                providers: IndexMap::new(),
+                snippets: SnippetConfig {
+                    pre: IndexMap::new(),
+                    post: IndexMap::new(),
+                },
+                wrappers: IndexMap::new(),
+                profiles: IndexMap::new(),
+                features: FeatureConfig {
+                    prompt_assembler: None,
+                },
+            },
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args: vec!["--extra".into()],
+            capture_prompt: false,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: std::env::current_dir().unwrap(),
+        };
+        let args = build_provider_args(&provider, &request, false);
+        assert!(args.contains(&"--stdin".to_string()));
+    }
+
+    #[test]
+    fn command_string_quotes_arguments() {
+        let command = command_string("echo", &["hello world".into(), "it's".into()]);
+        assert!(command.contains("'hello world'"), "{command}");
+        assert!(command.contains("'it'\\''s'"), "{command}");
+    }
+
+    #[test]
+    fn single_quote_escapes_inner_quotes() {
+        assert_eq!(single_quote("can't do this"), "'can'\\''t do this'");
+        assert_eq!(single_quote("plain"), "'plain'");
+    }
+
+    #[test]
+    fn resolve_snippets_errors_for_missing_name() {
+        let snippets: IndexMap<String, Snippet> = IndexMap::new();
+        let err = resolve_snippets(&snippets, &["missing".into()], "pre").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown pre snippet 'missing'"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn render_wrapper_handles_shell_and_exec_modes() {
+        let mut vars = HashMap::new();
+        vars.insert("token".to_string(), "abc123".to_string());
+
+        let ctx = TemplateContext {
+            pipeline: "ls | cat",
+            provider: "codex",
+            session_id: Some("sess-1"),
+            session_label: Some("Demo"),
+            session_path: Some("/tmp/sess-1"),
+            session_resume_token: Some("resume-1"),
+            cwd: "/tmp/project",
+            vars: &vars,
+        };
+
+        let shell_wrapper = WrapperConfig {
+            name: "shell".into(),
+            mode: WrapperMode::Shell {
+                command: "wrapper {{CMD}} --session {{session.id}} --provider {{provider}}".into(),
+            },
+        };
+        let invocation = render_wrapper(&shell_wrapper, &ctx).expect("shell wrapper");
+        match invocation {
+            Invocation::Shell { command } => {
+                assert_eq!(
+                    command,
+                    "wrapper 'ls | cat' --session sess-1 --provider codex"
+                );
+            }
+            Invocation::Exec { .. } => panic!("expected shell invocation, got exec"),
+        }
+
+        let exec_wrapper = WrapperConfig {
+            name: "exec".into(),
+            mode: WrapperMode::Exec {
+                argv: vec![
+                    "exec".into(),
+                    "{{CMD}}".into(),
+                    "{{var:token}}".into(),
+                    "--cwd".into(),
+                    "{{cwd}}".into(),
+                ],
+            },
+        };
+        let invocation = render_wrapper(&exec_wrapper, &ctx).expect("exec wrapper");
+        match invocation {
+            Invocation::Exec { argv } => {
+                assert_eq!(
+                    argv,
+                    vec!["exec", "ls | cat", "abc123", "--cwd", "/tmp/project"]
+                );
+            }
+            Invocation::Shell { .. } => panic!("expected exec invocation, got shell"),
+        }
+
+        let missing_wrapper = WrapperConfig {
+            name: "missing".into(),
+            mode: WrapperMode::Exec {
+                argv: vec!["exec".into(), "{{var:missing}}".into()],
+            },
+        };
+        let error = render_wrapper(&missing_wrapper, &ctx).expect_err("missing var should error");
+        let message = format!("{error:?}");
+        assert!(message.contains("missing value for variable 'missing'"));
+    }
+
+    #[test]
+    fn expand_env_template_and_render_env_paths() {
+        let home_key = "PIPELINE_TEST_HOME";
+        let token_key = "PIPELINE_TEST_TOKEN";
+        let original_home = std::env::var(home_key).ok();
+        let original_token = std::env::var(token_key).ok();
+
+        unsafe {
+            std::env::set_var(home_key, "/home/tester");
+            std::env::set_var(token_key, "secret-value");
+        }
+
+        let template = format!("/opt:${{env:{home_key}}}:${{env:{token_key}}}");
+        let expanded = expand_env_template(&template).expect("expand env template");
+        assert_eq!(expanded, "/opt:/home/tester:secret-value");
+
+        let mut provider = test_provider_config();
+        provider.env = vec![
+            EnvVar {
+                key: "TOKEN".into(),
+                value_template: format!("${{env:{token_key}}}"),
+            },
+            EnvVar {
+                key: "STATIC".into(),
+                value_template: "literal".into(),
+            },
+        ];
+
+        let pairs = render_env(&provider).expect("render env entries");
+        assert_eq!(
+            pairs,
+            vec![
+                ("TOKEN".into(), "secret-value".into()),
+                ("STATIC".into(), "literal".into()),
+            ]
+        );
+
+        unsafe {
+            std::env::remove_var(token_key);
+        }
+        let error = render_env(&provider).expect_err("missing env should error");
+        let message = format!("{error:?}");
+        assert!(message.contains("while expanding $TOKEN"));
+
+        if let Some(value) = original_home {
+            unsafe {
+                std::env::set_var(home_key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(home_key);
+            }
+        }
+        if let Some(value) = original_token {
+            unsafe {
+                std::env::set_var(token_key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(token_key);
+            }
+        }
+    }
+
+    #[test]
+    fn friendly_capture_display_substitutes_prompt_pipeline() {
+        let provider = capture_provider_config();
+        let pre = vec!["cat prompt.txt".to_string()];
+        let post = vec!["tail -n1".to_string()];
+        let args = vec![
+            "{prompt}".to_string(),
+            "--json=\"{prompt}\"".to_string(),
+            "--input={prompt}".to_string(),
+        ];
+        let friendly = friendly_capture_display(&provider, &pre, &post, &args, "fallback");
+        assert_eq!(
+            friendly,
+            "codex \"$(cat prompt.txt)\" --json=\"$(cat prompt.txt)\" --input=$(cat prompt.txt) | tail -n1"
+        );
+
+        let args_no_pre = vec!["--json=\"{prompt}\"".to_string()];
+        let friendly_fallback =
+            friendly_capture_display(&provider, &[], &[], &args_no_pre, "fallback");
+        assert_eq!(friendly_fallback, "codex '--json=\"<prompt>\"'");
+    }
+
+    fn test_provider_config() -> ProviderConfig {
+        ProviderConfig {
+            name: "codex".into(),
+            bin: "codex".into(),
+            flags: vec!["--search".into()],
+            env: Vec::new(),
+            session_roots: Vec::new(),
+            stdin: None,
+        }
+    }
+
+    fn capture_provider_config() -> ProviderConfig {
+        let mut provider = test_provider_config();
+        provider.stdin = Some(StdinMapping {
+            args: vec!["{prompt}".into()],
+            mode: StdinMode::CaptureArg,
+        });
+        provider
     }
 }

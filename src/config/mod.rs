@@ -133,20 +133,42 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
 }
 
 fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
-    if let Some(project_dirs) = ProjectDirs::from("", "", APP_NAME) {
-        return Ok((
-            project_dirs.config_dir().to_path_buf(),
-            project_dirs.data_dir().to_path_buf(),
-            project_dirs.cache_dir().to_path_buf(),
-        ));
+    resolve_default_directories_with(
+        || {
+            ProjectDirs::from("", "", APP_NAME).map(|dirs| {
+                (
+                    dirs.config_dir().to_path_buf(),
+                    dirs.data_dir().to_path_buf(),
+                    dirs.cache_dir().to_path_buf(),
+                )
+            })
+        },
+        || {
+            BaseDirs::new().map(|dirs| {
+                (
+                    dirs.config_dir().join(APP_NAME),
+                    dirs.data_dir().join(APP_NAME),
+                    dirs.cache_dir().join(APP_NAME),
+                )
+            })
+        },
+    )
+}
+
+fn resolve_default_directories_with<P, B>(
+    project_dirs: P,
+    base_dirs: B,
+) -> Result<(PathBuf, PathBuf, PathBuf)>
+where
+    P: FnOnce() -> Option<(PathBuf, PathBuf, PathBuf)>,
+    B: FnOnce() -> Option<(PathBuf, PathBuf, PathBuf)>,
+{
+    if let Some(paths) = project_dirs() {
+        return Ok(paths);
     }
 
-    if let Some(base_dirs) = BaseDirs::new() {
-        return Ok((
-            base_dirs.config_dir().join(APP_NAME),
-            base_dirs.data_dir().join(APP_NAME),
-            base_dirs.cache_dir().join(APP_NAME),
-        ));
+    if let Some(paths) = base_dirs() {
+        return Ok(paths);
     }
 
     #[cfg(windows)]
@@ -288,4 +310,587 @@ fn read_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files.into_iter().collect_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_fs::TempDir;
+    use assert_fs::fixture::{FileTouch, FileWriteStr, PathChild, PathCreateDir};
+    use color_eyre::Result;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    use std::fs;
+    fn path_contains_component(path: &std::path::Path, needle: &str) -> bool {
+        path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(needle)
+        })
+    }
+
+    #[test]
+    fn resolve_directories_uses_env_overrides() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        let data_dir = temp.child("data");
+        let cache_dir = temp.child("cache");
+        config_dir.create_dir_all()?;
+        data_dir.create_dir_all()?;
+        cache_dir.create_dir_all()?;
+
+        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
+        let orig_data = std::env::var("TX_DATA_DIR").ok();
+        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+
+        unsafe {
+            std::env::set_var("TX_CONFIG_DIR", config_dir.path());
+            std::env::set_var("TX_DATA_DIR", data_dir.path());
+            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
+        }
+
+        let dirs = resolve_directories(None)?;
+        assert_eq!(dirs.config_dir, config_dir.path());
+        assert_eq!(dirs.data_dir, data_dir.path());
+        assert_eq!(dirs.cache_dir, cache_dir.path());
+
+        if let Some(val) = orig_config {
+            unsafe {
+                std::env::set_var("TX_CONFIG_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_CONFIG_DIR");
+            }
+        }
+        if let Some(val) = orig_data {
+            unsafe {
+                std::env::set_var("TX_DATA_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_DATA_DIR");
+            }
+        }
+        if let Some(val) = orig_cache {
+            unsafe {
+                std::env::set_var("TX_CACHE_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_CACHE_DIR");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_default_layout_creates_config_and_dropins() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dirs = AppDirectories {
+            config_dir: temp.child("config").path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        ensure_default_layout(&dirs)?;
+
+        let main = dirs.config_dir.join(MAIN_CONFIG);
+        assert!(main.exists(), "expected main config file to exist");
+        let contents = fs::read_to_string(&main)?;
+        assert!(contents.contains("provider = \"codex\""));
+        assert!(dirs.config_dir.join(DROPIN_DIR).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_all_creates_missing_directories() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dirs = AppDirectories {
+            config_dir: temp.child("config").path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        dirs.ensure_all()?;
+        assert!(dirs.config_dir.is_dir());
+        assert!(dirs.data_dir.is_dir());
+        assert!(dirs.cache_dir.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_default_directories_returns_paths() -> Result<()> {
+        let (config, data, cache) = resolve_default_directories()?;
+        assert!(
+            path_contains_component(&config, APP_NAME),
+            "config dir {} should contain '{}'",
+            config.display(),
+            APP_NAME
+        );
+        assert!(
+            path_contains_component(&data, APP_NAME),
+            "data dir {} should contain '{}'",
+            data.display(),
+            APP_NAME
+        );
+        assert!(
+            path_contains_component(&cache, APP_NAME),
+            "cache dir {} should contain '{}'",
+            cache.display(),
+            APP_NAME
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_default_directories_prefers_project_dirs() -> Result<()> {
+        let fake = (
+            PathBuf::from("/tmp/config"),
+            PathBuf::from("/tmp/data"),
+            PathBuf::from("/tmp/cache"),
+        );
+        let resolved = resolve_default_directories_with(|| Some(fake.clone()), || unreachable!())?;
+        assert_eq!(resolved, fake);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_default_directories_falls_back_to_base_dirs() -> Result<()> {
+        let fake = (
+            PathBuf::from("/tmp/base-config"),
+            PathBuf::from("/tmp/base-data"),
+            PathBuf::from("/tmp/base-cache"),
+        );
+        let resolved = resolve_default_directories_with(|| None, || Some(fake.clone()))?;
+        assert_eq!(resolved, fake);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_default_directories_errors_without_sources() {
+        let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
+        assert!(
+            err.to_string()
+                .contains("unable to resolve platform directories")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_default_directories_errors_without_sources() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_local = std::env::var("LOCALAPPDATA").ok();
+        let original_app = std::env::var("APPDATA").ok();
+
+        unsafe {
+            std::env::remove_var("LOCALAPPDATA");
+            std::env::remove_var("APPDATA");
+        }
+
+        let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
+        assert!(
+            err.to_string()
+                .contains("unable to resolve platform directories")
+        );
+
+        if let Some(value) = original_local {
+            unsafe { std::env::set_var("LOCALAPPDATA", value) };
+        } else {
+            unsafe { std::env::remove_var("LOCALAPPDATA") };
+        }
+        if let Some(value) = original_app {
+            unsafe { std::env::set_var("APPDATA", value) };
+        } else {
+            unsafe { std::env::remove_var("APPDATA") };
+        }
+    }
+
+    #[test]
+    fn gather_sources_returns_empty_for_missing_root() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.child("missing");
+        let sources = gather_sources(missing.path())?;
+        assert!(sources.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn read_toml_files_filters_non_toml_entries() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dir = temp.child("conf.d");
+        dir.create_dir_all()?;
+        dir.child("00-main.toml")
+            .write_str("provider = \"codex\"")?;
+        dir.child("notes.md").write_str("# ignore")?;
+        let files = read_toml_files(dir.path())?;
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("00-main.toml"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_merges_dropins_in_lexical_order() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        config_dir
+            .child("config.toml")
+            .write_str("provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n")?;
+        let dropin = config_dir.child("conf.d");
+        dropin.create_dir_all()?;
+        dropin
+            .child("10-wrapper.toml")
+            .write_str("[wrappers.wrap]\nshell = true\ncmd = \"echo {pipeline}\"\n")?;
+        dropin
+            .child("20-profile.toml")
+            .write_str("[profiles.test]\nprovider = \"echo\"\n")?;
+
+        let loaded = load(Some(config_dir.path()))?;
+        assert!(loaded.config.wrappers.contains_key("wrap"));
+        assert!(loaded.config.profiles.contains_key("test"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_collects_sources_and_parses_configs() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let conf_d = config_dir.child("conf.d");
+        conf_d.create_dir_all()?;
+        fs::write(
+            config_dir.child("config.toml").path(),
+            "provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n",
+        )?;
+        fs::write(
+            conf_d.child("00-extra.toml").path(),
+            "[providers.extra]\nbin = \"echo\"\n",
+        )?;
+
+        let orig_data = std::env::var("TX_DATA_DIR").ok();
+        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+        let data_override = temp.child("data");
+        data_override.create_dir_all()?;
+        let cache_override = temp.child("cache");
+        cache_override.create_dir_all()?;
+        unsafe {
+            std::env::set_var("TX_DATA_DIR", data_override.path());
+            std::env::set_var("TX_CACHE_DIR", cache_override.path());
+        }
+
+        let loaded = load(Some(config_dir.path()))?;
+        assert!(loaded.config.providers.contains_key("echo"));
+        assert!(loaded.config.providers.contains_key("extra"));
+        assert!(loaded.sources.len() >= 2);
+
+        if let Some(val) = orig_data {
+            unsafe {
+                std::env::set_var("TX_DATA_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_DATA_DIR");
+            }
+        }
+        if let Some(val) = orig_cache {
+            unsafe {
+                std::env::set_var("TX_CACHE_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_CACHE_DIR");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn load_surfaces_merge_errors() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        config_dir.child(MAIN_CONFIG).write_str(
+            "\
+provider = \"echo\"
+[providers.echo]
+bin = \"echo\"
+list = \"value\"
+",
+        )?;
+        let dropins = config_dir.child(DROPIN_DIR);
+        dropins.create_dir_all()?;
+        dropins
+            .child("10-list.toml")
+            .write_str("[providers.echo]\n\"list+\" = [\"extra\"]\n")?;
+
+        let data_dir = temp.child("data");
+        data_dir.create_dir_all()?;
+        let cache_dir = temp.child("cache");
+        cache_dir.create_dir_all()?;
+
+        let orig_data = std::env::var("TX_DATA_DIR").ok();
+        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+        unsafe {
+            std::env::set_var("TX_DATA_DIR", data_dir.path());
+            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
+        }
+
+        let err =
+            load(Some(config_dir.path())).expect_err("merge should fail for non-array append");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("cannot append to non-array key 'list'"),
+            "unexpected error: {message}"
+        );
+
+        if let Some(val) = orig_data {
+            unsafe {
+                std::env::set_var("TX_DATA_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_DATA_DIR");
+            }
+        }
+        if let Some(val) = orig_cache {
+            unsafe {
+                std::env::set_var("TX_CACHE_DIR", val);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("TX_CACHE_DIR");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_default_layout_skips_when_config_path_is_file() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config_file = temp.child("config.toml");
+        config_file.touch()?;
+
+        let dirs = AppDirectories {
+            config_dir: config_file.path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        ensure_default_layout(&dirs)?;
+        assert!(
+            !dirs.config_dir.parent().unwrap().join(DROPIN_DIR).exists(),
+            "drop-in directory should not be created when config path is a file"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_layout_errors_when_dropin_creation_fails() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let perms = fs::Permissions::from_mode(0o555);
+        fs::set_permissions(config_dir.path(), perms)?;
+
+        let dirs = AppDirectories {
+            config_dir: config_dir.path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        let err = ensure_default_layout(&dirs).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to create directory"),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_template_contains_provider() {
+        let template = default_template();
+        assert!(
+            template.contains("provider = \"codex\""),
+            "expected bundled template to include provider stanza"
+        );
+    }
+
+    #[test]
+    fn bundled_default_config_renders_template() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dirs = AppDirectories {
+            config_dir: temp.child("config").path().to_path_buf(),
+            data_dir: temp.child("data").path().to_path_buf(),
+            cache_dir: temp.child("cache").path().to_path_buf(),
+        };
+
+        let rendered = bundled_default_config(&dirs);
+        assert!(
+            rendered.contains("provider = \"codex\""),
+            "expected rendered template to include provider stanza"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_rejects_non_table_config_files() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        std::fs::write(config_dir.child("config.toml").path(), "123")?;
+
+        let err = load(Some(config_dir.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gather_sources_supports_single_file_roots() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config_file = temp.child("inline.toml");
+        config_file.write_str("provider = \"codex\"")?;
+
+        let sources = gather_sources(config_file.path())?;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].kind, ConfigSourceKind::Main);
+        assert_eq!(sources[0].path, config_file.path());
+        Ok(())
+    }
+
+    #[test]
+    fn gather_project_sources_collects_project_files() -> Result<()> {
+        let temp = TempDir::new()?;
+        let project_file = temp.child(PROJECT_FILE);
+        project_file.write_str("provider = \"codex\"")?;
+        let dropin_dir = temp.child(PROJECT_DROPIN_DIR);
+        dropin_dir.create_dir_all()?;
+        dropin_dir
+            .child("10-extra.toml")
+            .write_str("search_mode = \"full_text\"")?;
+
+        let current = std::env::current_dir()?;
+        std::env::set_current_dir(temp.path())?;
+        let sources = gather_project_sources()?;
+        std::env::set_current_dir(current)?;
+
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .any(|src| matches!(src.kind, ConfigSourceKind::Project))
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|src| matches!(src.kind, ConfigSourceKind::ProjectDropIn))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_toml_files_skips_directories() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dir = temp.child("conf.d");
+        dir.create_dir_all()?;
+        dir.child("10-valid.toml").write_str("value = 1")?;
+        dir.child("subdir").create_dir_all()?;
+        dir.child("subdir")
+            .child("20-extra.toml")
+            .write_str("ignored = true")?;
+        dir.child("notes.txt").write_str("nope")?;
+
+        let files = read_toml_files(dir.path())?;
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("10-valid.toml"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_directories_prefers_override_argument() -> Result<()> {
+        let temp = TempDir::new()?;
+        let override_dir = temp.child("override");
+        override_dir.create_dir_all()?;
+
+        unsafe {
+            std::env::remove_var("TX_CONFIG_DIR");
+        }
+
+        let dirs = resolve_directories(Some(override_dir.path()))?;
+        assert_eq!(dirs.config_dir, override_dir.path());
+        Ok(())
+    }
+
+    #[test]
+    fn load_creates_default_layout_when_dirs_missing() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        let data_dir = temp.child("data");
+        let cache_dir = temp.child("cache");
+        let home_dir = temp.child("home");
+        home_dir.create_dir_all()?;
+        let codex_home = temp.child("codex-home");
+        codex_home.create_dir_all()?;
+
+        let orig_env = [
+            ("TX_CONFIG_DIR", std::env::var("TX_CONFIG_DIR").ok()),
+            ("TX_DATA_DIR", std::env::var("TX_DATA_DIR").ok()),
+            ("TX_CACHE_DIR", std::env::var("TX_CACHE_DIR").ok()),
+            ("HOME", std::env::var("HOME").ok()),
+            ("USERPROFILE", std::env::var("USERPROFILE").ok()),
+            ("CODEX_HOME", std::env::var("CODEX_HOME").ok()),
+        ];
+
+        unsafe {
+            std::env::set_var("TX_CONFIG_DIR", config_dir.path());
+            std::env::set_var("TX_DATA_DIR", data_dir.path());
+            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
+            std::env::set_var("HOME", home_dir.path());
+            std::env::set_var("USERPROFILE", home_dir.path());
+            std::env::set_var("CODEX_HOME", codex_home.path());
+        }
+
+        let loaded = load(None)?;
+        assert!(loaded.directories.config_dir.exists());
+        assert!(loaded.directories.data_dir.exists());
+        assert!(loaded.directories.cache_dir.exists());
+        assert!(loaded.directories.config_dir.join(MAIN_CONFIG).is_file());
+        assert!(loaded.directories.config_dir.join(DROPIN_DIR).is_dir());
+        assert!(
+            loaded
+                .sources
+                .iter()
+                .any(|src| matches!(src.kind, ConfigSourceKind::Main)),
+            "expected main config source"
+        );
+
+        drop(loaded);
+
+        for (key, value) in orig_env {
+            if let Some(val) = value {
+                unsafe { std::env::set_var(key, val) };
+            } else {
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+
+        Ok(())
+    }
 }

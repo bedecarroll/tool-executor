@@ -4,6 +4,10 @@ use assert_fs::prelude::*;
 use predicates::str::contains;
 use serde_json::Value;
 use serde_json::json;
+use time::OffsetDateTime;
+use tool_executor::db::Database;
+use tool_executor::session::{MessageRecord, SessionIngest, SessionSummary};
+use tool_executor::test_support::toml_path;
 
 fn base_command(temp: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("tx").expect("binary exists");
@@ -36,7 +40,11 @@ fn base_command(temp: &TempDir) -> Command {
 fn search_lists_empty_when_no_data() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
-    let output = cmd.arg("search").output()?;
+    let output = cmd.args(["search", "--full-text", "Search"]).output()?;
+    if !output.status.success() {
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
     assert!(output.status.success());
     let parsed: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(parsed, json!([]));
@@ -114,6 +122,192 @@ fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
         .success()
         .stdout(contains("provider = \"codex\""))
         .stdout(contains("Session logs are discovered automatically"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn config_default_raw_outputs_template_without_substitution() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["config", "default", "--raw"])
+        .assert()
+        .success()
+        .stdout(contains("provider = \"codex\""))
+        .stdout(contains("Session logs are discovered automatically"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn config_list_displays_sections() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["config", "list"])
+        .assert()
+        .success()
+        .stdout(contains("Providers:"))
+        .stdout(contains("Profiles:"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn config_list_prints_wrappers_and_profiles() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+provider = "demo"
+
+[providers.demo]
+bin = "echo"
+session_roots = ["{sessions}"]
+
+[wrappers.wrap]
+shell = true
+cmd = "echo {{CMD}}"
+
+[snippets.pre]
+setup = "echo setup"
+
+[snippets.post]
+finish = "echo finish"
+
+[profiles.sample]
+provider = "demo"
+pre = ["setup"]
+post = ["finish"]
+wrap = "wrap"
+"#,
+        sessions = toml_path(sessions_dir.path())
+    );
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .args(["config", "list"])
+        .assert()
+        .success()
+        .stdout(contains("demo (bin: echo"))
+        .stdout(contains("wrap (shell)"))
+        .stdout(contains("sample (provider: demo"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn export_errors_when_session_missing() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["export", "missing-session"])
+        .assert()
+        .failure()
+        .stderr(contains("not found"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_success() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+provider = "demo"
+
+[providers.demo]
+bin = "echo"
+session_roots = ["{sessions}"]
+"#,
+        sessions = toml_path(sessions_dir.path())
+    );
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("doctor")
+        .assert()
+        .success();
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn search_returns_results_with_role_filter() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all()?;
+    let db_path = data_dir.child("tx.sqlite3");
+    let mut db = Database::open(db_path.path())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let summary = SessionSummary {
+        id: "sess-1".into(),
+        provider: "codex".into(),
+        label: Some("Label".into()),
+        path: temp.child("sess.jsonl").path().to_path_buf(),
+        uuid: Some("uuid-1".into()),
+        first_prompt: Some("search term".into()),
+        actionable: true,
+        created_at: Some(now),
+        started_at: Some(now),
+        last_active: Some(now),
+        size: 1,
+        mtime: now,
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "search term",
+        None,
+        Some(now),
+    );
+    message.is_first = true;
+    let ingest = SessionIngest::new(summary, vec![message]);
+    db.upsert_session(&ingest)?;
+    drop(db);
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .env("TX_SKIP_INDEX", "1")
+        .args(["search", "--full-text", "--role", "user", "search"])
+        .output()?;
+    if !output.status.success() {
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    if parsed.as_array().map_or(0, Vec::len) != 1 {
+        eprintln!("search stdout: {}", String::from_utf8_lossy(&output.stdout));
+    }
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn config_where_reports_directories() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .args(["config", "where"])
+        .assert()
+        .success()
+        .stdout(contains("Configuration directory:"))
+        .stdout(contains(config_dir.path().to_string_lossy().as_ref()))
+        .stdout(contains("Sources (in load order):"));
     temp.close()?;
     Ok(())
 }
