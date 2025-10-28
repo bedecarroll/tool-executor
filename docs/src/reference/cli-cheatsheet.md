@@ -11,4 +11,4 @@
 | `tx config where` | Show the source location for a specific key. |
 | `tx config lint` | Run configuration validation checks. |
 | `tx doctor` | Diagnose common environment and dependency issues. |
-| `tx self-update [--version]` | Update the binary when compiled with the `self-update` feature. |
+| `tx self-update [--version]` | Update the binary to the latest (or specified) GitHub release. |

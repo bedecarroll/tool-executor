@@ -12,10 +12,9 @@ use std::sync::LazyLock;
 use tracing::debug;
 use which::which;
 
-#[cfg(feature = "self-update")]
-use crate::cli::SelfUpdateCommand;
 use crate::cli::{
     Cli, ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
+    SelfUpdateCommand,
 };
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
@@ -35,7 +34,6 @@ pub enum AppError {
 }
 
 pub struct App<'cli> {
-    #[cfg_attr(not(feature = "self-update"), allow(dead_code))]
     pub cli: &'cli Cli,
     pub loaded: LoadedConfig,
     pub db: Database,
@@ -333,7 +331,6 @@ impl<'cli> App<'cli> {
     ///
     /// Returns an error if the updater cannot be configured or the download/apply step
     /// fails.
-    #[cfg(feature = "self-update")]
     pub fn self_update(&self, cmd: &SelfUpdateCommand) -> Result<()> {
         use self_update::backends::github::Update;
 
