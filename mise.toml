@@ -34,7 +34,7 @@ run = [
 
 [tasks.test]
 description = "Run the nextest test suite"
-run = ["cargo nextest run --workspace --all-targets", "cargo insta test"]
+run = ["cargo nextest run --workspace --all-targets --no-fail-fast", "cargo insta test"]
 [tasks.check]
 description = "Aggregate format, lint, test, and doctest runs"
 depends = ["fmt", "lint", "test", "test-doc"]

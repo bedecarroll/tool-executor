@@ -561,6 +561,13 @@ where
     match &plan.invocation {
         Invocation::Shell { command } => {
             let shell = default_shell();
+            #[cfg(windows)]
+            eprintln!(
+                "execute_plan_with_prompt: shell={} flag={} command={}",
+                shell.path.to_string_lossy(),
+                shell.flag,
+                command
+            );
             let mut cmd = Command::new(&shell.path);
             cmd.arg(shell.flag).arg(command);
             cmd.current_dir(&plan.cwd);
@@ -1477,6 +1484,22 @@ mod tests {
         } else {
             format!("{} {}", script.path().display(), output.path().display())
         };
+
+        #[cfg(windows)]
+        {
+            let shell = default_shell();
+            println!(
+                "execute_plan_shell_captures_prompt_input: shell_path={} flag={} command={} script_exists={} output_exists={}",
+                shell.path.to_string_lossy(),
+                shell.flag,
+                command,
+                script.path().exists(),
+                output.path().exists()
+            );
+            if let Ok(contents) = std::fs::read_to_string(script.path()) {
+                println!("execute_plan_shell_captures_prompt_input: script_contents={contents:?}");
+            }
+        }
 
         let plan = PipelinePlan {
             pipeline: command.clone(),
