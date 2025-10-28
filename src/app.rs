@@ -613,19 +613,36 @@ struct ShellCommand {
 fn default_shell() -> ShellCommand {
     #[cfg(windows)]
     {
-        let shell = std::env::var("SHELL")
-            .or_else(|_| std::env::var("COMSPEC"))
-            .unwrap_or_else(|_| "cmd.exe".to_string());
-        let flag = if shell.to_ascii_lowercase().ends_with("cmd.exe")
-            || shell.to_ascii_lowercase().ends_with("\\cmd")
-            || shell.eq_ignore_ascii_case("cmd")
-        {
-            "/C"
+        let shell_env = std::env::var("SHELL").ok();
+        let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+
+        let mut path = shell_env.unwrap_or_default();
+        let mut use_cmd = false;
+
+        if path.is_empty() {
+            path.clone_from(&comspec);
+            use_cmd = true;
         } else {
-            "-c"
-        };
+            let lower = path.to_ascii_lowercase();
+            if lower.ends_with("powershell.exe")
+                || lower.ends_with("pwsh.exe")
+                || lower.ends_with("powershell")
+                || lower.ends_with("pwsh")
+            {
+                path.clone_from(&comspec);
+                use_cmd = true;
+            } else if lower.ends_with("cmd.exe") || lower.ends_with("\\cmd") || lower == "cmd" {
+                use_cmd = true;
+            }
+        }
+
+        let flag = if use_cmd { "/C" } else { "-c" };
+        if use_cmd && path.is_empty() {
+            path = comspec;
+        }
+
         ShellCommand {
-            path: OsString::from(shell),
+            path: OsString::from(path),
             flag,
         }
     }
@@ -1451,22 +1468,15 @@ mod tests {
             }
         }
 
-        let command = format!("{} {}", script.path().display(), output.path().display());
-
-        #[cfg(windows)]
-        {
-            let shell = default_shell();
-            println!(
-                "execute_plan_shell_captures_prompt_input: shell={:?} command={} script_exists={} output_exists={}",
-                shell.path,
-                command,
-                script.path().exists(),
-                output.path().exists()
-            );
-            if let Ok(contents) = std::fs::read_to_string(script.path()) {
-                println!("execute_plan_shell_captures_prompt_input: script_contents={:?}", contents);
-            }
-        }
+        let command = if cfg!(windows) {
+            format!(
+                "\"{}\" \"{}\"",
+                script.path().display(),
+                output.path().display()
+            )
+        } else {
+            format!("{} {}", script.path().display(), output.path().display())
+        };
 
         let plan = PipelinePlan {
             pipeline: command.clone(),
