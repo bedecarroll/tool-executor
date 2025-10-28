@@ -1453,6 +1453,21 @@ mod tests {
 
         let command = format!("{} {}", script.path().display(), output.path().display());
 
+        #[cfg(windows)]
+        {
+            let shell = default_shell();
+            println!(
+                "execute_plan_shell_captures_prompt_input: shell={:?} command={} script_exists={} output_exists={}",
+                shell.path,
+                command,
+                script.path().exists(),
+                output.path().exists()
+            );
+            if let Ok(contents) = std::fs::read_to_string(script.path()) {
+                println!("execute_plan_shell_captures_prompt_input: script_contents={:?}", contents);
+            }
+        }
+
         let plan = PipelinePlan {
             pipeline: command.clone(),
             display: "capture".into(),
