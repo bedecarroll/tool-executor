@@ -28,7 +28,7 @@ module_name_repetitions = "allow"
 
 [dependencies]
 blake3 = "1.5"
-clap = { version = "4.5.4", features = ["derive"] }
+clap = { version = "4.5.50", features = ["derive"] }
 clap_complete = "4.5"
 clap_mangen = "0.2"
 color-eyre = "0.6"
