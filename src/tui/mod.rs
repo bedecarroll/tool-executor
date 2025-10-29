@@ -2546,6 +2546,7 @@ mod tests {
             messages: Vec::new(),
         };
         dispatch_outcome(Some(Outcome::Export(transcript)))?;
+        dispatch_outcome(Some(Outcome::ShowId("sess-emit".into())))?;
         dispatch_outcome(None)?;
         Ok(())
     }

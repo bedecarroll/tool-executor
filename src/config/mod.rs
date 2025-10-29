@@ -900,6 +900,13 @@ list = \"value\"
     }
 
     #[test]
+    fn schema_pretty_renders_indented_json() -> Result<()> {
+        let rendered = schema(true)?;
+        assert!(rendered.contains("\n  \"properties\""));
+        Ok(())
+    }
+
+    #[test]
     fn bundled_default_config_renders_template() -> Result<()> {
         let temp = TempDir::new()?;
         let dirs = AppDirectories {
@@ -1042,10 +1049,9 @@ list = \"value\"
         assert!(loaded.directories.config_dir.exists());
         assert!(loaded.directories.data_dir.exists());
         assert!(loaded.directories.cache_dir.exists());
-        assert!(loaded.directories.config_dir.join(MAIN_CONFIG).is_file());
         assert!(
             !loaded.directories.config_dir.join(DROPIN_DIR).exists(),
-            "drop-in directory should be created lazily"
+            "drop-in directory should not be created until needed"
         );
         assert!(
             loaded

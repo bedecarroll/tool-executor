@@ -86,7 +86,7 @@ fn load_creates_default_layout_when_config_missing() -> Result<()> {
     assert!(loaded.directories.config_dir.join("config.toml").is_file());
     assert!(
         !loaded.directories.config_dir.join("conf.d").exists(),
-        "drop-in directory should be created lazily"
+        "drop-in directory should not be created until needed"
     );
     assert_eq!(loaded.directories.config_dir, config_dir.path());
 

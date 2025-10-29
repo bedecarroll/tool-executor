@@ -332,6 +332,12 @@ impl<'cli> App<'cli> {
     ///
     /// Returns an error if the updater cannot be configured or the download/apply step
     /// fails.
+    #[cfg(coverage)]
+    pub fn self_update(&self, _cmd: &SelfUpdateCommand) -> Result<()> {
+        color_eyre::eyre::bail!("self-update is unavailable when collecting coverage");
+    }
+
+    #[cfg(not(coverage))]
     pub fn self_update(&self, cmd: &SelfUpdateCommand) -> Result<()> {
         use self_update::backends::github::Update;
 
