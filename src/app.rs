@@ -13,8 +13,8 @@ use tracing::debug;
 use which::which;
 
 use crate::cli::{
-    Cli, ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
-    SelfUpdateCommand,
+    Cli, ConfigCommand, ConfigDefaultCommand, ConfigSchemaCommand, ExportCommand, ResumeCommand,
+    SearchCommand, SelfUpdateCommand,
 };
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
@@ -313,6 +313,7 @@ impl<'cli> App<'cli> {
             }
             ConfigCommand::Lint => self.config_lint(),
             ConfigCommand::Default(cmd) => self.config_default(cmd),
+            ConfigCommand::Schema(cmd) => Self::config_schema(cmd),
         }
     }
 
@@ -437,6 +438,15 @@ impl<'cli> App<'cli> {
             let config = crate::config::bundled_default_config(&self.loaded.directories);
             stdout.write_all(config.as_bytes())?;
         }
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn config_schema(cmd: &ConfigSchemaCommand) -> Result<()> {
+        let schema = crate::config::schema(cmd.pretty)?;
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(schema.as_bytes())?;
+        stdout.write_all(b"\n")?;
         stdout.flush()?;
         Ok(())
     }

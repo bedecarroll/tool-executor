@@ -136,6 +136,8 @@ pub enum ConfigCommand {
     Lint,
     /// Print the bundled default configuration.
     Default(ConfigDefaultCommand),
+    /// Emit the JSON Schema for configuration files.
+    Schema(ConfigSchemaCommand),
 }
 
 #[derive(Debug, Args)]
@@ -143,6 +145,13 @@ pub struct ConfigDefaultCommand {
     /// Show the raw bundled template without resolving runtime paths.
     #[arg(long, action = ArgAction::SetTrue)]
     pub raw: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigSchemaCommand {
+    /// Pretty-print the generated schema.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub pretty: bool,
 }
 
 fn parse_since(raw: &str) -> Result<i64, String> {
