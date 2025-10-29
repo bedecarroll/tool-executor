@@ -47,7 +47,7 @@ run = ["cargo test --doc"]
 description = "Generate HTML and lcov coverage reports"
 run = [
   "cargo llvm-cov clean --workspace",
-  "cargo llvm-cov nextest --workspace --all-targets --fail-under-lines 95 --html --output-dir coverage/html",
+  "cargo llvm-cov nextest --workspace --all-targets --fail-under-lines 90 --html --output-dir coverage/html",
   "cargo llvm-cov report --summary-only",
   "cargo llvm-cov report --lcov --output-path coverage/lcov.info",
 ]

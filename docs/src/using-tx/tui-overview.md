@@ -12,7 +12,5 @@ Keyboard highlights:
 - `Tab` switches focus between sessions and profiles.
 - `Enter` runs the selected entry immediately.
 - `Tab` emits the assembled command to stdout so your shell can capture it.
-- `R` refreshes metadata (for example to re-run prompt-assembler discovery).
-- `/` opens search mode; type to filter, `Esc` to close.
 
 The footer displays diagnostics such as hidden providers or stale configuration. Increase verbosity with `-v` or `-vv` when launching `tx` if you want extra logging while you explore the UI.
