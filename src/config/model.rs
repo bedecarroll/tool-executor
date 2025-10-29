@@ -2,6 +2,7 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 use directories::BaseDirs;
 use indexmap::IndexMap;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use shellexpand::full;
 use std::env;
@@ -218,17 +219,20 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawConfig {
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RawConfig {
     #[serde(default, flatten)]
     defaults: RawDefaults,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, RawProvider>")]
     providers: IndexMap<String, RawProvider>,
     #[serde(default)]
     snippets: RawSnippets,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, RawWrapper>")]
     wrappers: IndexMap<String, RawWrapper>,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, RawProfile>")]
     profiles: IndexMap<String, RawProfile>,
     #[serde(default)]
     features: RawFeatures,
@@ -267,8 +271,8 @@ impl RawConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawDefaults {
+#[derive(Debug, Deserialize, Default, JsonSchema)]
+pub(crate) struct RawDefaults {
     provider: Option<String>,
     profile: Option<String>,
     #[serde(default = "RawDefaults::default_search_mode")]
@@ -308,8 +312,8 @@ impl RawDefaults {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawProvider {
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RawProvider {
     bin: Option<String>,
     #[serde(default)]
     flags: Vec<String>,
@@ -376,9 +380,9 @@ fn parse_command_args(raw: &str) -> Result<Vec<String>> {
     shlex::split(raw).ok_or_else(|| eyre!("failed to parse command line '{raw}'"))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
-enum CommandSpec {
+pub(crate) enum CommandSpec {
     String(String),
     List(Vec<String>),
 }
@@ -450,11 +454,13 @@ fn parse_stdin_mode(raw: Option<&str>) -> Result<StdinMode> {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawSnippets {
+#[derive(Debug, Deserialize, Default, JsonSchema)]
+pub(crate) struct RawSnippets {
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, String>")]
     pre: IndexMap<String, String>,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, String>")]
     post: IndexMap<String, String>,
 }
 
@@ -476,46 +482,51 @@ impl RawSnippets {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawWrapper {
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum WrapperCommandSpec {
+    String(String),
+    List(Vec<String>),
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RawWrapper {
     #[serde(default)]
     shell: Option<bool>,
-    cmd: Value,
+    cmd: WrapperCommandSpec,
 }
 
 impl RawWrapper {
     fn into_wrapper(self, name: String) -> Result<WrapperConfig> {
         let shell = self.shell.unwrap_or(false);
         let mode = if shell {
-            let command = self
-                .cmd
-                .as_str()
-                .ok_or_else(|| eyre!("wrapper '{name}' sets shell=true but cmd is not a string"))?
-                .to_string();
+            let command = match self.cmd {
+                WrapperCommandSpec::String(value) => value,
+                WrapperCommandSpec::List(_) => {
+                    return Err(eyre!(
+                        "wrapper '{name}' sets shell=true but cmd is not a string"
+                    ));
+                }
+            };
             WrapperMode::Shell { command }
         } else {
-            let array = self
-                .cmd
-                .as_array()
-                .ok_or_else(|| {
-                    eyre!("wrapper '{name}' expects cmd to be an array when shell=false")
-                })?
-                .iter()
-                .map(|value| {
-                    value.as_str().map(ToString::to_string).ok_or_else(|| {
-                        eyre!("wrapper '{name}' cmd array must contain only strings")
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            WrapperMode::Exec { argv: array }
+            let argv = match self.cmd {
+                WrapperCommandSpec::List(values) => values,
+                WrapperCommandSpec::String(_) => {
+                    return Err(eyre!(
+                        "wrapper '{name}' expects cmd to be an array when shell=false"
+                    ));
+                }
+            };
+            WrapperMode::Exec { argv }
         };
 
         Ok(WrapperConfig { name, mode })
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawProfile {
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct RawProfile {
     provider: String,
     #[serde(default)]
     description: Option<String>,
@@ -543,8 +554,8 @@ impl RawProfile {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawFeatures {
+#[derive(Debug, Deserialize, Default, JsonSchema)]
+pub(crate) struct RawFeatures {
     #[serde(default)]
     pa: Option<RawPromptAssembler>,
 }
@@ -560,8 +571,8 @@ impl RawFeatures {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RawPromptAssembler {
+#[derive(Debug, Deserialize, Default, JsonSchema)]
+pub(crate) struct RawPromptAssembler {
     enabled: Option<bool>,
     #[serde(default = "RawPromptAssembler::default_namespace")]
     namespace: String,
@@ -860,7 +871,7 @@ mod tests {
     fn raw_wrapper_into_shell_mode() -> Result<()> {
         let wrapper = RawWrapper {
             shell: Some(true),
-            cmd: Value::String("echo hello".into()),
+            cmd: WrapperCommandSpec::String("echo hello".into()),
         };
         let config = wrapper.into_wrapper("shellwrap".into())?;
         match config.mode {
@@ -874,10 +885,7 @@ mod tests {
     fn raw_wrapper_into_exec_mode() -> Result<()> {
         let wrapper = RawWrapper {
             shell: Some(false),
-            cmd: Value::Array(vec![
-                Value::String("ls".into()),
-                Value::String("-la".into()),
-            ]),
+            cmd: WrapperCommandSpec::List(vec!["ls".into(), "-la".into()]),
         };
         let config = wrapper.into_wrapper("execwrap".into())?;
         match config.mode {
@@ -891,7 +899,7 @@ mod tests {
     fn raw_wrapper_into_wrapper_reports_type_mismatch() {
         let wrapper = RawWrapper {
             shell: Some(true),
-            cmd: Value::Array(vec![Value::String("ls".into())]),
+            cmd: WrapperCommandSpec::List(vec!["ls".into()]),
         };
         let err = wrapper.into_wrapper("bad".into()).unwrap_err();
         assert!(

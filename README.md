@@ -102,10 +102,9 @@ The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and v
 ## TUI Shortcuts
 
 - `↑/↓`, `PgUp/PgDn` – move around the active list.
-- `/` – start typing to filter; `Backspace` edits the filter.
+- Typing – start entering text to filter; `Backspace` edits the filter.
 - `Ctrl+F` – toggle between prompt search and full-text search.
 - `Ctrl+P` – cycle provider filters when multiple backends are configured.
-- `R` – re-run the indexer and refresh listings.
 - `Tab` – emit the assembled pipeline to stdout (useful for scripting).
 - `Enter` – launch the selected session or profile.
 - `Esc` – leave filter mode or close the TUI.

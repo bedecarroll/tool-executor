@@ -84,7 +84,10 @@ fn load_creates_default_layout_when_config_missing() -> Result<()> {
 
     let loaded = config::load(None)?;
     assert!(loaded.directories.config_dir.join("config.toml").is_file());
-    assert!(loaded.directories.config_dir.join("conf.d").is_dir());
+    assert!(
+        !loaded.directories.config_dir.join("conf.d").exists(),
+        "drop-in directory should be created lazily"
+    );
     assert_eq!(loaded.directories.config_dir, config_dir.path());
 
     for (key, original) in orig_env {
