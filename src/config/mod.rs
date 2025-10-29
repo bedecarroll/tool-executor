@@ -7,6 +7,7 @@ use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use directories::{BaseDirs, ProjectDirs};
 use itertools::Itertools;
+use schemars::schema_for;
 use toml::Value;
 
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../assets/default_config.toml");
@@ -116,14 +117,41 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
 fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
     let (default_config_dir, default_data_dir, default_cache_dir) = resolve_default_directories()?;
 
-    let config_dir = dir_override
+    let config_override = dir_override
         .map(PathBuf::from)
-        .or_else(|| env::var("TX_CONFIG_DIR").ok().map(PathBuf::from))
-        .unwrap_or(default_config_dir);
+        .or_else(|| env::var("TX_CONFIG_DIR").ok().map(PathBuf::from));
+    let data_override = env::var("TX_DATA_DIR").ok().map(PathBuf::from);
+    let cache_override = env::var("TX_CACHE_DIR").ok().map(PathBuf::from);
 
-    let data_dir = env::var("TX_DATA_DIR").map_or_else(|_| default_data_dir.clone(), PathBuf::from);
-    let cache_dir =
-        env::var("TX_CACHE_DIR").map_or_else(|_| default_cache_dir.clone(), PathBuf::from);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut config_dir = config_override
+        .clone()
+        .unwrap_or_else(|| default_config_dir.clone());
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut data_dir = data_override
+        .clone()
+        .unwrap_or_else(|| default_data_dir.clone());
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut cache_dir = cache_override
+        .clone()
+        .unwrap_or_else(|| default_cache_dir.clone());
+
+    #[cfg(target_os = "macos")]
+    {
+        if config_override.is_none()
+            && data_override.is_none()
+            && cache_override.is_none()
+            && let Some(legacy_dirs) = legacy_project_dirs()
+        {
+            let (chosen_config, chosen_data, chosen_cache) = adopt_legacy_dirs(
+                (config_dir.clone(), data_dir.clone(), cache_dir.clone()),
+                &legacy_dirs,
+            );
+            config_dir = chosen_config;
+            data_dir = chosen_data;
+            cache_dir = chosen_cache;
+        }
+    }
 
     Ok(AppDirectories {
         config_dir,
@@ -133,26 +161,53 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
 }
 
 fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
-    resolve_default_directories_with(
-        || {
-            ProjectDirs::from("", "", APP_NAME).map(|dirs| {
-                (
-                    dirs.config_dir().to_path_buf(),
-                    dirs.data_dir().to_path_buf(),
-                    dirs.cache_dir().to_path_buf(),
-                )
-            })
-        },
-        || {
-            BaseDirs::new().map(|dirs| {
-                (
-                    dirs.config_dir().join(APP_NAME),
-                    dirs.data_dir().join(APP_NAME),
-                    dirs.cache_dir().join(APP_NAME),
-                )
-            })
-        },
-    )
+    #[cfg(target_os = "macos")]
+    {
+        resolve_default_directories_with(
+            || {
+                BaseDirs::new().map(|dirs| {
+                    (
+                        dirs.config_dir().join(APP_NAME),
+                        dirs.data_dir().join(APP_NAME),
+                        dirs.cache_dir().join(APP_NAME),
+                    )
+                })
+            },
+            || {
+                ProjectDirs::from("", "", APP_NAME).map(|dirs| {
+                    (
+                        dirs.config_dir().to_path_buf(),
+                        dirs.data_dir().to_path_buf(),
+                        dirs.cache_dir().to_path_buf(),
+                    )
+                })
+            },
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        resolve_default_directories_with(
+            || {
+                ProjectDirs::from("", "", APP_NAME).map(|dirs| {
+                    (
+                        dirs.config_dir().to_path_buf(),
+                        dirs.data_dir().to_path_buf(),
+                        dirs.cache_dir().to_path_buf(),
+                    )
+                })
+            },
+            || {
+                BaseDirs::new().map(|dirs| {
+                    (
+                        dirs.config_dir().join(APP_NAME),
+                        dirs.data_dir().join(APP_NAME),
+                        dirs.cache_dir().join(APP_NAME),
+                    )
+                })
+            },
+        )
+    }
 }
 
 fn resolve_default_directories_with<P, B>(
@@ -189,15 +244,44 @@ where
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn legacy_project_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    ProjectDirs::from("", "", APP_NAME).map(|dirs| {
+        (
+            dirs.config_dir().to_path_buf(),
+            dirs.data_dir().to_path_buf(),
+            dirs.cache_dir().to_path_buf(),
+        )
+    })
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn adopt_legacy_dirs(
+    preferred: (PathBuf, PathBuf, PathBuf),
+    legacy: &(PathBuf, PathBuf, PathBuf),
+) -> (PathBuf, PathBuf, PathBuf) {
+    let (legacy_config, legacy_data, legacy_cache) = legacy;
+    (
+        choose_existing(preferred.0, legacy_config.as_path()),
+        choose_existing(preferred.1, legacy_data.as_path()),
+        choose_existing(preferred.2, legacy_cache.as_path()),
+    )
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn choose_existing(preferred: PathBuf, legacy: &Path) -> PathBuf {
+    if preferred.exists() {
+        preferred
+    } else if legacy.exists() {
+        legacy.to_path_buf()
+    } else {
+        preferred
+    }
+}
+
 fn ensure_default_layout(dirs: &AppDirectories) -> Result<()> {
     if dirs.config_dir.is_file() {
         return Ok(());
-    }
-
-    let conf_d = dirs.config_dir.join(DROPIN_DIR);
-    if !conf_d.exists() {
-        fs::create_dir_all(&conf_d)
-            .with_context(|| format!("failed to create directory {}", conf_d.display()))?;
     }
 
     let main = dirs.config_dir.join(MAIN_CONFIG);
@@ -231,6 +315,22 @@ pub fn default_template() -> &'static str {
 #[must_use]
 pub fn bundled_default_config(dirs: &AppDirectories) -> String {
     default_config_contents(dirs)
+}
+
+/// Generate the JSON Schema for the configuration file format.
+///
+/// # Errors
+///
+/// Returns an error if the schema cannot be serialized to JSON.
+pub fn schema(pretty: bool) -> Result<String> {
+    let root = schema_for!(model::RawConfig);
+    let rendered = if pretty {
+        serde_json::to_string_pretty(&root)
+    } else {
+        serde_json::to_string(&root)
+    }
+    .wrap_err("failed to serialize configuration schema")?;
+    Ok(rendered)
 }
 
 fn gather_sources(root: &Path) -> Result<Vec<ConfigSource>> {
@@ -391,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_default_layout_creates_config_and_dropins() -> Result<()> {
+    fn ensure_default_layout_creates_default_config() -> Result<()> {
         let temp = TempDir::new()?;
         let dirs = AppDirectories {
             config_dir: temp.child("config").path().to_path_buf(),
@@ -399,13 +499,17 @@ mod tests {
             cache_dir: temp.child("cache").path().to_path_buf(),
         };
 
+        dirs.ensure_all()?;
         ensure_default_layout(&dirs)?;
 
         let main = dirs.config_dir.join(MAIN_CONFIG);
         assert!(main.exists(), "expected main config file to exist");
         let contents = fs::read_to_string(&main)?;
         assert!(contents.contains("provider = \"codex\""));
-        assert!(dirs.config_dir.join(DROPIN_DIR).exists());
+        assert!(
+            !dirs.config_dir.join(DROPIN_DIR).exists(),
+            "drop-in directory should not be created until needed"
+        );
         Ok(())
     }
 
@@ -458,6 +562,72 @@ mod tests {
         );
         let resolved = resolve_default_directories_with(|| Some(fake.clone()), || unreachable!())?;
         assert_eq!(resolved, fake);
+        Ok(())
+    }
+
+    #[test]
+    fn adopt_legacy_dirs_prefers_existing_legacy() -> Result<()> {
+        let temp = TempDir::new()?;
+
+        let preferred = (
+            temp.child("preferred/config").path().to_path_buf(),
+            temp.child("preferred/data").path().to_path_buf(),
+            temp.child("preferred/cache").path().to_path_buf(),
+        );
+
+        let legacy_config = temp.child("legacy/config");
+        legacy_config.create_dir_all()?;
+        let legacy_data = temp.child("legacy/data");
+        legacy_data.create_dir_all()?;
+        let legacy_cache = temp.child("legacy/cache");
+        legacy_cache.create_dir_all()?;
+
+        let legacy = (
+            legacy_config.path().to_path_buf(),
+            legacy_data.path().to_path_buf(),
+            legacy_cache.path().to_path_buf(),
+        );
+
+        let (config, data, cache) = adopt_legacy_dirs(preferred, &legacy);
+        assert_eq!(config, legacy_config.path());
+        assert_eq!(data, legacy_data.path());
+        assert_eq!(cache, legacy_cache.path());
+        Ok(())
+    }
+
+    #[test]
+    fn adopt_legacy_dirs_keeps_preferred_when_present() -> Result<()> {
+        let temp = TempDir::new()?;
+
+        let preferred_config = temp.child("preferred/config");
+        preferred_config.create_dir_all()?;
+        let preferred_data = temp.child("preferred/data");
+        preferred_data.create_dir_all()?;
+        let preferred_cache = temp.child("preferred/cache");
+        preferred_cache.create_dir_all()?;
+
+        let legacy_config = temp.child("legacy/config");
+        legacy_config.create_dir_all()?;
+        let legacy_data = temp.child("legacy/data");
+        legacy_data.create_dir_all()?;
+        let legacy_cache = temp.child("legacy/cache");
+        legacy_cache.create_dir_all()?;
+
+        let preferred_dirs = (
+            preferred_config.path().to_path_buf(),
+            preferred_data.path().to_path_buf(),
+            preferred_cache.path().to_path_buf(),
+        );
+        let legacy_dirs = (
+            legacy_config.path().to_path_buf(),
+            legacy_data.path().to_path_buf(),
+            legacy_cache.path().to_path_buf(),
+        );
+        let (config, data, cache) = adopt_legacy_dirs(preferred_dirs, &legacy_dirs);
+
+        assert_eq!(config, preferred_config.path());
+        assert_eq!(data, preferred_data.path());
+        assert_eq!(cache, preferred_cache.path());
         Ok(())
     }
 
@@ -698,7 +868,7 @@ list = \"value\"
 
     #[cfg(unix)]
     #[test]
-    fn ensure_default_layout_errors_when_dropin_creation_fails() -> Result<()> {
+    fn ensure_default_layout_errors_when_config_write_fails() -> Result<()> {
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
@@ -713,7 +883,8 @@ list = \"value\"
 
         let err = ensure_default_layout(&dirs).unwrap_err();
         assert!(
-            err.to_string().contains("failed to create directory"),
+            err.to_string()
+                .contains("failed to write default configuration"),
             "unexpected error: {err:?}"
         );
         Ok(())
@@ -872,7 +1043,10 @@ list = \"value\"
         assert!(loaded.directories.data_dir.exists());
         assert!(loaded.directories.cache_dir.exists());
         assert!(loaded.directories.config_dir.join(MAIN_CONFIG).is_file());
-        assert!(loaded.directories.config_dir.join(DROPIN_DIR).is_dir());
+        assert!(
+            !loaded.directories.config_dir.join(DROPIN_DIR).exists(),
+            "drop-in directory should be created lazily"
+        );
         assert!(
             loaded
                 .sources
