@@ -4,10 +4,12 @@ nextest-version = "0.9.95"
 status-level = "pass"
 final-status-level = "pass"
 success-output = "immediate"
+test-timeout = "10s"
 
 [profile.ci]
 fail-fast = false
 slow-timeout = { period = "90s", terminate-after = 3, grace-period = "30s" }
+test-timeout = "10s"
 
 [profile.ci.junit]
 path = "target/nextest/ci/junit.xml"

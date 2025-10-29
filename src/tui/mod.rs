@@ -49,7 +49,7 @@ use unicode_width::UnicodeWidthStr;
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
 const MESSAGE_FILTER_MODE: &str = "Filtering results";
-const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-P cycle provider filter  •  Ctrl-F toggle search mode  •  Esc quit";
+const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab/Ctrl-I show id  •  Ctrl-Shift-P emit  •  Enter run  •  Ctrl-P cycle provider filter  •  Ctrl-F toggle search mode  •  Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
 const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 
@@ -193,6 +193,14 @@ fn dispatch_outcome(outcome: Option<Outcome>) -> Result<()> {
             },
         ),
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
+        Some(Outcome::Export(transcript)) => {
+            app::export_markdown(&transcript);
+            Ok(())
+        }
+        Some(Outcome::ShowId(id)) => {
+            println!("{id}");
+            Ok(())
+        }
         None => Ok(()),
     }
 }
@@ -201,6 +209,8 @@ fn dispatch_outcome(outcome: Option<Outcome>) -> Result<()> {
 enum Outcome {
     Emit(PipelinePlan),
     Execute(PipelinePlan),
+    Export(Transcript),
+    ShowId(String),
 }
 
 struct AppState<'ctx> {
@@ -982,10 +992,22 @@ impl<'ctx> AppState<'ctx> {
                 self.set_temporary_status_message(mode_label.to_string(), Duration::from_secs(3));
                 Ok(false)
             }
-            (KeyCode::Tab, _) => {
+            (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                self.export_selected_session()?;
+                Ok(false)
+            }
+            (KeyCode::Char(ch), mods)
+                if (ch == 'p' || ch == 'P')
+                    && mods.contains(KeyModifiers::CONTROL)
+                    && mods.contains(KeyModifiers::SHIFT) =>
+            {
                 if let Some(plan) = self.build_plan()? {
                     self.outcome = Some(Outcome::Emit(plan));
                 }
+                Ok(false)
+            }
+            (KeyCode::Tab, _) => {
+                self.show_selected_session_id();
                 Ok(false)
             }
             (KeyCode::Enter, _) => {
@@ -1039,6 +1061,44 @@ impl<'ctx> AppState<'ctx> {
                     self.message = Some(message.clone());
                 }
                 Ok(None)
+            }
+        }
+    }
+
+    fn export_selected_session(&mut self) -> Result<()> {
+        let selection = self.entries.get(self.index).cloned();
+        match selection {
+            Some(Entry::Session(session)) => match self.ctx.db.fetch_transcript(&session.id)? {
+                Some(transcript) => {
+                    self.outcome = Some(Outcome::Export(transcript));
+                }
+                None => {
+                    self.set_temporary_status_message(
+                        "Transcript not found for export".to_string(),
+                        Duration::from_secs(3),
+                    );
+                }
+            },
+            _ => {
+                self.set_temporary_status_message(
+                    "Select a session before exporting".to_string(),
+                    Duration::from_secs(3),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn show_selected_session_id(&mut self) {
+        match self.entries.get(self.index) {
+            Some(Entry::Session(session)) => {
+                self.outcome = Some(Outcome::ShowId(session.id.clone()));
+            }
+            _ => {
+                self.set_temporary_status_message(
+                    "Select a session to show its id".to_string(),
+                    Duration::from_secs(3),
+                );
             }
         }
     }
@@ -2286,6 +2346,95 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_ctrl_e_exports_session() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("export.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"export\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-export")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+
+        if let Some((idx, Entry::Session(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))?;
+            match state.outcome {
+                Some(Outcome::Export(ref transcript)) => {
+                    assert_eq!(transcript.session.id, "sess-export");
+                }
+                _ => panic!("expected export outcome"),
+            }
+            assert!(state.message.is_none());
+        } else {
+            panic!("expected session entry");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_ctrl_e_requires_session_selection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+
+        if let Some((idx, Entry::Profile(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Profile(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))?;
+            assert!(state.outcome.is_none());
+            assert!(state.overlay_message.is_some());
+            if let Some((message, _)) = &state.overlay_message {
+                assert!(message.contains("Select a session"));
+            }
+        } else {
+            panic!("expected profile entry");
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn build_plan_empty_entry_sets_message() -> Result<()> {
         let temp = TempDir::new()?;
@@ -2378,6 +2527,25 @@ mod tests {
             argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
         };
         dispatch_outcome(Some(Outcome::Execute(exec_plan)))?;
+
+        let transcript = Transcript {
+            session: SessionSummary {
+                id: "sess-export".into(),
+                provider: "codex".into(),
+                label: None,
+                path: PathBuf::from("/tmp/sess-export"),
+                uuid: None,
+                first_prompt: None,
+                actionable: true,
+                created_at: None,
+                started_at: None,
+                last_active: None,
+                size: 0,
+                mtime: 0,
+            },
+            messages: Vec::new(),
+        };
+        dispatch_outcome(Some(Outcome::Export(transcript)))?;
         dispatch_outcome(None)?;
         Ok(())
     }
@@ -2438,8 +2606,8 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
         let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
-            KeyCode::Tab,
-            KeyModifiers::NONE,
+            KeyCode::Char('P'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ))]);
         let outcome = run_with_terminal(&mut ctx, &mut terminal, &mut events)?;
         match outcome {
@@ -2745,7 +2913,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_app_emits_plan_on_tab_event() -> Result<()> {
+    fn run_app_emits_plan_on_ctrl_shift_p_event() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
         let directories = build_directories(&temp);
@@ -2772,13 +2940,96 @@ mod tests {
         };
 
         let mut events = FakeEvents::new(vec![Event::Key(KeyEvent::new(
-            KeyCode::Tab,
-            KeyModifiers::NONE,
+            KeyCode::Char('P'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ))]);
         let backend = TestBackend::new(60, 12);
         let mut terminal = Terminal::new(backend)?;
         let result = run_app(&mut ctx, &mut terminal, &mut events)?;
         assert!(matches!(result, Some(Outcome::Emit(_))));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_tab_shows_session_id() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("show-id.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"show\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-show")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, Entry::Session(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+            match state.outcome {
+                Some(Outcome::ShowId(id)) => assert_eq!(id, "sess-show"),
+                other => panic!("expected show id outcome, got {other:?}"),
+            }
+        } else {
+            panic!("expected session entry");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_tab_requires_session_selection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+
+        if let Some((idx, Entry::Profile(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Profile(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+            assert!(state.outcome.is_none());
+            assert!(state.overlay_message.is_some());
+        } else {
+            panic!("expected profile entry");
+        }
+
         Ok(())
     }
 

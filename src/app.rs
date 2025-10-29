@@ -731,7 +731,7 @@ fn summary_to_json(
     })
 }
 
-fn export_markdown(transcript: &Transcript) {
+pub(crate) fn export_markdown(transcript: &Transcript) {
     for line in transcript.markdown_lines(None) {
         println!("{line}");
     }

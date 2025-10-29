@@ -105,7 +105,9 @@ The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and v
 - Typing – start entering text to filter; `Backspace` edits the filter.
 - `Ctrl+F` – toggle between prompt search and full-text search.
 - `Ctrl+P` – cycle provider filters when multiple backends are configured.
-- `Tab` – emit the assembled pipeline to stdout (useful for scripting).
+- `Tab` / `Ctrl+I` – print the selected session id to stdout.
+- `Ctrl+Shift+P` – emit the assembled pipeline to stdout (useful for scripting).
+- `Ctrl+E` – export the current session transcript as Markdown.
 - `Enter` – launch the selected session or profile.
 - `Esc` – leave filter mode or close the TUI.
 
