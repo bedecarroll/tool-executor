@@ -7,7 +7,7 @@ multilingual = false
 src = "src"
 
 [build]
-build-dir = "build"
+build-dir = "book"
 create-missing = true
 
 [output.html]
@@ -24,6 +24,6 @@ copyable = true
 
 [output.html.search]
 use-boolean-and = true
-boost-title = 2.0
-boost-hierarchy = 1.2
-boost-paragraph = 1.0
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
