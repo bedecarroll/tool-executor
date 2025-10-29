@@ -42,7 +42,6 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         Some(Command::Config(cmd)) => app.config(cmd),
         Some(Command::Doctor) => app.doctor(),
         Some(Command::Internal(_)) => unreachable!("internal command handled above"),
-        #[cfg(feature = "self-update")]
         Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
         None => app.run_ui(),
     };

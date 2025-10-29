@@ -32,7 +32,6 @@ pub enum Command {
     /// Run environment diagnostics.
     Doctor,
     /// Update tx to the latest released version.
-    #[cfg(feature = "self-update")]
     SelfUpdate(SelfUpdateCommand),
     /// Internal helpers (unstable, subject to change).
     #[command(subcommand, hide = true)]
@@ -161,7 +160,6 @@ fn parse_role(raw: &str) -> Result<String, String> {
     }
 }
 
-#[cfg(feature = "self-update")]
 #[derive(Debug, Args)]
 pub struct SelfUpdateCommand {
     /// Update to a specific release tag (defaults to the latest).

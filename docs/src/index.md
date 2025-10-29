@@ -8,6 +8,6 @@ tx is a thin, configurable launcher for AI code-assistant sessions. It gives you
 - Search recent work with a prompt-first filter or full-text indexing, then resume a session exactly where it left off.
 - Compose providers, pre snippets, post processors, and wrappers with TOML configuration—no bespoke scripting required.
 - Keep logs, cache, and configuration under XDG-friendly directories for predictable automation.
-- Optional integrations such as prompt-assembler and self-update extend tx without complicating the core workflow.
+- Integrations such as prompt-assembler and the built-in self-update command extend tx without complicating the core workflow.
 
 This book walks through the features from first install to advanced automation so you can make tx part of your daily development loop.

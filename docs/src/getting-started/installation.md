@@ -1,6 +1,24 @@
 # Install
 
-tx publishes as a standard Rust binary. Install from a local clone while the project is pre-release, or use `cargo install` once published.
+tx publishes as a standard Rust binary. Install from the GitHub releases if you want a ready-to-run build, or compile from source when you need to hack locally.
+
+## Install from a release
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/bedecarroll/tool-executor/releases/latest/download/tool-executor-installer.sh \
+  | sh
+```
+
+Windows users can run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/bedecarroll/tool-executor/releases/latest/download/tool-executor-installer.ps1 | iex"
+```
+
+The scripts install `tx` into your Cargo binary directory and verify checksums. Manual downloads are available on the [release page](https://github.com/bedecarroll/tool-executor/releases/latest).
+
+## Build from source
 
 ```bash
 # from a cloned repository

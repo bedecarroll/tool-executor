@@ -201,6 +201,19 @@ wrap = "wrap"
 }
 
 #[test]
+fn self_update_help_is_available() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["self-update", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("Usage: tx self-update"))
+        .stdout(contains("--version <TAG>"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn export_errors_when_session_missing() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);

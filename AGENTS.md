@@ -86,12 +86,12 @@ Run tasks with `mise run <task>`:
 ## Releases
 
 - `cargo dist` configuration is user-managed. Run `cargo dist init` when you are ready to automate releases, then commit the generated files (see the `dist-*` tasks).
-- Cargo-dist archives default to `.tar.gz` on Unix and `.zip` on Windows so the optional `self-update` feature can unpack release assets without extra configuration.
+- Cargo-dist archives default to `.tar.gz` on Unix and `.zip` on Windows so the built-in self-update command can unpack release assets without extra configuration.
 - Document each release in `CHANGELOG.md` following Keep a Changelog conventions.
 
 ## Optional Features
 
-- Enable the `self-update` cargo feature to compile the `self-update` subcommand, which updates from GitHub releases.
+- Enable the `benchmarks` cargo feature to compile the Criterion suite when profiling pipeline performance.
 
 ## Housekeeping
 
