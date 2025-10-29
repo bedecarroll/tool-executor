@@ -143,13 +143,8 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
             && cache_override.is_none()
             && let Some(legacy_dirs) = legacy_project_dirs()
         {
-            let (chosen_config, chosen_data, chosen_cache) = adopt_legacy_dirs(
-                (config_dir.clone(), data_dir.clone(), cache_dir.clone()),
-                &legacy_dirs,
-            );
-            config_dir = chosen_config;
-            data_dir = chosen_data;
-            cache_dir = chosen_cache;
+            (config_dir, data_dir, cache_dir) =
+                adopt_legacy_dirs((config_dir, data_dir, cache_dir), &legacy_dirs);
         }
     }
 
