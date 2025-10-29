@@ -7,7 +7,7 @@ multilingual = false
 src = "src"
 
 [build]
-build-dir = "build"
+build-dir = "book"
 create-missing = true
 
 [output.html]
