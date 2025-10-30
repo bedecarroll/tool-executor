@@ -21,7 +21,7 @@ namespace = "pa"
 ```
 
 - `namespace` controls the prefix shown in the TUI (for example `pa/bootstrap`).
-- Press `R` in the TUI to refresh the list; tx re-runs `pa list --json` on demand.
+- Restart tx to refresh the list; the TUI re-runs `pa list --json` when it launches.
 
 ## Using Virtual Profiles
 
@@ -47,6 +47,6 @@ With that configuration, selecting `pa/hello` captures the generator output and 
 
 - Run `tx doctor` to confirm `pa` is discoverable.
 - Increase logging with `RUST_LOG=tx=debug tx` if profiles disappear.
-- Restart tx or press `R` after changing prompts in the `prompt-assembler` repository.
+- Restart tx after changing prompts in the `prompt-assembler` repository.
 
 Known limitation: only the prompt name, description, and tags are captured today. Future releases may forward richer metadata.
