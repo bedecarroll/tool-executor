@@ -1,6 +1,7 @@
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use color_eyre::Result;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use tool_executor::config;
 
