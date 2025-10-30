@@ -104,6 +104,7 @@ fn load_creates_default_layout_when_config_missing() -> Result<()> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn load_creates_default_layout_with_default_directories() -> Result<()> {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new()?;
@@ -126,6 +127,16 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
         xdg_cache.create_dir_all()?;
     }
 
+    #[cfg(windows)]
+    let appdata_dir = temp.child("appdata");
+    #[cfg(windows)]
+    let localappdata_dir = temp.child("localappdata");
+    #[cfg(windows)]
+    {
+        appdata_dir.create_dir_all()?;
+        localappdata_dir.create_dir_all()?;
+    }
+
     let original_home = std::env::var("HOME").ok();
     let original_user = std::env::var("USERPROFILE").ok();
     let original_codex = std::env::var("CODEX_HOME").ok();
@@ -135,6 +146,10 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
     let original_xdg_data = std::env::var("XDG_DATA_HOME").ok();
     #[cfg(not(windows))]
     let original_xdg_cache = std::env::var("XDG_CACHE_HOME").ok();
+    #[cfg(windows)]
+    let original_appdata = std::env::var("APPDATA").ok();
+    #[cfg(windows)]
+    let original_localappdata = std::env::var("LOCALAPPDATA").ok();
     let original_tx_config = std::env::var("TX_CONFIG_DIR").ok();
     let original_tx_data = std::env::var("TX_DATA_DIR").ok();
     let original_tx_cache = std::env::var("TX_CACHE_DIR").ok();
@@ -148,6 +163,11 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
             set_env("XDG_CONFIG_HOME", xdg_config.path());
             set_env("XDG_DATA_HOME", xdg_data.path());
             set_env("XDG_CACHE_HOME", xdg_cache.path());
+        }
+        #[cfg(windows)]
+        {
+            set_env("APPDATA", appdata_dir.path());
+            set_env("LOCALAPPDATA", localappdata_dir.path());
         }
         unsafe {
             std::env::remove_var("TX_CONFIG_DIR");
@@ -204,6 +224,10 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
     clear_env("XDG_DATA_HOME", original_xdg_data);
     #[cfg(not(windows))]
     clear_env("XDG_CACHE_HOME", original_xdg_cache);
+    #[cfg(windows)]
+    clear_env("APPDATA", original_appdata);
+    #[cfg(windows)]
+    clear_env("LOCALAPPDATA", original_localappdata);
     clear_env("TX_CONFIG_DIR", original_tx_config);
     clear_env("TX_DATA_DIR", original_tx_data);
     clear_env("TX_CACHE_DIR", original_tx_cache);
