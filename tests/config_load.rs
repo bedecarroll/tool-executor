@@ -180,7 +180,7 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
             PathBuf::from(std::env::var("XDG_CONFIG_HOME").expect("XDG_CONFIG_HOME")).join("tx");
         #[cfg(windows)]
         let expected_config_dir =
-            PathBuf::from(std::env::var("APPDATA").expect("APPDATA")).join("tx");
+            PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA")).join("tx");
 
         #[cfg(not(windows))]
         let expected_data_dir =
@@ -189,10 +189,9 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
         let expected_cache_dir =
             PathBuf::from(std::env::var("XDG_CACHE_HOME").expect("XDG_CACHE_HOME")).join("tx");
         #[cfg(windows)]
-        let expected_data_dir =
-            PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA")).join("tx");
+        let expected_data_dir = expected_config_dir.clone();
         #[cfg(windows)]
-        let expected_cache_dir = expected_data_dir.clone();
+        let expected_cache_dir = expected_config_dir.clone();
 
         assert_eq!(loaded.directories.config_dir, expected_config_dir);
         assert_eq!(loaded.directories.data_dir, expected_data_dir);
