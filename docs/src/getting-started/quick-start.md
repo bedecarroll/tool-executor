@@ -35,6 +35,6 @@ Follow this checklist to boot a useful environment.
    cmd = "tmux new -s tx-{{session.id}} '{{CMD}}'"
    ```
 
-4. Launch `tx` in the terminal. Use `Tab` to insert the assembled command into your shell, or press `Enter` to execute it immediately.
+4. Launch `tx` in the terminal. Use `Tab` to insert the assembled command into your shell, press `Enter` to execute it immediately, `Ctrl+Y` to print the selected session ID, or `Ctrl+E` to export the session transcript without leaving the UI.
 
 At this point the TUI lists recent sessions on the left and configured profiles on the right. Select an item, review the preview pane, then run it.
