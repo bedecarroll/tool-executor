@@ -32,6 +32,7 @@ fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
 
     let assert = cmd.assert().success().stderr(is_empty());
     let cli_stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+    let cli_normalized = normalize_newlines(&cli_stdout);
 
     let asset_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("docs")
@@ -39,10 +40,11 @@ fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
         .join("assets")
         .join("config-schema.json");
     let asset_contents = fs::read_to_string(&asset_path)?;
+    let asset_normalized = normalize_newlines(&asset_contents);
 
     assert_eq!(
-        asset_contents.trim_end(),
-        cli_stdout.trim_end(),
+        asset_normalized.trim_end(),
+        cli_normalized.trim_end(),
         "docs asset at {} is out of date",
         asset_path.display()
     );
@@ -98,4 +100,8 @@ fn config_schema_exposes_stdin_mode_enum() -> Result<()> {
     );
 
     Ok(())
+}
+
+fn normalize_newlines(input: &str) -> String {
+    input.replace("\r\n", "\n")
 }
