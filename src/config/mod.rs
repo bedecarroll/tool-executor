@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
-use directories::{BaseDirs, ProjectDirs};
+use directories::BaseDirs;
+#[cfg(any(target_os = "macos", windows))]
+use directories::ProjectDirs;
 use itertools::Itertools;
 use schemars::schema_for;
 use toml::Value;
@@ -136,18 +138,6 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
         .clone()
         .unwrap_or_else(|| default_cache_dir.clone());
 
-    #[cfg(target_os = "macos")]
-    {
-        if config_override.is_none()
-            && data_override.is_none()
-            && cache_override.is_none()
-            && let Some(legacy_dirs) = legacy_project_dirs()
-        {
-            (config_dir, data_dir, cache_dir) =
-                adopt_legacy_dirs((config_dir, data_dir, cache_dir), &legacy_dirs);
-        }
-    }
-
     Ok(AppDirectories {
         config_dir,
         data_dir,
@@ -156,55 +146,53 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
 }
 
 fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
-    #[cfg(target_os = "macos")]
+    #[cfg(windows)]
     {
         resolve_default_directories_with(
-            || {
-                BaseDirs::new().map(|dirs| {
-                    (
-                        dirs.config_dir().join(APP_NAME),
-                        dirs.data_dir().join(APP_NAME),
-                        dirs.cache_dir().join(APP_NAME),
-                    )
-                })
-            },
             || {
                 ProjectDirs::from("", "", APP_NAME).map(|dirs| {
                     (
                         dirs.config_dir().to_path_buf(),
                         dirs.data_dir().to_path_buf(),
                         dirs.cache_dir().to_path_buf(),
+                    )
+                })
+            },
+            || {
+                BaseDirs::new().map(|dirs| {
+                    (
+                        dirs.config_dir().join(APP_NAME),
+                        dirs.data_dir().join(APP_NAME),
+                        dirs.cache_dir().join(APP_NAME),
                     )
                 })
             },
         )
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(windows))]
     {
-        resolve_default_directories_with(
-            || {
-                ProjectDirs::from("", "", APP_NAME).map(|dirs| {
-                    (
-                        dirs.config_dir().to_path_buf(),
-                        dirs.data_dir().to_path_buf(),
-                        dirs.cache_dir().to_path_buf(),
-                    )
-                })
-            },
-            || {
-                BaseDirs::new().map(|dirs| {
-                    (
-                        dirs.config_dir().join(APP_NAME),
-                        dirs.data_dir().join(APP_NAME),
-                        dirs.cache_dir().join(APP_NAME),
-                    )
-                })
-            },
-        )
+        fn xdg_dir(var: &str, home: &Path, fallback: &str) -> PathBuf {
+            env::var_os(var).map_or_else(|| home.join(fallback), PathBuf::from)
+        }
+
+        let base_dirs = BaseDirs::new()
+            .ok_or_else(|| eyre!("unable to resolve home directory for {APP_NAME}"))?;
+        let home = base_dirs.home_dir();
+
+        let config_root = xdg_dir("XDG_CONFIG_HOME", home, ".config");
+        let data_root = xdg_dir("XDG_DATA_HOME", home, ".local/share");
+        let cache_root = xdg_dir("XDG_CACHE_HOME", home, ".cache");
+
+        Ok((
+            config_root.join(APP_NAME),
+            data_root.join(APP_NAME),
+            cache_root.join(APP_NAME),
+        ))
     }
 }
 
+#[cfg(any(test, windows))]
 fn resolve_default_directories_with<P, B>(
     project_dirs: P,
     base_dirs: B,
@@ -237,41 +225,6 @@ where
     Err(eyre!(
         "unable to resolve platform directories for {APP_NAME}"
     ))
-}
-
-#[cfg(target_os = "macos")]
-fn legacy_project_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    ProjectDirs::from("", "", APP_NAME).map(|dirs| {
-        (
-            dirs.config_dir().to_path_buf(),
-            dirs.data_dir().to_path_buf(),
-            dirs.cache_dir().to_path_buf(),
-        )
-    })
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn adopt_legacy_dirs(
-    preferred: (PathBuf, PathBuf, PathBuf),
-    legacy: &(PathBuf, PathBuf, PathBuf),
-) -> (PathBuf, PathBuf, PathBuf) {
-    let (legacy_config, legacy_data, legacy_cache) = legacy;
-    (
-        choose_existing(preferred.0, legacy_config.as_path()),
-        choose_existing(preferred.1, legacy_data.as_path()),
-        choose_existing(preferred.2, legacy_cache.as_path()),
-    )
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn choose_existing(preferred: PathBuf, legacy: &Path) -> PathBuf {
-    if preferred.exists() {
-        preferred
-    } else if legacy.exists() {
-        legacy.to_path_buf()
-    } else {
-        preferred
-    }
 }
 
 fn ensure_default_layout(dirs: &AppDirectories) -> Result<()> {
@@ -557,72 +510,6 @@ mod tests {
         );
         let resolved = resolve_default_directories_with(|| Some(fake.clone()), || unreachable!())?;
         assert_eq!(resolved, fake);
-        Ok(())
-    }
-
-    #[test]
-    fn adopt_legacy_dirs_prefers_existing_legacy() -> Result<()> {
-        let temp = TempDir::new()?;
-
-        let preferred = (
-            temp.child("preferred/config").path().to_path_buf(),
-            temp.child("preferred/data").path().to_path_buf(),
-            temp.child("preferred/cache").path().to_path_buf(),
-        );
-
-        let legacy_config = temp.child("legacy/config");
-        legacy_config.create_dir_all()?;
-        let legacy_data = temp.child("legacy/data");
-        legacy_data.create_dir_all()?;
-        let legacy_cache = temp.child("legacy/cache");
-        legacy_cache.create_dir_all()?;
-
-        let legacy = (
-            legacy_config.path().to_path_buf(),
-            legacy_data.path().to_path_buf(),
-            legacy_cache.path().to_path_buf(),
-        );
-
-        let (config, data, cache) = adopt_legacy_dirs(preferred, &legacy);
-        assert_eq!(config, legacy_config.path());
-        assert_eq!(data, legacy_data.path());
-        assert_eq!(cache, legacy_cache.path());
-        Ok(())
-    }
-
-    #[test]
-    fn adopt_legacy_dirs_keeps_preferred_when_present() -> Result<()> {
-        let temp = TempDir::new()?;
-
-        let preferred_config = temp.child("preferred/config");
-        preferred_config.create_dir_all()?;
-        let preferred_data = temp.child("preferred/data");
-        preferred_data.create_dir_all()?;
-        let preferred_cache = temp.child("preferred/cache");
-        preferred_cache.create_dir_all()?;
-
-        let legacy_config = temp.child("legacy/config");
-        legacy_config.create_dir_all()?;
-        let legacy_data = temp.child("legacy/data");
-        legacy_data.create_dir_all()?;
-        let legacy_cache = temp.child("legacy/cache");
-        legacy_cache.create_dir_all()?;
-
-        let preferred_dirs = (
-            preferred_config.path().to_path_buf(),
-            preferred_data.path().to_path_buf(),
-            preferred_cache.path().to_path_buf(),
-        );
-        let legacy_dirs = (
-            legacy_config.path().to_path_buf(),
-            legacy_data.path().to_path_buf(),
-            legacy_cache.path().to_path_buf(),
-        );
-        let (config, data, cache) = adopt_legacy_dirs(preferred_dirs, &legacy_dirs);
-
-        assert_eq!(config, preferred_config.path());
-        assert_eq!(data, preferred_data.path());
-        assert_eq!(cache, preferred_cache.path());
         Ok(())
     }
 
