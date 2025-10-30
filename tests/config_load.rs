@@ -3,7 +3,10 @@ use assert_fs::prelude::*;
 use color_eyre::Result;
 #[cfg(not(windows))]
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use tool_executor::config;
+
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn set_env(key: &str, value: &std::path::Path) {
     unsafe {
@@ -23,6 +26,7 @@ fn clear_env(key: &str, original: Option<String>) {
 
 #[test]
 fn load_merges_dropins_with_override_directory() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new()?;
     let config_dir = temp.child("config");
     config_dir.create_dir_all()?;
@@ -57,6 +61,7 @@ fn load_merges_dropins_with_override_directory() -> Result<()> {
 
 #[test]
 fn load_creates_default_layout_when_config_missing() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new()?;
     let config_dir = temp.child("config");
     let data_dir = temp.child("data");
@@ -100,6 +105,7 @@ fn load_creates_default_layout_when_config_missing() -> Result<()> {
 
 #[test]
 fn load_creates_default_layout_with_default_directories() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new()?;
     let home_dir = temp.child("home");
     let codex_home = temp.child("codex-home");
