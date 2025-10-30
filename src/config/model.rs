@@ -3,7 +3,11 @@ use color_eyre::eyre::{WrapErr, eyre};
 use directories::BaseDirs;
 use indexmap::IndexMap;
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{InstanceType, Metadata, Schema, SchemaObject, SingleOrVec};
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
+use serde_json::json;
 use shellexpand::full;
 use std::env;
 use std::path::PathBuf;
@@ -312,6 +316,74 @@ impl RawDefaults {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawStdinMode {
+    Pipe,
+    CaptureArg,
+}
+
+impl Default for RawStdinMode {
+    fn default() -> Self {
+        Self::Pipe
+    }
+}
+
+impl RawStdinMode {
+    fn into_mode(self) -> StdinMode {
+        match self {
+            RawStdinMode::Pipe => StdinMode::Pipe,
+            RawStdinMode::CaptureArg => StdinMode::CaptureArg,
+        }
+    }
+
+    fn parse_token(raw: &str) -> Option<Self> {
+        if raw.is_empty() {
+            return Some(Self::Pipe);
+        }
+        let normalized = raw.to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "pipe" => Some(Self::Pipe),
+            "capture_arg" => Some(Self::CaptureArg),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RawStdinMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let trimmed = raw.trim();
+        RawStdinMode::parse_token(trimmed)
+            .ok_or_else(|| de::Error::unknown_variant(trimmed, &["pipe", "capture_arg"]))
+    }
+}
+
+impl JsonSchema for RawStdinMode {
+    fn schema_name() -> String {
+        "RawStdinMode".to_string()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        let schema = SchemaObject {
+            instance_type: Some(SingleOrVec::from(InstanceType::String)),
+            enum_values: Some(vec![json!("pipe"), json!("capture_arg")]),
+            metadata: Some(Box::new(Metadata {
+                default: Some(json!("pipe")),
+                description: Some(
+                    "Controls how tx streams prompts to provider executables. Use 'capture_arg' to pass the prompt as an argument."
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        Schema::Object(schema)
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct RawProvider {
     bin: Option<String>,
@@ -322,7 +394,7 @@ pub(crate) struct RawProvider {
     #[serde(default)]
     stdin_to: Option<String>,
     #[serde(default)]
-    stdin_mode: Option<String>,
+    stdin_mode: RawStdinMode,
 }
 
 impl RawProvider {
@@ -332,7 +404,7 @@ impl RawProvider {
             .ok_or_else(|| eyre!("provider '{name}' is missing required field 'bin'"))?;
         let session_roots = infer_session_roots(&name);
 
-        let stdin_mode = parse_stdin_mode(self.stdin_mode.as_deref())?;
+        let stdin_mode = self.stdin_mode.into_mode();
 
         let stdin_args = match self.stdin_to {
             Some(ref raw) => parse_stdin(raw, &name)?,
@@ -436,21 +508,6 @@ fn parse_stdin(raw: &str, provider: &str) -> Result<Vec<String>> {
             args.pop();
         }
         Ok(args)
-    }
-}
-
-fn parse_stdin_mode(raw: Option<&str>) -> Result<StdinMode> {
-    let Some(value) = raw else {
-        return Ok(StdinMode::Pipe);
-    };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(StdinMode::Pipe);
-    }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "pipe" => Ok(StdinMode::Pipe),
-        "capture_arg" | "capture-arg" => Ok(StdinMode::CaptureArg),
-        other => Err(eyre!("unknown stdin_mode '{other}'")),
     }
 }
 
@@ -842,10 +899,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_stdin_mode_rejects_unknown_value() {
-        let err = parse_stdin_mode(Some("weird")).unwrap_err();
+    fn raw_stdin_mode_resolves_aliases() {
+        let capture: RawStdinMode = serde_json::from_str("\"capture-arg\"").expect("deserialize");
+        assert!(matches!(capture.into_mode(), StdinMode::CaptureArg));
+
+        let pipe: RawStdinMode = serde_json::from_str("\"PIPE\"").expect("deserialize");
+        assert!(matches!(pipe.into_mode(), StdinMode::Pipe));
+    }
+
+    #[test]
+    fn raw_stdin_mode_rejects_unknown_value() {
+        let err = serde_json::from_str::<RawStdinMode>("\"weird\"").unwrap_err();
         assert!(
-            err.to_string().contains("unknown stdin_mode 'weird'"),
+            err.to_string().contains("unknown variant"),
             "unexpected error: {err}"
         );
     }
