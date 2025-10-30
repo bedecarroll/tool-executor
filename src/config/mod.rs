@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use directories::BaseDirs;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 use directories::ProjectDirs;
 use itertools::Itertools;
 use schemars::schema_for;
@@ -125,16 +125,13 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
     let data_override = env::var("TX_DATA_DIR").ok().map(PathBuf::from);
     let cache_override = env::var("TX_CACHE_DIR").ok().map(PathBuf::from);
 
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut config_dir = config_override
+    let config_dir = config_override
         .clone()
         .unwrap_or_else(|| default_config_dir.clone());
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut data_dir = data_override
+    let data_dir = data_override
         .clone()
         .unwrap_or_else(|| default_data_dir.clone());
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut cache_dir = cache_override
+    let cache_dir = cache_override
         .clone()
         .unwrap_or_else(|| default_cache_dir.clone());
 
