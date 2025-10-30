@@ -14,7 +14,7 @@ Generate the complete JSON Schema with `tx config schema --pretty` whenever you 
 
 Many editors understand the `#:schema` directive at the top of a TOML file. Add the following line to any `tx` configuration file to enable inline validation, autocomplete, and hover docs:
 
-```
+```toml
 #:schema https://tx.bedecarroll.com/assets/config-schema.json
 ```
 
