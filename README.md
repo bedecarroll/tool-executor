@@ -126,7 +126,7 @@ Run the coverage suite with `mise`:
 mise run coverage
 ```
 
-The task executes `cargo llvm-cov` with the `ci` Nextest profile, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` to inspect annotated sources. Running `mise run test` generates `target/nextest/ci/junit.xml`, which feeds Codecov’s Test Analytics dashboard alongside the coverage upload.
+Both `mise run test` and `mise run coverage` drive `cargo llvm-cov` with the `ci` Nextest profile. The coverage task starts from a clean workspace, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 90%. Running `mise run test` performs the instrumented run, produces `target/nextest/ci/junit.xml` for Codecov’s Test Analytics dashboard, and follows up with `cargo insta test`.
 
 ### Benchmarks
 

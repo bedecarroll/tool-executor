@@ -34,7 +34,7 @@ use std::borrow::Cow;
 
 use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
-#[cfg(all(any(test, coverage), unix))]
+#[cfg(all(test, unix))]
 use crate::indexer::Indexer;
 use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
 use crate::prompts::PromptStatus;
@@ -1088,7 +1088,7 @@ impl<'ctx> AppState<'ctx> {
         Ok(())
     }
 
-    #[cfg(all(any(test, coverage), unix))]
+    #[cfg(all(test, unix))]
     fn reindex(&mut self) -> Result<()> {
         let mut indexer = Indexer::new(self.ctx.db, self.ctx.config);
         let report = indexer.run()?;
