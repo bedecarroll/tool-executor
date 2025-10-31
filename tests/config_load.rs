@@ -1,6 +1,8 @@
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use color_eyre::Result;
+#[cfg(windows)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use tool_executor::config;
@@ -178,31 +180,53 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
         #[cfg(not(windows))]
         let expected_config_dir =
             PathBuf::from(std::env::var("XDG_CONFIG_HOME").expect("XDG_CONFIG_HOME")).join("tx");
-        #[cfg(windows)]
-        let expected_config_dir =
-            PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA")).join("tx");
-
         #[cfg(not(windows))]
         let expected_data_dir =
             PathBuf::from(std::env::var("XDG_DATA_HOME").expect("XDG_DATA_HOME")).join("tx");
         #[cfg(not(windows))]
         let expected_cache_dir =
             PathBuf::from(std::env::var("XDG_CACHE_HOME").expect("XDG_CACHE_HOME")).join("tx");
+        #[cfg(not(windows))]
+        {
+            assert_eq!(loaded.directories.config_dir, expected_config_dir);
+            assert_eq!(loaded.directories.data_dir, expected_data_dir);
+            assert_eq!(loaded.directories.cache_dir, expected_cache_dir);
+            assert!(expected_config_dir.join("config.toml").is_file());
+            assert!(
+                !expected_config_dir.join("conf.d").exists(),
+                "drop-in directory should not be created by default"
+            );
+            assert!(expected_data_dir.exists());
+            assert!(expected_cache_dir.exists());
+        }
         #[cfg(windows)]
-        let expected_data_dir = expected_config_dir.clone();
-        #[cfg(windows)]
-        let expected_cache_dir = expected_config_dir.clone();
-
-        assert_eq!(loaded.directories.config_dir, expected_config_dir);
-        assert_eq!(loaded.directories.data_dir, expected_data_dir);
-        assert_eq!(loaded.directories.cache_dir, expected_cache_dir);
-        assert!(expected_config_dir.join("config.toml").is_file());
-        assert!(
-            !expected_config_dir.join("conf.d").exists(),
-            "drop-in directory should not be created by default"
-        );
-        assert!(expected_data_dir.exists());
-        assert!(expected_cache_dir.exists());
+        {
+            assert!(
+                loaded
+                    .directories
+                    .config_dir
+                    .ends_with(Path::new("tx").join("config"))
+            );
+            assert!(
+                loaded
+                    .directories
+                    .data_dir
+                    .ends_with(Path::new("tx").join("data"))
+            );
+            assert!(
+                loaded
+                    .directories
+                    .cache_dir
+                    .ends_with(Path::new("tx").join("cache"))
+            );
+            assert!(loaded.directories.config_dir.join("config.toml").is_file());
+            assert!(
+                !loaded.directories.config_dir.join("conf.d").exists(),
+                "drop-in directory should not be created by default"
+            );
+            assert!(loaded.directories.data_dir.exists());
+            assert!(loaded.directories.cache_dir.exists());
+        }
         Ok(())
     })();
 
