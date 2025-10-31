@@ -826,6 +826,7 @@ list = \"value\"
 
     #[test]
     fn gather_project_sources_collects_project_files() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
         let project_file = temp.child(PROJECT_FILE);
         project_file.write_str("provider = \"codex\"")?;

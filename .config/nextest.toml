@@ -10,7 +10,7 @@ fail-fast = false
 slow-timeout = { period = "90s", terminate-after = 3, grace-period = "30s" }
 
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
 
 [store]
 dir = "target/nextest"

@@ -78,8 +78,8 @@ The repository pins Rust 1.90 in `rust-toolchain.toml`, so `cargo` automatically
 ### Resume a session
 
 ```bash
-$ tx search onboarding
-$ tx resume a1b2c3 --emit-command
+tx search onboarding
+tx resume a1b2c3 --emit-command
 ```
 
 Search narrows results to relevant prompts, and resume replays the captured pipeline. Use `--emit-command` to print the shell command tx would run, which helps with debugging or scripting.
@@ -88,15 +88,15 @@ Search narrows results to relevant prompts, and resume replays the captured pipe
 
 ```text
 # Terminal UI
-$ tx
+tx
 
 # Search (prompt mode by default)
-$ tx search refactor
-$ tx search refactor --full-text --role assistant
+tx search refactor
+tx search refactor --full-text --role assistant
 
 # Resume and inspect pipelines
-$ tx resume <session-id>
-$ tx resume <session-id> --emit-command --emit-json
+tx resume <session-id>
+tx resume <session-id> --emit-command --emit-json
 
 # Configuration helpers
 $ tx config list
@@ -126,7 +126,7 @@ Run the coverage suite with `mise`:
 mise run coverage
 ```
 
-The task executes `cargo llvm-cov`, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` to inspect annotated sources.
+The task executes `cargo llvm-cov` with the `ci` Nextest profile, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` to inspect annotated sources. Running `mise run test` generates `target/nextest/ci/junit.xml`, which feeds Codecov’s Test Analytics dashboard alongside the coverage upload.
 
 ### Benchmarks
 
