@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use assert_fs::TempDir;
+use assert_fs::prelude::*;
 use color_eyre::Result;
 use predicates::str::is_empty;
 use serde_json::Value;
@@ -27,8 +29,19 @@ fn config_schema_outputs_json_object() -> Result<()> {
 
 #[test]
 fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config");
+    let data_dir = temp.child("data");
+    let cache_dir = temp.child("cache");
+    config_dir.create_dir_all()?;
+    data_dir.create_dir_all()?;
+    cache_dir.create_dir_all()?;
+
     let mut cmd = Command::cargo_bin("tx")?;
-    cmd.args(["config", "schema", "--pretty"]);
+    cmd.args(["config", "schema", "--pretty"])
+        .env("TX_CONFIG_DIR", config_dir.path())
+        .env("TX_DATA_DIR", data_dir.path())
+        .env("TX_CACHE_DIR", cache_dir.path());
 
     let assert = cmd.assert().success().stderr(is_empty());
     let cli_stdout = String::from_utf8(assert.get_output().stdout.clone())?;

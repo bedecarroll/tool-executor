@@ -3,6 +3,10 @@ use assert_fs::prelude::*;
 use color_eyre::Result;
 #[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
+fn lower_path(path: &Path) -> String {
+    path.to_string_lossy().to_ascii_lowercase()
+}
 #[cfg(not(windows))]
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
@@ -202,23 +206,21 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
         }
         #[cfg(windows)]
         {
+            let config_tail = lower_path(&loaded.directories.config_dir);
+            let data_tail = lower_path(&loaded.directories.data_dir);
+            let cache_tail = lower_path(&loaded.directories.cache_dir);
+
             assert!(
-                loaded
-                    .directories
-                    .config_dir
-                    .ends_with(Path::new("tx").join("config"))
+                config_tail.ends_with(r"tx\config"),
+                "expected path ending with tx\\config, got {config_tail}"
             );
             assert!(
-                loaded
-                    .directories
-                    .data_dir
-                    .ends_with(Path::new("tx").join("data"))
+                data_tail.ends_with(r"tx\data"),
+                "expected path ending with tx\\data, got {data_tail}"
             );
             assert!(
-                loaded
-                    .directories
-                    .cache_dir
-                    .ends_with(Path::new("tx").join("cache"))
+                cache_tail.ends_with(r"tx\cache"),
+                "expected path ending with tx\\cache, got {cache_tail}"
             );
             assert!(loaded.directories.config_dir.join("config.toml").is_file());
             assert!(
