@@ -3,6 +3,7 @@ use assert_fs::prelude::*;
 use color_eyre::Result;
 #[cfg(windows)]
 use std::path::Path;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use tool_executor::config;
