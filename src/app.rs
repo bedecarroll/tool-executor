@@ -1330,6 +1330,43 @@ mod tests {
     }
 
     #[test]
+    fn app_resume_accepts_plain_session_id() -> Result<()> {
+        let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+        let cmd = ResumeCommand {
+            session_id: summary.id.clone(),
+            profile: Some("default".into()),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrap: None,
+            emit_command: true,
+            emit_json: false,
+            vars: Vec::new(),
+            dry_run: false,
+            provider_args: Vec::new(),
+        };
+        app.resume(&cmd)?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_export_errors_when_session_missing_direct() -> Result<()> {
+        let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+        let cmd = ExportCommand {
+            session_id: "missing-session".into(),
+        };
+        let err = app.export(&cmd).expect_err("missing session should error");
+        assert!(err.to_string().contains("not found"));
+        Ok(())
+    }
+
+    #[test]
+    fn app_config_lint_runs() -> Result<()> {
+        let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+        app.config(&ConfigCommand::Lint)?;
+        Ok(())
+    }
+
+    #[test]
     fn collate_search_results_returns_hit_details() -> Result<()> {
         let hit = SearchHit {
             session_id: "sess-123".into(),

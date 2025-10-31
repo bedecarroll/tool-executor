@@ -49,7 +49,7 @@ use unicode_width::UnicodeWidthStr;
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
 const MESSAGE_FILTER_MODE: &str = "Filtering results";
-const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-P cycle provider filter  •  Ctrl-F toggle search mode  •  Esc quit";
+const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-Y print ID  •  Ctrl-E export  •  Ctrl-P filter  •  Ctrl-F search  •  Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
 const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 
@@ -193,6 +193,16 @@ fn dispatch_outcome(outcome: Option<Outcome>) -> Result<()> {
             },
         ),
         Some(Outcome::Execute(plan)) => app::execute_plan(&plan),
+        Some(Outcome::PrintSessionId(session_id)) => {
+            println!("{session_id}");
+            Ok(())
+        }
+        Some(Outcome::ExportMarkdown(lines)) => {
+            for line in lines {
+                println!("{line}");
+            }
+            Ok(())
+        }
         None => Ok(()),
     }
 }
@@ -201,6 +211,8 @@ fn dispatch_outcome(outcome: Option<Outcome>) -> Result<()> {
 enum Outcome {
     Emit(PipelinePlan),
     Execute(PipelinePlan),
+    PrintSessionId(String),
+    ExportMarkdown(Vec<String>),
 }
 
 struct AppState<'ctx> {
@@ -939,6 +951,14 @@ impl<'ctx> AppState<'ctx> {
     fn handle_key_normal(&mut self, key: KeyEvent) -> Result<bool> {
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Ok(true),
+            (KeyCode::Char('y' | 'Y'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.trigger_print_session_id()?;
+                Ok(false)
+            }
+            (KeyCode::Char('e' | 'E'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.trigger_export_markdown()?;
+                Ok(false)
+            }
             (KeyCode::Down, _) => {
                 self.move_selection(1);
                 Ok(false)
@@ -1009,6 +1029,63 @@ impl<'ctx> AppState<'ctx> {
         let next = self.index.saturating_add_signed(delta).min(max_index);
         self.index = next;
         self.list_state.select(Some(self.index));
+    }
+
+    fn selected_session(&self) -> Option<&SessionEntry> {
+        self.entries.get(self.index).and_then(|entry| match entry {
+            Entry::Session(session) => Some(session),
+            _ => None,
+        })
+    }
+
+    fn trigger_print_session_id(&mut self) -> Result<()> {
+        if let Some(session) = self.selected_session() {
+            match self.ctx.db.session_summary(&session.id)? {
+                Some(summary) => {
+                    let identifier = summary
+                        .uuid
+                        .as_deref()
+                        .unwrap_or(summary.id.as_str())
+                        .to_string();
+                    self.outcome = Some(Outcome::PrintSessionId(identifier));
+                }
+                None => {
+                    self.set_temporary_status_message(
+                        "Session not found; try refreshing.".into(),
+                        Duration::from_secs(3),
+                    );
+                }
+            }
+        } else {
+            self.set_temporary_status_message(
+                "Select a session to print its ID.".into(),
+                Duration::from_secs(3),
+            );
+        }
+        Ok(())
+    }
+
+    fn trigger_export_markdown(&mut self) -> Result<()> {
+        if let Some(session) = self.selected_session() {
+            match self.ctx.db.fetch_transcript(&session.id)? {
+                Some(transcript) => {
+                    let lines = transcript.markdown_lines(None);
+                    self.outcome = Some(Outcome::ExportMarkdown(lines));
+                }
+                None => {
+                    self.set_temporary_status_message(
+                        "Transcript not available for export.".into(),
+                        Duration::from_secs(3),
+                    );
+                }
+            }
+        } else {
+            self.set_temporary_status_message(
+                "Select a session to export its transcript.".into(),
+                Duration::from_secs(3),
+            );
+        }
+        Ok(())
     }
 
     #[cfg(all(any(test, coverage), unix))]
@@ -1666,6 +1743,39 @@ mod tests {
         Ok(summary)
     }
 
+    fn insert_session_without_uuid(
+        db: &mut Database,
+        path: &Path,
+        id: &str,
+    ) -> Result<SessionSummary> {
+        let summary = SessionSummary {
+            id: id.into(),
+            provider: "codex".into(),
+            label: Some(format!("Session {id}")),
+            path: path.to_path_buf(),
+            uuid: None,
+            first_prompt: Some("Hello there".into()),
+            actionable: true,
+            created_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            started_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            last_active: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            size: 15,
+            mtime: 20,
+        };
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Hello there",
+            Some(format!("event_msg_{id}")),
+            Some(summary.last_active.unwrap()),
+        );
+        message.is_first = true;
+        let ingest = SessionIngest::new(summary.clone(), vec![message]);
+        db.upsert_session(&ingest)?;
+        Ok(summary)
+    }
+
     #[cfg(unix)]
     #[test]
     fn app_state_navigation_and_plan() -> Result<()> {
@@ -2286,6 +2396,49 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_normal_ctrl_tab_emits_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-tab.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"ctrl_tab\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-ctrl-tab")?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, Entry::Session(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL))?;
+            assert!(matches!(state.outcome, Some(Outcome::Emit(_))));
+        } else {
+            panic!("expected session entry");
+        }
+        Ok(())
+    }
+
     #[test]
     fn build_plan_empty_entry_sets_message() -> Result<()> {
         let temp = TempDir::new()?;
@@ -2378,6 +2531,11 @@ mod tests {
             argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
         };
         dispatch_outcome(Some(Outcome::Execute(exec_plan)))?;
+        dispatch_outcome(Some(Outcome::PrintSessionId("session-123".into())))?;
+        dispatch_outcome(Some(Outcome::ExportMarkdown(vec![
+            "# heading".into(),
+            "body".into(),
+        ])))?;
         dispatch_outcome(None)?;
         Ok(())
     }
@@ -2779,6 +2937,253 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
         let result = run_app(&mut ctx, &mut terminal, &mut events)?;
         assert!(matches!(result, Some(Outcome::Emit(_))));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_prints_session_id_on_ctrl_y() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-i.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"plan\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-ctrl-i")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
+        state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
+        match state.outcome {
+            Some(Outcome::PrintSessionId(session_id)) => {
+                assert_eq!(session_id, "uuid-sess-ctrl-i");
+            }
+            other => panic!("expected PrintSessionId outcome, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_prints_session_id_on_ctrl_y_without_uuid() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-y.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"plan\"}\n")?;
+        insert_session_without_uuid(&mut db, &session_path, "sess-no-uuid")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
+        state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
+        match state.outcome {
+            Some(Outcome::PrintSessionId(session_id)) => {
+                assert_eq!(session_id, "sess-no-uuid");
+            }
+            other => panic!("expected PrintSessionId outcome, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_prints_session_id_on_ctrl_y_session_missing() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-y-missing.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"plan\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-missing")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
+        state.ctx.db.delete_session("sess-missing")?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
+        assert!(state.outcome.is_none());
+        assert_eq!(
+            state.status_message().as_deref(),
+            Some("Session not found; try refreshing.")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_exports_transcript_missing_session() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-e-missing.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"export\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-export-missing")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
+        state.ctx.db.delete_session("sess-export-missing")?;
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))?;
+        assert!(state.outcome.is_none());
+        assert_eq!(
+            state.status_message().as_deref(),
+            Some("Transcript not available for export.")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_app_exports_transcript_on_ctrl_e() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-e.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"export\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-ctrl-e")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))?;
+        match state.outcome {
+            Some(Outcome::ExportMarkdown(lines)) => {
+                assert!(
+                    lines.iter().any(|line| line.contains("Hello there")),
+                    "export should include transcript content"
+                );
+                assert_eq!(
+                    lines.first().map(String::as_str),
+                    Some("# Codex Session uuid-sess-ctrl-e")
+                );
+            }
+            other => panic!("expected ExportMarkdown outcome, got {other:?}"),
+        }
         Ok(())
     }
 

@@ -719,6 +719,69 @@ mod tests {
     }
 
     #[test]
+    fn config_lint_reports_missing_defaults_and_profile_references() {
+        let defaults = Defaults {
+            provider: Some("codex".into()),
+            profile: Some("demo".into()),
+            search_mode: SearchMode::FirstPrompt,
+            preview_filter: None,
+        };
+
+        let snippets = SnippetConfig {
+            pre: IndexMap::new(),
+            post: IndexMap::new(),
+        };
+
+        let wrappers = IndexMap::new();
+
+        let mut profiles = IndexMap::new();
+        profiles.insert(
+            "demo".into(),
+            ProfileConfig {
+                name: "demo".into(),
+                provider: "missing-provider".into(),
+                description: None,
+                pre: vec!["prep".into()],
+                post: vec!["cleanup".into()],
+                wrap: Some("shellwrap".into()),
+            },
+        );
+
+        let config = Config {
+            defaults,
+            providers: IndexMap::new(),
+            snippets,
+            wrappers,
+            profiles,
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let diagnostics = config.lint();
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message
+                .contains("default provider 'codex' is not defined in [providers]")
+        }));
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message
+                .contains("profile 'demo' references unknown provider 'missing-provider'")
+        }));
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message
+                .contains("profile 'demo' references unknown pre snippet 'prep'")
+        }));
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message
+                .contains("profile 'demo' references unknown post snippet 'cleanup'")
+        }));
+        assert!(diagnostics.iter().any(|diag| {
+            diag.message
+                .contains("profile 'demo' references unknown wrapper 'shellwrap'")
+        }));
+    }
+
+    #[test]
     fn search_mode_as_str_reports_variants() {
         assert_eq!(SearchMode::FirstPrompt.as_str(), "first_prompt");
         assert_eq!(SearchMode::FullText.as_str(), "full_text");
