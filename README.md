@@ -1,22 +1,52 @@
-# tx
+# tool-executor (tx)
 
-tx is a terminal-first launcher for AI code-assistant sessions. It keeps your pipelines reproducible, lets you hop between conversations instantly, and gives you tooling hooks to automate prompt assembly, logging, and resume flows.
+tool-executor (`tx`) is a terminal-first launcher for AI code-assistant sessions, so you can replay pipelines, resume conversations instantly, and script the boring parts.
 
-## Features
+[Installation](#installation) · [Getting Started](#getting-started) · [Docs](#documentation) · [Contributing](#contributing)
 
-- **Focused TUI** – launch `tx` to browse recent sessions and saved profiles, preview transcripts, and run pipelines without touching shell history.
-- **Rich search** – filter by prompt or toggle into full-text search for transcripts, then resume exactly where you left off.
-- **Composable pipelines** – stitch pre/post snippets, wrappers, and providers together declaratively; tx reuses the recorded pipeline when you resume a session.
-- **Virtual profiles** – surface external prompt catalogs (e.g. prompt-assembler) beside static profiles so teams share the same launch menu.
-- **Safety rails** – `tx doctor`, configuration linting, and explicit resume tokens keep pipelines predictable across machines.
+tx keeps pipelines reproducible by capturing the full command graph, not just the last shell invocation. Its session browser helps you hop between transcripts without losing state, while guardrails like `tx doctor` and configuration linting make it safe to automate in shared environments.
 
-## Installation
+## Who is tx for?
 
-### Download a release
+- Builders who bounce between multiple AI copilots and need consistent, auditable prompts.
+- Teams that publish prompt catalogs and want a shared launch menu without syncing shell history.
+- Automation engineers wiring AI flows into CI/CD and wanting resumable, inspectable runs.
 
-Prebuilt archives are produced with `cargo dist`. Grab the latest release from this repository’s **Releases** page, unpack it somewhere on your `PATH`, and run `tx doctor` to verify dependencies.
+## Key features
 
-### Build from source
+### Session management
+
+Stay oriented across many conversations with the terminal UI. Browse recent sessions and saved profiles, preview transcripts inline, and resume a run without reassembling the pipeline manually.
+
+- Recent-session browser with transcript previews.
+- Search by prompt, role, or full-text transcript content.
+- Quick resume actions that reuse the exact recorded pipeline.
+
+### Pipeline composition
+
+Define pre/post snippets, wrappers, and providers declaratively. tx stitches them together on resume so the same request is sent every time.
+
+- Declarative pipeline definitions with reuse across profiles.
+- Virtual profiles surface remote prompt catalogs beside local configs.
+- Emission commands (`--emit-command`, `--emit-json`) for scripting and auditing.
+
+### Reliability guardrails
+
+Ship reproducible automation with safety tooling.
+
+- `tx doctor` validates dependencies and config directories.
+- Configuration linting warns about missing providers or invalid snippets.
+- Resume tokens make it clear which pipeline version will execute.
+
+## Getting started
+
+### Installation
+
+#### Download a release
+
+Prebuilt archives are produced with `cargo dist`. Grab the [latest release](https://github.com/bedecarroll/tool-executor/releases) archive, unpack it somewhere on your `PATH`, then run `tx doctor` to confirm dependencies and ensure the reported version matches the tag you installed.
+
+#### Build from source
 
 ```bash
 git clone https://github.com/bedecarroll/tool-executor.git
@@ -25,13 +55,13 @@ cargo build --release
 ./target/release/tx doctor
 ```
 
-The repository pins Rust 1.90 in `rust-toolchain.toml`, so `cargo` will automatically use the correct toolchain.
+The repository pins Rust 1.90 in `rust-toolchain.toml`, so `cargo` automatically selects the correct toolchain.
 
-## First Run
+### First run walkthrough
 
-1. Run `tx doctor` once to bootstrap the configuration/data directories and confirm your environment.
-2. Inspect the bundled template with `tx config default --raw` and save the parts you need to `~/.config/tx/config.toml` (the directory is created for you).
-3. Add at least one provider definition. A minimal example:
+1. Run `tx doctor` to create the configuration directory and confirm your environment.
+2. Inspect the bundled template with `tx config default --raw` and copy the parts you need into `~/.config/tx/config.toml`.
+3. Add a provider definition, for example:
 
    ```toml
    # ~/.config/tx/config.toml
@@ -43,11 +73,18 @@ The repository pins Rust 1.90 in `rust-toolchain.toml`, so `cargo` will automati
    env = ["CODEX_TOKEN=${env:CODEX_TOKEN}"]
    ```
 
-4. Launch `tx` and pick a profile or previous session. The preview pane shows a transcript snippet or the assembled pipeline before you run it.
+4. Launch `tx` and select a profile or previous session. The preview pane shows a transcript snippet or the assembled pipeline before execution.
 
-Additional configuration patterns—wrappers, snippets, prompt-assembler integration, and environment overrides—are covered in the mdBook under `docs/src/`.
+### Resume a session
 
-## CLI Overview
+```bash
+$ tx search onboarding
+$ tx resume a1b2c3 --emit-command
+```
+
+Search narrows results to relevant prompts, and resume replays the captured pipeline. Use `--emit-command` to print the shell command tx would run, which helps with debugging or scripting.
+
+## Command cheatsheet
 
 ```text
 # Terminal UI
@@ -75,7 +112,13 @@ $ tx doctor
 $ tx export <session-id> > notes.md
 ```
 
-## Coverage
+## Configuration essentials
+
+Configuration lives under `~/.config/tx/` (or a custom directory via `--config-dir` or `TX_CONFIG_DIR`). Profiles reference providers, snippets, and wrappers so pipelines stay declarative. Use virtual profiles to surface external prompt catalogs alongside local definitions, and rerun `tx config lint` whenever you update configuration to catch missing dependencies.
+
+## Developer guide
+
+### Coverage
 
 Run the coverage suite with `mise`:
 
@@ -83,9 +126,9 @@ Run the coverage suite with `mise`:
 mise run coverage
 ```
 
-The task runs `cargo llvm-cov` against the full test matrix, writes HTML output under `coverage/html/`, emits an lcov file, and fails the build when line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` in a browser to inspect the annotated sources.
+The task executes `cargo llvm-cov`, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 95%. Regenerate the reports after adding tests and open `coverage/html/index.html` to inspect annotated sources.
 
-## Benchmarks
+### Benchmarks
 
 Measure pipeline construction performance with Criterion:
 
@@ -93,31 +136,35 @@ Measure pipeline construction performance with Criterion:
 mise run bench
 ```
 
-Benchmark outputs land in `target/criterion/`. The task enables the `benchmarks` feature automatically; run `cargo bench --features benchmarks --bench pipeline` if you prefer raw cargo commands. Keep `tmux` and other interactive dependencies closed while benching so results stay consistent. Add new benchmarks under `benches/` to track other hotspots.
+Output lands in `target/criterion/`. The task enables the `benchmarks` feature automatically; run `cargo bench --features benchmarks --bench pipeline` when you need raw cargo commands. Close extra interactive apps like `tmux` to keep runs consistent and add new benchmarks under `benches/` as hotspots emerge.
 
-## TUI Smoke Test
+### TUI smoke test
 
-The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and verifies it exits cleanly when `Esc` is sent. The test skips automatically when `tmux` is unavailable or when the `CI` environment variable is set, so continuous integration environments are safe. To exercise the smoke test locally, install `tmux` and run `cargo test --test tui_tmux` (or `mise run test`).
+The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and verifies it exits cleanly when `Esc` is sent. The test skips automatically when `tmux` is unavailable or when the `CI` environment variable is set. To exercise it locally, install `tmux` and run `cargo test --test tui_tmux` or `mise run test`.
 
-## TUI Shortcuts
+### TUI shortcuts
 
-- `↑/↓`, `PgUp/PgDn` – move around the active list.
+- `↑/↓`, `PgUp/PgDn` – navigate the active list.
 - `Ctrl+F` – toggle between prompt search and full-text search.
 - `Ctrl+P` – cycle provider filters when multiple backends are configured.
-- `Tab` – emit the assembled pipeline to stdout (useful for scripting).
+- `Tab` – emit the assembled pipeline to stdout.
 - `Ctrl+Y` – print the selected session ID and close the TUI.
-- `Ctrl+E` – export the selected session transcript (same as `tx export`) and close the TUI.
+- `Ctrl+E` – export the selected session transcript and close the TUI.
 - `Enter` – launch the selected session or profile.
 - `Esc` – leave filter mode or close the TUI.
 
 ## Documentation
 
-Browse the rendered mdBook at [tx.bedecarroll.com](https://tx.bedecarroll.com), or read the Markdown sources locally under `docs/`. Run `mdbook serve docs --open` (requires `mdbook`) for a live preview.
+Browse the rendered mdBook at [tx.bedecarroll.com](https://tx.bedecarroll.com), or read the Markdown sources under `docs/`. Run `mdbook serve docs --open` (requires `mdbook`) for a live preview.
 
 - Getting started: `docs/src/getting-started/`
 - Configuration guide: `docs/src/configuration/`
 - Advanced topics: `docs/src/advanced/`
 - Reference material: `docs/src/reference/`
+
+## Support
+
+Questions or bug reports? Open an issue on GitHub and we’ll take a look.
 
 ## Contributing
 
