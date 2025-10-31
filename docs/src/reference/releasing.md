@@ -29,3 +29,7 @@ The `cargo dist` configuration lives under `[workspace.metadata.dist]` in `Cargo
 6. Tag the release and push to GitHub.
 
 When `cargo dist` edits CI workflows, prefer running it locally and committing the diff instead of patching YAML by hand.
+
+## Workspace crates and versioning
+
+The project ships two crates: the `tool-executor` library, which contains all runtime logic, and the `tx` CLI wrapper that `cargo dist` publishes. Keep their versions aligned at all times—bump `version` in both `Cargo.toml` files together and confirm the workspace metadata points `packages = ["tx"]` so archives continue to use the short `tx` prefix.

@@ -44,7 +44,13 @@ Ship reproducible automation with safety tooling.
 
 #### Download a release
 
-Prebuilt archives are produced with `cargo dist`. Grab the [latest release](https://github.com/bedecarroll/tool-executor/releases) archive, unpack it somewhere on your `PATH`, then run `tx doctor` to confirm dependencies and ensure the reported version matches the tag you installed.
+Prebuilt archives are produced with `cargo dist`. Download the latest installer or archive from GitHub Releases:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bedecarroll/tool-executor/releases/latest/download/tx-installer.sh | sh
+```
+
+The installer places `tx` in `${CARGO_HOME:-$HOME/.cargo}/bin`. To download an archive manually, grab the matching `tx-<target>.tar.gz` or `.zip` from the same release page, unpack it somewhere on your `PATH`, then run `tx doctor` to confirm the reported version matches the tag you installed.
 
 #### Build from source
 
@@ -117,6 +123,10 @@ $ tx export <session-id> > notes.md
 Configuration lives under `~/.config/tx/` (or a custom directory via `--config-dir` or `TX_CONFIG_DIR`). Profiles reference providers, snippets, and wrappers so pipelines stay declarative. Use virtual profiles to surface external prompt catalogs alongside local definitions, and rerun `tx config lint` whenever you update configuration to catch missing dependencies.
 
 ## Developer guide
+
+### Workspace layout
+
+The repository publishes two crates: the `tool-executor` library and the `tx` CLI wrapper. Both crates share the same semantic version and must stay in lockstep—bump versions together and verify the library’s `Cargo.toml` and the CLI crate’s `Cargo.toml` agree before tagging a release.
 
 ### Coverage
 

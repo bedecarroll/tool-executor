@@ -1,6 +1,6 @@
 [package]
 name = "tool-executor"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Bede Carroll <bedecarroll@users.noreply.github.com>"]
@@ -17,9 +17,9 @@ default-run = "tx"
 default = []
 benchmarks = []
 
-[[bin]]
-name = "tx"
-path = "src/main.rs"
+[workspace]
+members = ["crates/tx"]
+
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -100,6 +100,8 @@ targets = [
   "x86_64-unknown-linux-musl",
   "x86_64-pc-windows-msvc",
 ]
+# Packages to distribute (bindist) when running cargo-dist
+packages = ["tx"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
@@ -115,5 +117,6 @@ inherits = "release"
 lto = "thin"
 
 [package.metadata.dist]
+dist = false
 unix-archive = ".tar.gz"
 windows-archive = ".zip"
