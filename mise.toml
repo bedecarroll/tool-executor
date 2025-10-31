@@ -33,8 +33,11 @@ run = [
 ]
 
 [tasks.test]
-description = "Run the nextest test suite"
-run = ["cargo nextest run --workspace --all-targets --no-fail-fast", "cargo insta test"]
+description = "Run the nextest test suite with coverage instrumentation"
+run = [
+  "cargo llvm-cov nextest --workspace --all-targets --profile ci",
+  "cargo insta test",
+]
 [tasks.check]
 description = "Aggregate format, lint, test, and doctest runs"
 depends = ["fmt", "lint", "test", "test-doc"]
@@ -47,7 +50,7 @@ run = ["cargo test --doc"]
 description = "Generate HTML and lcov coverage reports"
 run = [
   "cargo llvm-cov clean --workspace",
-  "cargo llvm-cov nextest --workspace --all-targets --fail-under-lines 90 --html --output-dir coverage/html",
+  "cargo llvm-cov nextest --workspace --all-targets --fail-under-lines 90 --html --output-dir coverage/html --profile ci",
   "cargo llvm-cov report --summary-only",
   "cargo llvm-cov report --lcov --output-path coverage/lcov.info",
 ]
