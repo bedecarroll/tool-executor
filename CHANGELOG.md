@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.3.0] - 2025-10-31
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Prompt-assembler integration now calls `pa show --json` so the TUI preview pane can display assembled prompt contents alongside metadata.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- The preview pane renders Markdown metadata plus a fenced `markdown` block for both virtual prompt entries and provider profiles, making filtered output easier to read.
+
 ## [0.2.0] - 2025-10-31
 
 <!-- markdownlint-disable-next-line MD024 -->
