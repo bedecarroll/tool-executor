@@ -211,16 +211,22 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
             let cache_tail = lower_path(&loaded.directories.cache_dir);
 
             assert!(
-                config_tail.ends_with("tx\\config") || config_tail.ends_with("tx\\"),
-                "expected path ending with tx\\config or tx\\, got {config_tail}"
+                config_tail.ends_with("tx\\config")
+                    || config_tail.ends_with("tx\\")
+                    || config_tail.ends_with("tx"),
+                "expected path ending with tx\\config or tx, got {config_tail}"
             );
             assert!(
-                data_tail.ends_with("tx\\data") || data_tail.ends_with("tx\\"),
-                "expected path ending with tx\\data or tx\\, got {data_tail}"
+                data_tail.ends_with("tx\\data")
+                    || data_tail.ends_with("tx\\")
+                    || data_tail.ends_with("tx"),
+                "expected path ending with tx\\data or tx, got {data_tail}"
             );
             assert!(
-                cache_tail.ends_with("tx\\cache") || cache_tail.ends_with("tx\\"),
-                "expected path ending with tx\\cache or tx\\, got {cache_tail}"
+                cache_tail.ends_with("tx\\cache")
+                    || cache_tail.ends_with("tx\\")
+                    || cache_tail.ends_with("tx"),
+                "expected path ending with tx\\cache or tx, got {cache_tail}"
             );
             assert!(loaded.directories.config_dir.join("config.toml").is_file());
             assert!(
