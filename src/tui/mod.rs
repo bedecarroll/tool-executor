@@ -951,10 +951,6 @@ impl<'ctx> AppState<'ctx> {
     fn handle_key_normal(&mut self, key: KeyEvent) -> Result<bool> {
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Ok(true),
-            (KeyCode::Tab, mods) if mods.contains(KeyModifiers::CONTROL) => {
-                self.trigger_print_session_id()?;
-                Ok(false)
-            }
             (KeyCode::Char('y' | 'Y'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 self.trigger_print_session_id()?;
                 Ok(false)
@@ -1049,7 +1045,7 @@ impl<'ctx> AppState<'ctx> {
                     let identifier = summary
                         .uuid
                         .as_deref()
-                        .unwrap_or_else(|| summary.id.as_str())
+                        .unwrap_or(summary.id.as_str())
                         .to_string();
                     self.outcome = Some(Outcome::PrintSessionId(identifier));
                 }
@@ -2394,6 +2390,49 @@ mod tests {
             state.list_state.select(Some(idx));
             state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
             assert!(matches!(state.outcome, Some(Outcome::Execute(_))));
+        } else {
+            panic!("expected session entry");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_key_normal_ctrl_tab_emits_plan() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("ctrl-tab.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"ctrl_tab\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-ctrl-tab")?;
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, Entry::Session(_))) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL))?;
+            assert!(matches!(state.outcome, Some(Outcome::Emit(_))));
         } else {
             panic!("expected session entry");
         }
