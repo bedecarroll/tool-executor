@@ -1,0 +1,22 @@
+[package]
+name = "tx"
+version = "0.4.0"
+edition = "2024"
+authors = ["Bede Carroll <bedecarroll@users.noreply.github.com>"]
+description = "A thin, configurable launcher for AI code-assistant sessions"
+homepage = "https://github.com/bedecarroll/tool-executor"
+repository = "https://github.com/bedecarroll/tool-executor"
+license = "MIT"
+readme = "../../README.md"
+keywords = ["cli"]
+categories = ["command-line-utilities"]
+publish = false
+
+[dependencies]
+color-eyre = "0.6"
+tool-executor = { path = "../.." }
+
+[package.metadata.dist]
+dist = true
+unix-archive = ".tar.gz"
+windows-archive = ".zip"

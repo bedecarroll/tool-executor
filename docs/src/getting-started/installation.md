@@ -6,17 +6,17 @@ tx publishes as a standard Rust binary. Install from the GitHub releases if you 
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/bedecarroll/tool-executor/releases/latest/download/tool-executor-installer.sh \
+  https://github.com/bedecarroll/tool-executor/releases/latest/download/tx-installer.sh \
   | sh
 ```
 
 Windows users can run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/bedecarroll/tool-executor/releases/latest/download/tool-executor-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/bedecarroll/tool-executor/releases/latest/download/tx-installer.ps1 | iex"
 ```
 
-The scripts install `tx` into your Cargo binary directory and verify checksums. Manual downloads are available on the [release page](https://github.com/bedecarroll/tool-executor/releases/latest).
+The scripts install `tx` into your Cargo binary directory and verify checksums. Manual downloads are available on the [release page](https://github.com/bedecarroll/tool-executor/releases/latest)—look for the `tx-<target>.tar.gz` (Unix) or `tx-<target>.zip` (Windows) assets if you prefer to unpack them yourself.
 
 ## Build from source
 
