@@ -271,6 +271,7 @@ struct ProfileEntry {
     inline_pre: Vec<String>,
     stdin_supported: bool,
     kind: ProfileKind,
+    preview_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -727,6 +728,7 @@ impl<'ctx> AppState<'ctx> {
                 inline_pre: Vec::new(),
                 stdin_supported: false,
                 kind: ProfileKind::Config { name: profile_name },
+                preview_lines: Vec::new(),
             });
         }
 
@@ -740,25 +742,23 @@ impl<'ctx> AppState<'ctx> {
                 );
                 continue;
             }
-            let mut description = format!("Press Enter to start {name} via {}", provider.bin);
-            if provider.flags.is_empty() {
-                description.push('.');
+            let command = if provider.flags.is_empty() {
+                provider.bin.clone()
             } else {
-                description.push_str(" with flags: ");
-                description.push_str(&provider.flags.join(" "));
-                description.push('.');
-            }
+                format!("{} {}", provider.bin, provider.flags.join(" "))
+            };
             self.profiles.push(ProfileEntry {
                 display: provider_name.clone(),
                 provider: provider_name,
                 pre: Vec::new(),
                 post: Vec::new(),
                 wrap: None,
-                description: Some(description),
+                description: Some(command.clone()),
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
                 stdin_supported: false,
                 kind: ProfileKind::Provider,
+                preview_lines: vec![command],
             });
         }
 
@@ -798,6 +798,7 @@ impl<'ctx> AppState<'ctx> {
                                 )],
                                 stdin_supported: vp.stdin_supported,
                                 kind: ProfileKind::Virtual,
+                                preview_lines: vp.contents.clone(),
                             });
                         }
                     } else {
@@ -1245,24 +1246,46 @@ impl<'ctx> AppState<'ctx> {
             return preview.clone();
         }
 
+        let filter_args = self.ctx.config.defaults.preview_filter.as_ref();
+
         let preview = match entry {
             Entry::Session(session) => Self::session_preview_from_result(
                 &session,
                 self.ctx.db.fetch_transcript(&session.id),
-                self.ctx.config.defaults.preview_filter.as_ref(),
+                filter_args,
             ),
             Entry::Profile(profile) => {
-                let mut lines = Vec::new();
-                lines.push(format!("Provider: {}", profile.provider));
-                if let Some(description) = &profile.description {
-                    lines.push(String::new());
-                    lines.push(description.clone());
+                let mut lines = match profile.kind {
+                    ProfileKind::Virtual | ProfileKind::Provider => {
+                        build_markdown_profile_preview(&profile)
+                    }
+                    ProfileKind::Config { .. } => {
+                        let mut lines = Vec::new();
+                        lines.push(format!("Provider: {}", profile.provider));
+                        if let Some(description) = &profile.description {
+                            lines.push(String::new());
+                            lines.push(description.clone());
+                        }
+                        if !profile.tags.is_empty()
+                            && !matches!(profile.kind, ProfileKind::Provider)
+                        {
+                            lines.push(String::new());
+                            lines.push(format!("Tags: {}", profile.tags.join(", ")));
+                        }
+                        lines
+                    }
+                };
+                if lines.is_empty() {
+                    lines.push(format!("Provider: {}", profile.provider));
                 }
-                if !profile.tags.is_empty() && !matches!(profile.kind, ProfileKind::Provider) {
-                    lines.push(String::new());
-                    lines.push(format!("Tags: {}", profile.tags.join(", ")));
-                }
-                let styled = lines_to_plain_text(&lines);
+                let styled = if let Some(filtered) = apply_preview_filter(filter_args, &lines) {
+                    let styled =
+                        lines_to_ansi_text(&filtered).or_else(|| lines_to_plain_text(&filtered));
+                    lines = filtered;
+                    styled
+                } else {
+                    lines_to_plain_text(&lines)
+                };
                 Preview {
                     lines,
                     styled,
@@ -1558,6 +1581,50 @@ fn truncate(input: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+fn build_markdown_profile_preview(profile: &ProfileEntry) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("**Provider**: `{}`", profile.provider));
+
+    if let Some(description) = profile
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut desc_lines = description.lines();
+        if let Some(first) = desc_lines.next() {
+            lines.push(format!("**Description**: {first}"));
+        }
+        for line in desc_lines {
+            lines.push(line.to_string());
+        }
+    } else {
+        lines.push("**Description**: _None_".to_string());
+    }
+
+    if profile.tags.is_empty() {
+        lines.push("**Tags**: _None_".to_string());
+    } else {
+        let rendered = profile
+            .tags
+            .iter()
+            .map(|tag| format!("`{tag}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("**Tags**: {rendered}"));
+    }
+
+    lines.push(String::new());
+    lines.push("```markdown".to_string());
+    if profile.preview_lines.is_empty() {
+        lines.push("_No prompt output_".to_string());
+    } else {
+        lines.extend(profile.preview_lines.clone());
+    }
+    lines.push("```".to_string());
+    lines
 }
 
 #[cfg(all(test, unix))]
@@ -1875,6 +1942,7 @@ mod tests {
             kind: ProfileKind::Config {
                 name: "default".into(),
             },
+            preview_lines: Vec::new(),
         };
         assert!(entry.matches("help"));
         assert!(entry.matches("team"));
@@ -3375,6 +3443,112 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn preview_prefers_virtual_profile_contents() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        state.preview_cache.clear();
+        state.entries = vec![Entry::Profile(ProfileEntry {
+            display: "pa/demo".into(),
+            provider: "codex".into(),
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            description: Some("Original description".into()),
+            tags: vec!["team".into()],
+            inline_pre: vec!["pa demo".into()],
+            stdin_supported: true,
+            kind: ProfileKind::Virtual,
+            preview_lines: vec!["Instruction 1".into(), "Instruction 2".into()],
+        })];
+        state.index = 0;
+        state.list_state.select(Some(0));
+
+        let preview = state.preview();
+        assert_eq!(
+            preview.lines,
+            vec![
+                "**Provider**: `codex`".to_string(),
+                "**Description**: Original description".to_string(),
+                "**Tags**: `team`".to_string(),
+                String::new(),
+                "```markdown".to_string(),
+                "Instruction 1".to_string(),
+                "Instruction 2".to_string(),
+                "```".to_string()
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn provider_profile_preview_formats_command() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let mut state = AppState::new(&mut ctx)?;
+        let provider_entry = state
+            .profiles
+            .iter()
+            .find(|entry| matches!(entry.kind, ProfileKind::Provider))
+            .cloned()
+            .expect("provider profile");
+
+        let description = provider_entry
+            .description
+            .clone()
+            .expect("provider description");
+        let command_line = provider_entry
+            .preview_lines
+            .first()
+            .cloned()
+            .expect("preview line");
+
+        state.entries = vec![Entry::Profile(provider_entry.clone())];
+        state.index = 0;
+        state.list_state.select(Some(0));
+        state.preview_cache.clear();
+
+        let preview = state.preview();
+        assert_eq!(
+            preview.lines,
+            vec![
+                format!("**Provider**: `{}`", provider_entry.provider),
+                format!("**Description**: {description}"),
+                "**Tags**: _None_".to_string(),
+                String::new(),
+                "```markdown".to_string(),
+                command_line,
+                "```".to_string()
+            ]
+        );
+
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn plan_for_session_builds_resume_plan() -> Result<()> {
@@ -3502,6 +3676,7 @@ mod tests {
                 kind: ProfileKind::Config {
                     name: "wrapped".into(),
                 },
+                preview_lines: Vec::new(),
             }),
         ];
         state.index = 0;

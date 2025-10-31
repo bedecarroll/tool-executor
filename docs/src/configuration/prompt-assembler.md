@@ -28,7 +28,7 @@ namespace = "pa"
 When the feature is active:
 
 - Virtual entries appear in the profiles pane alongside regular profiles.
-- The preview pane shows the prompt description emitted by `pa`.
+- The preview pane renders Markdown metadata (bold headings for provider, description, and tags) followed by a fenced code block labelled `markdown` that contains the assembled prompt from `pa show --json <prompt-name>`.
 - `Enter` launches the pipeline immediately; `Tab` prints it for shell reuse.
 - When a previous session is highlighted you can press `Ctrl+Y` to print its ID or `Ctrl+E` to export its transcript before switching back to the profile pane.
 
@@ -50,4 +50,4 @@ With that configuration, selecting `pa/hello` captures the generator output and 
 - Increase logging with `RUST_LOG=tx=debug tx` if profiles disappear.
 - Restart tx after changing prompts in the `prompt-assembler` repository.
 
-Known limitation: only the prompt name, description, and tags are captured today. Future releases may forward richer metadata.
+Known limitation: additional metadata beyond tags and contents still requires future enhancements.

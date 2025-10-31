@@ -14,6 +14,7 @@ pub struct VirtualProfile {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub stdin_supported: bool,
+    pub contents: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -75,13 +76,13 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
         let Some(name) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
-        let description = entry
+        let mut description = entry
             .get("description")
             .or_else(|| entry.get("summary"))
             .and_then(Value::as_str)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let tags = entry
+        let mut tags = entry
             .get("tags")
             .and_then(Value::as_array)
             .map(|arr| {
@@ -91,10 +92,37 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let stdin_supported = entry
+        let mut stdin_supported = entry
             .get("stdin_supported")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+
+        let detail = fetch_prompt_detail(name)?;
+        if description.is_none() {
+            description = detail
+                .get("description")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
+        if tags.is_empty() {
+            tags = detail
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        }
+        stdin_supported = detail
+            .get("stdin_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(stdin_supported);
+
+        let contents = extract_profile_lines(&detail);
 
         profiles.push(VirtualProfile {
             key: format!("{}/{}", config.namespace, name),
@@ -102,10 +130,56 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
             description,
             tags,
             stdin_supported,
+            contents,
         });
     }
 
     Ok(profiles)
+}
+
+fn fetch_prompt_detail(name: &str) -> Result<Value> {
+    let output = Command::new("pa")
+        .args(["show", "--json", name])
+        .output()
+        .with_context(|| format!("failed to execute 'pa show --json {name}'"))?;
+
+    if !output.status.success() {
+        return Err(eyre!(
+            "pa exited with status {} while loading prompt '{name}'",
+            output.status
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("failed to parse JSON output from 'pa show --json {name}'"))
+}
+
+fn extract_profile_lines(detail: &Value) -> Vec<String> {
+    if let Some(content) = detail
+        .get("profile")
+        .and_then(|profile| profile.get("content"))
+        .and_then(Value::as_str)
+    {
+        return content.lines().map(str::to_string).collect();
+    }
+
+    if let Some(parts) = detail
+        .get("profile")
+        .and_then(|profile| profile.get("parts"))
+        .and_then(Value::as_array)
+    {
+        let mut lines = Vec::new();
+        for part in parts {
+            if let Some(content) = part.get("content").and_then(Value::as_str) {
+                lines.extend(content.lines().map(str::to_string));
+            }
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+
+    Vec::new()
 }
 
 #[cfg(all(test, unix))]
@@ -177,8 +251,36 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fetch_prompts_parses_array_root() -> Result<()> {
-        let (dir, cfg) =
-            with_fake_pa("#!/bin/sh\necho '[{\"name\":\"demo\",\"stdin_supported\":true}]'\n");
+        let (dir, cfg) = with_fake_pa(
+            r#"#!/bin/sh
+case "$1" in
+  list)
+    cat <<'JSON'
+[{
+  "name": "demo",
+  "stdin_supported": true
+}]
+JSON
+    exit 0
+    ;;
+  show)
+    if [ "$3" = "demo" ]; then
+      cat <<'JSON'
+{
+  "name": "demo",
+  "stdin_supported": true,
+  "profile": {
+    "content": "Line one\nLine two\n"
+  }
+}
+JSON
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+"#,
+        );
         let _guard = set_path(&dir);
         let profiles = fetch_prompts(&cfg)?;
         assert_eq!(profiles.len(), 1);
@@ -186,6 +288,10 @@ mod tests {
         assert_eq!(profile.key, "tests/demo");
         assert_eq!(profile.name, "demo");
         assert!(profile.stdin_supported);
+        assert_eq!(
+            profile.contents,
+            vec!["Line one".to_string(), "Line two".to_string()]
+        );
         Ok(())
     }
 
@@ -193,11 +299,43 @@ mod tests {
     #[test]
     fn fetch_prompts_parses_object_root() -> Result<()> {
         let (dir, cfg) = with_fake_pa(
-            "#!/bin/sh\necho '{\"prompts\":[{\"name\":\"demo\",\"tags\":[\"one\",\"two\"]}]}'\n",
+            r#"#!/bin/sh
+case "$1" in
+  list)
+    cat <<'JSON'
+{
+  "prompts": [
+    {
+      "name": "demo",
+      "tags": ["one", "two"]
+    }
+  ]
+}
+JSON
+    exit 0
+    ;;
+  show)
+    if [ "$3" = "demo" ]; then
+      cat <<'JSON'
+{
+  "name": "demo",
+  "tags": ["one", "two"],
+  "profile": {
+    "content": "Hello\n"
+  }
+}
+JSON
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+"#,
         );
         let _guard = set_path(&dir);
         let profiles = fetch_prompts(&cfg)?;
         assert_eq!(profiles[0].tags, vec!["one", "two"]);
+        assert_eq!(profiles[0].contents, vec!["Hello".to_string()]);
         Ok(())
     }
 

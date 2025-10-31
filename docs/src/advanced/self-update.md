@@ -10,7 +10,7 @@ Usage:
 
 ```bash
 tx self-update             # update to the latest GitHub release
-tx self-update --version v0.2.0
+tx self-update --version v0.3.0
 ```
 
 The release archive formats are aligned with `cargo dist` defaults (`.tar.gz` on Unix, `.zip` on Windows). Keep them in sync if you customize the distribution pipeline.
