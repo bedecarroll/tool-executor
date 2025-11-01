@@ -255,6 +255,36 @@ session_roots = ["{sessions}"]
 }
 
 #[test]
+fn doctor_notes_removed_preview_filter() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+preview_filter = "glow"
+provider = "demo"
+
+[providers.demo]
+bin = "echo"
+session_roots = ["{sessions}"]
+"#,
+        sessions = toml_path(sessions_dir.path())
+    );
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.arg("doctor")
+        .assert()
+        .success()
+        .stdout(contains("Ignoring configuration key `preview_filter`"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn search_returns_results_with_role_filter() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.child("data-root");

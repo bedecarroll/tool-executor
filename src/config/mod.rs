@@ -18,6 +18,8 @@ const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../assets/default_config.
 mod merge;
 pub mod model;
 
+use self::model::DiagnosticLevel;
+
 pub use model::{Config, ConfigDiagnostic};
 
 const MAIN_CONFIG: &str = "config.toml";
@@ -112,6 +114,10 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
         merge::merge_tables(&mut merged_table, table, Some(&source.path))?;
     }
 
+    if saw_preview_filter {
+        merged_table.remove("preview_filter");
+    }
+
     let merged_value = Value::Table(merged_table);
     if saw_preview_filter {
         warn!(
@@ -119,7 +125,15 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
         );
     }
     let config = Config::from_value(&merged_value)?;
-    let diagnostics = config.lint();
+    let mut diagnostics = config.lint();
+    if saw_preview_filter {
+        diagnostics.push(ConfigDiagnostic {
+            level: DiagnosticLevel::Warning,
+            message:
+                "Ignoring configuration key `preview_filter`; remove this key from your config."
+                    .into(),
+        });
+    }
 
     Ok(LoadedConfig {
         config,
@@ -674,6 +688,37 @@ mod tests {
                 std::env::remove_var("TX_CACHE_DIR");
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn load_ignores_legacy_preview_filter_key() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        config_dir.child("config.toml").write_str(
+            "\
+preview_filter = \"glow\"
+provider = \"echo\"
+[providers.echo]
+bin = \"echo\"
+",
+        )?;
+
+        let loaded = load(Some(config_dir.path()))?;
+        let merged_table = loaded
+            .merged
+            .as_table()
+            .expect("merged config should be a table");
+        assert!(!merged_table.contains_key("preview_filter"));
+        assert!(loaded.config.providers.contains_key("echo"));
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|diag| diag.message.contains("preview_filter"))
+        );
         Ok(())
     }
 
