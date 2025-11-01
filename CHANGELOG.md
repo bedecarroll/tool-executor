@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.4.1] - 2025-11-01
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Added per-task timeouts (`timeout = "20s"`) to the `test` and `coverage` mise tasks so long-running suites finish without needing environment overrides.
+- Removed the macOS-specific clap color override and now parse CLI arguments uniformly across platforms.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Sanitized terminal preview filters to strip OSC/DCS control strings before rendering, preventing accidental hyperlink, clipboard, or background-color injections when external filter commands emit escape sequences.
+
 ## [0.3.0] - 2025-10-31
 
 <!-- markdownlint-disable-next-line MD024 -->
