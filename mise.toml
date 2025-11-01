@@ -34,6 +34,7 @@ run = [
 
 [tasks.test]
 description = "Run the nextest test suite with coverage instrumentation"
+timeout = "20s"
 run = [
   "cargo llvm-cov nextest --workspace --all-targets --profile ci",
   "cargo insta test",
@@ -48,6 +49,7 @@ run = ["cargo test --doc"]
 
 [tasks.coverage]
 description = "Generate HTML and lcov coverage reports"
+timeout = "20s"
 run = [
   "cargo llvm-cov clean --workspace",
   "cargo llvm-cov nextest --workspace --all-targets --fail-under-lines 90 --html --output-dir coverage/html --profile ci",
