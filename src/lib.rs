@@ -16,11 +16,7 @@ pub mod test_support;
 mod tui;
 mod util;
 
-use clap::CommandFactory;
-#[cfg(not(target_os = "macos"))]
-use clap::Parser;
-#[cfg(target_os = "macos")]
-use clap::{ColorChoice, FromArgMatches};
+use clap::{CommandFactory, Parser};
 use cli::Command;
 
 pub use cli::Cli;
@@ -101,16 +97,7 @@ pub fn command() -> clap::Command {
     Cli::command()
 }
 
-/// Parse CLI arguments, applying platform-specific tweaks.
-#[cfg(target_os = "macos")]
-#[must_use]
-pub fn parse_cli() -> Cli {
-    let matches = Cli::command().color(ColorChoice::Never).get_matches();
-    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
-}
-
-/// Parse CLI arguments, applying platform-specific tweaks.
-#[cfg(not(target_os = "macos"))]
+/// Parse CLI arguments.
 #[must_use]
 pub fn parse_cli() -> Cli {
     Cli::parse()

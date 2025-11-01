@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ansi_to_tui::IntoText;
 use color_eyre::Result;
 #[cfg(all(not(test), not(coverage)))]
 use color_eyre::eyre::WrapErr;
@@ -45,6 +44,8 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
+
+mod sanitize;
 
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
@@ -1278,11 +1279,14 @@ impl<'ctx> AppState<'ctx> {
                 if lines.is_empty() {
                     lines.push(format!("Provider: {}", profile.provider));
                 }
-                let styled = if let Some(filtered) = apply_preview_filter(filter_args, &lines) {
-                    let styled =
-                        lines_to_ansi_text(&filtered).or_else(|| lines_to_plain_text(&filtered));
-                    lines = filtered;
-                    styled
+                let styled = if let Some(sanitize::SanitizedText {
+                    lines: filtered_lines,
+                    styled,
+                }) = apply_preview_filter(filter_args, &lines)
+                {
+                    let fallback = lines_to_plain_text(&filtered_lines);
+                    lines = filtered_lines;
+                    styled.or(fallback)
                 } else {
                     lines_to_plain_text(&lines)
                 };
@@ -1319,11 +1323,14 @@ impl<'ctx> AppState<'ctx> {
         match result {
             Ok(Some(transcript)) => {
                 let mut lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
-                let styled = if let Some(filtered) = apply_preview_filter(filter, &lines) {
-                    let styled =
-                        lines_to_ansi_text(&filtered).or_else(|| lines_to_plain_text(&filtered));
-                    lines = filtered;
-                    styled
+                let styled = if let Some(sanitize::SanitizedText {
+                    lines: filtered_lines,
+                    styled,
+                }) = apply_preview_filter(filter, &lines)
+                {
+                    let fallback = lines_to_plain_text(&filtered_lines);
+                    lines = filtered_lines;
+                    styled.or(fallback)
                 } else {
                     lines_to_plain_text(&lines)
                 };
@@ -1367,7 +1374,10 @@ impl<'ctx> AppState<'ctx> {
     }
 }
 
-fn apply_preview_filter(filter: Option<&Vec<String>>, lines: &[String]) -> Option<Vec<String>> {
+fn apply_preview_filter(
+    filter: Option<&Vec<String>>,
+    lines: &[String],
+) -> Option<sanitize::SanitizedText> {
     let args = filter?;
     if args.is_empty() {
         return None;
@@ -1375,11 +1385,11 @@ fn apply_preview_filter(filter: Option<&Vec<String>>, lines: &[String]) -> Optio
 
     let input = lines.join("\n");
     let output = run_preview_filter(args, &input)?;
-    let out = output.lines().map(str::to_string).collect::<Vec<_>>();
-    if out.is_empty() {
+    let sanitized = sanitize::sanitize_ansi(&output);
+    if sanitized.lines.is_empty() {
         return None;
     }
-    Some(out)
+    Some(sanitized)
 }
 
 fn lines_to_plain_text(lines: &[String]) -> Option<Text<'static>> {
@@ -1387,13 +1397,6 @@ fn lines_to_plain_text(lines: &[String]) -> Option<Text<'static>> {
         return None;
     }
     Some(Text::from(lines.join("\n")))
-}
-
-fn lines_to_ansi_text(lines: &[String]) -> Option<Text<'static>> {
-    if lines.is_empty() {
-        return None;
-    }
-    lines.join("\n").into_text().ok()
 }
 
 fn run_preview_filter(args: &[String], input: &str) -> Option<String> {
@@ -2006,21 +2009,26 @@ mod tests {
         let lines = vec!["line one".to_string(), "line two".to_string()];
         let filtered =
             apply_preview_filter(Some(&vec!["cat".into()]), &lines).expect("filter result");
-        assert_eq!(filtered, lines);
+        assert_eq!(filtered.lines, lines);
+        assert!(filtered.styled.is_some());
 
         let plain = lines_to_plain_text(&lines).expect("plain text");
         assert!(!plain.lines.is_empty());
 
-        let ansi_lines = vec!["\u{1b}[31mred\u{1b}[0m".to_string()];
-        let ansi = lines_to_ansi_text(&ansi_lines).expect("ansi text");
-        assert!(!ansi.lines.is_empty());
+        let ansi_output = "\u{1b}[31mred\u{1b}[0m";
+        let ansi = super::sanitize::sanitize_ansi(ansi_output);
+        assert_eq!(ansi.lines.len(), 1);
+        assert!(ansi.lines[0].contains("red"));
+        assert!(ansi.styled.is_some());
 
         let output = run_preview_filter(&["cat".into()], "hello").expect("output");
         assert!(output.contains("hello"));
         assert!(run_preview_filter(&["false".into()], "ignored").is_none());
         assert!(apply_preview_filter(None, &lines).is_none());
         assert!(lines_to_plain_text(&[]).is_none());
-        assert!(lines_to_ansi_text(&[]).is_none());
+        let empty_sanitized = super::sanitize::sanitize_ansi("");
+        assert!(empty_sanitized.lines.is_empty());
+        assert!(empty_sanitized.styled.is_none());
     }
 
     #[cfg(unix)]
@@ -2573,6 +2581,59 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn preview_filter_sanitizes_osc_sequences() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.defaults.preview_filter = Some(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '\\033]8;;https://example.com\\033\\\\link\\033]8;;\\033\\\\\\n'".into(),
+        ]);
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let session_dir = config
+            .providers
+            .get("codex")
+            .unwrap()
+            .session_roots
+            .first()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("sanitize.jsonl");
+        fs::File::create(&session_path)?.write_all(b"{\"event\":\"preview\"}\n")?;
+        insert_session(&mut db, &session_path, "sess-sanitize")?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+        let preview = state.preview();
+        let joined = preview.lines.join("\n");
+        assert_eq!(joined, "link");
+        assert!(
+            !joined.contains('\u{1b}'),
+            "preview output still contains escape sequences: {joined:?}"
+        );
+        assert!(preview.styled.is_some());
+
+        let cached_preview = state
+            .preview_cache
+            .values()
+            .next()
+            .expect("cached preview entry");
+        let cached_joined = cached_preview.lines.join("\n");
+        assert_eq!(cached_joined, "link");
+        assert!(!cached_joined.contains('\u{1b}'));
+        Ok(())
+    }
+
     #[test]
     fn dispatch_outcome_handles_emit_and_execute() -> Result<()> {
         let plan = PipelinePlan {
@@ -2854,6 +2915,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn sanitize_ansi_strips_osc_sequences() {
+        let osc = "\u{1b}]8;;https://example.com\u{1b}\\link\u{1b}]8;;\u{1b}\\";
+        let sanitized = super::sanitize::sanitize_ansi(osc);
+        let joined = sanitized.lines.join("\n");
+        assert!(
+            !joined.contains('\u{1b}'),
+            "sanitized text still contains escape sequences: {joined:?}"
+        );
+        assert_eq!(sanitized.lines, vec!["link".to_string()]);
+        assert!(
+            sanitized.styled.is_some(),
+            "expected styled text to be available"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn preview_filter_handles_empty_and_failure() {
@@ -2870,10 +2947,9 @@ mod tests {
         assert!(apply_preview_filter(Some(&failing), &lines).is_none());
 
         let echo = vec!["/bin/sh".into(), "-c".into(), "cat".into()];
-        assert_eq!(
-            apply_preview_filter(Some(&echo), &lines),
-            Some(vec!["alpha line".to_string()])
-        );
+        let filtered = apply_preview_filter(Some(&echo), &lines).expect("filtered lines");
+        assert_eq!(filtered.lines, lines);
+        assert!(filtered.styled.is_some());
     }
 
     #[cfg(unix)]
