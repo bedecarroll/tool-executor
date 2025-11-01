@@ -10,7 +10,7 @@ use tool_executor::session::{MessageRecord, SessionIngest, SessionSummary};
 use tool_executor::test_support::toml_path;
 
 fn base_command(temp: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("tx").expect("binary exists");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("tx");
     let config_dir = temp.child("config-root");
     config_dir.create_dir_all().unwrap();
     cmd.env("TX_CONFIG_DIR", config_dir.path());

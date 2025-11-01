@@ -11,6 +11,7 @@ use directories::ProjectDirs;
 use itertools::Itertools;
 use schemars::schema_for;
 use toml::Value;
+use tracing::warn;
 
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../assets/default_config.toml");
 
@@ -89,6 +90,7 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
 
     let mut merged_table = toml::map::Map::new();
 
+    let mut saw_preview_filter = false;
     for source in &sources {
         let contents = fs::read_to_string(&source.path)
             .with_context(|| format!("failed to read {}", source.path.display()))?;
@@ -100,10 +102,22 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
                 source.path.display()
             )
         })?;
+        if value
+            .as_table()
+            .and_then(|table| table.get("preview_filter"))
+            .is_some()
+        {
+            saw_preview_filter = true;
+        }
         merge::merge_tables(&mut merged_table, table, Some(&source.path))?;
     }
 
     let merged_value = Value::Table(merged_table);
+    if saw_preview_filter {
+        warn!(
+            "Ignoring configuration key `preview_filter`; the preview filter feature has been removed."
+        );
+    }
     let config = Config::from_value(&merged_value)?;
     let diagnostics = config.lint();
 

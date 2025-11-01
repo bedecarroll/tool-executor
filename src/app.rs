@@ -1168,7 +1168,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: Some("default".into()),
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: Some(vec!["cat".into()]),
             },
             providers,
             snippets,

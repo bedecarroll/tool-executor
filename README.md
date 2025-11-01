@@ -150,8 +150,6 @@ Output lands in `target/criterion/`. The task enables the `benchmarks` feature a
 
 ### TUI smoke test
 
-The integration test in `tests/tui_tmux.rs` launches the TUI inside `tmux` and verifies it exits cleanly when `Esc` is sent. The test skips automatically when `tmux` is unavailable or when the `CI` environment variable is set. To exercise it locally, install `tmux` and run `cargo test --test tui_tmux` or `mise run test`.
-
 ### TUI shortcuts
 
 - `↑/↓`, `PgUp/PgDn` – navigate the active list.

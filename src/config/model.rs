@@ -28,7 +28,6 @@ pub struct Defaults {
     pub provider: Option<String>,
     pub profile: Option<String>,
     pub search_mode: SearchMode,
-    pub preview_filter: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,8 +280,6 @@ pub(crate) struct RawDefaults {
     profile: Option<String>,
     #[serde(default = "RawDefaults::default_search_mode")]
     search_mode: String,
-    #[serde(default)]
-    preview_filter: Option<CommandSpec>,
 }
 
 impl RawDefaults {
@@ -300,18 +297,10 @@ impl RawDefaults {
             }
         };
 
-        let preview_filter = match self.preview_filter {
-            Some(spec) => spec
-                .into_args()
-                .map_err(|err| eyre!("invalid preview_filter command: {err}"))?,
-            None => None,
-        };
-
         Ok(Defaults {
             provider: self.provider,
             profile: self.profile,
             search_mode,
-            preview_filter,
         })
     }
 }
@@ -450,44 +439,6 @@ fn parse_env_var(raw: &str) -> Result<EnvVar> {
 
 fn parse_command_args(raw: &str) -> Result<Vec<String>> {
     shlex::split(raw).ok_or_else(|| eyre!("failed to parse command line '{raw}'"))
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub(crate) enum CommandSpec {
-    String(String),
-    List(Vec<String>),
-}
-
-impl CommandSpec {
-    fn into_args(self) -> Result<Option<Vec<String>>> {
-        match self {
-            CommandSpec::String(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return Ok(None);
-                }
-                let args = parse_command_args(trimmed)?;
-                if args.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(args))
-                }
-            }
-            CommandSpec::List(items) => {
-                let args = items
-                    .into_iter()
-                    .map(|item| item.trim().to_string())
-                    .filter(|item| !item.is_empty())
-                    .collect::<Vec<_>>();
-                if args.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(args))
-                }
-            }
-        }
-    }
 }
 
 fn parse_stdin(raw: &str, provider: &str) -> Result<Vec<String>> {
@@ -724,7 +675,6 @@ mod tests {
             provider: Some("codex".into()),
             profile: Some("demo".into()),
             search_mode: SearchMode::FirstPrompt,
-            preview_filter: None,
         };
 
         let snippets = SnippetConfig {
@@ -793,7 +743,6 @@ mod tests {
             provider: None,
             profile: None,
             search_mode: "invalid".into(),
-            preview_filter: None,
         };
         let err = defaults
             .into_defaults()
@@ -802,43 +751,6 @@ mod tests {
             err.to_string().contains("unknown search_mode 'invalid'"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn config_from_value_parses_preview_filter_and_stdin_mode() {
-        let value: Value = toml::from_str(
-            r#"
-            provider = "codex"
-            search_mode = "full_text"
-            preview_filter = "glow -s dark"
-
-            [providers.codex]
-            bin = "codex"
-            stdin_mode = "capture-arg"
-            stdin_to = "codex: jq -r .prompt -"
-
-            [profiles.default]
-            provider = "codex"
-        "#,
-        )
-        .expect("parse toml");
-
-        let config = Config::from_value(&value).expect("config parses");
-        assert!(matches!(config.defaults.search_mode, SearchMode::FullText));
-        let expected_filter = vec!["glow".to_string(), "-s".to_string(), "dark".to_string()];
-        assert_eq!(
-            config
-                .defaults
-                .preview_filter
-                .as_ref()
-                .expect("preview filter"),
-            &expected_filter
-        );
-
-        let provider = config.providers.get("codex").expect("provider");
-        let stdin = provider.stdin.as_ref().expect("stdin mapping");
-        assert!(matches!(stdin.mode, StdinMode::CaptureArg));
-        assert_eq!(stdin.args, vec!["jq", "-r", ".prompt"]);
     }
 
     #[test]
@@ -915,43 +827,6 @@ mod tests {
                 .any(|msg| msg.contains("references unknown provider")),
             "missing provider diagnostic not found: {messages:?}"
         );
-    }
-
-    #[test]
-    fn command_spec_string_splits_with_shlex() {
-        let args = CommandSpec::String("glow -s dark".into())
-            .into_args()
-            .expect("parsing succeeds")
-            .expect("non-empty command");
-        assert_eq!(args, ["glow", "-s", "dark"]);
-    }
-
-    #[test]
-    fn command_spec_list_trims_and_filters() {
-        let args = CommandSpec::List(vec![
-            " glow ".into(),
-            " ".into(),
-            "-s".into(),
-            "dark".into(),
-        ])
-        .into_args()
-        .expect("parsing succeeds")
-        .expect("non-empty command");
-        assert_eq!(args, ["glow", "-s", "dark"]);
-    }
-
-    #[test]
-    fn command_spec_string_returns_none_for_blank() -> Result<()> {
-        let result = CommandSpec::String("   ".into()).into_args()?;
-        assert!(result.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn command_spec_list_returns_none_for_whitespace_only() -> Result<()> {
-        let result = CommandSpec::List(vec![" ".into(), "\t".into()]).into_args()?;
-        assert!(result.is_none());
-        Ok(())
     }
 
     #[test]
@@ -1069,7 +944,6 @@ mod tests {
                 provider: Some("missing".into()),
                 profile: Some("absent-profile".into()),
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {

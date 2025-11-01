@@ -577,7 +577,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -683,7 +682,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -782,7 +780,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -854,7 +851,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -912,7 +908,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -953,7 +948,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: None,
             },
             providers,
             snippets: SnippetConfig {

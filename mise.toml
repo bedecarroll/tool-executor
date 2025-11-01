@@ -3,11 +3,12 @@ min_version = "2025.9.10"
 [tools]
 rust = { version = "1.90.0", components = "rustfmt,clippy,llvm-tools-preview" }
 "cargo:cargo-binstall" = "latest"
-"cargo:cargo-nextest" = "latest"
-"cargo:cargo-llvm-cov" = "latest"
-"cargo:typos-cli" = "latest"
-"cargo:cargo-insta" = "latest"
 "cargo:cargo-deny" = "latest"
+"cargo:cargo-insta" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-update" = "latest"
+"cargo:typos-cli" = "latest"
 node = "lts"
 "npm:markdownlint-cli2" = "latest"
 

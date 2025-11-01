@@ -5,9 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 #[cfg(all(not(test), not(coverage)))]
 use std::io;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
@@ -30,6 +28,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use shell_escape::unix::escape as shell_escape;
 use std::borrow::Cow;
+use tui_markdown::from_str as md_to_text;
 
 use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
@@ -44,8 +43,6 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
-
-mod sanitize;
 
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
@@ -1225,7 +1222,7 @@ impl<'ctx> AppState<'ctx> {
             entry.clone()
         } else {
             let lines = vec!["No selection".to_string()];
-            let styled = lines_to_plain_text(&lines);
+            let styled = markdown_lines_to_text(&lines);
             return Preview {
                 lines,
                 styled,
@@ -1247,13 +1244,10 @@ impl<'ctx> AppState<'ctx> {
             return preview.clone();
         }
 
-        let filter_args = self.ctx.config.defaults.preview_filter.as_ref();
-
         let preview = match entry {
             Entry::Session(session) => Self::session_preview_from_result(
                 &session,
                 self.ctx.db.fetch_transcript(&session.id),
-                filter_args,
             ),
             Entry::Profile(profile) => {
                 let mut lines = match profile.kind {
@@ -1279,17 +1273,7 @@ impl<'ctx> AppState<'ctx> {
                 if lines.is_empty() {
                     lines.push(format!("Provider: {}", profile.provider));
                 }
-                let styled = if let Some(sanitize::SanitizedText {
-                    lines: filtered_lines,
-                    styled,
-                }) = apply_preview_filter(filter_args, &lines)
-                {
-                    let fallback = lines_to_plain_text(&filtered_lines);
-                    lines = filtered_lines;
-                    styled.or(fallback)
-                } else {
-                    lines_to_plain_text(&lines)
-                };
+                let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
                     styled,
@@ -1300,7 +1284,7 @@ impl<'ctx> AppState<'ctx> {
             }
             Entry::Empty(empty) => {
                 let lines = empty.preview.clone();
-                let styled = lines_to_plain_text(&lines);
+                let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
                     styled,
@@ -1318,22 +1302,11 @@ impl<'ctx> AppState<'ctx> {
     fn session_preview_from_result(
         session: &SessionEntry,
         result: Result<Option<Transcript>>,
-        filter: Option<&Vec<String>>,
     ) -> Preview {
         match result {
             Ok(Some(transcript)) => {
-                let mut lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
-                let styled = if let Some(sanitize::SanitizedText {
-                    lines: filtered_lines,
-                    styled,
-                }) = apply_preview_filter(filter, &lines)
-                {
-                    let fallback = lines_to_plain_text(&filtered_lines);
-                    lines = filtered_lines;
-                    styled.or(fallback)
-                } else {
-                    lines_to_plain_text(&lines)
-                };
+                let lines = transcript.markdown_lines(Some(PREVIEW_MESSAGE_LIMIT));
+                let styled = markdown_lines_to_text(&lines);
                 let title = transcript
                     .session
                     .uuid
@@ -1350,7 +1323,7 @@ impl<'ctx> AppState<'ctx> {
             }
             Ok(None) => {
                 let lines = vec!["No transcript available".to_string()];
-                let styled = lines_to_plain_text(&lines);
+                let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
                     styled,
@@ -1361,7 +1334,7 @@ impl<'ctx> AppState<'ctx> {
             }
             Err(err) => {
                 let lines = vec![format!("preview error: {err}")];
-                let styled = lines_to_plain_text(&lines);
+                let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
                     styled,
@@ -1374,66 +1347,40 @@ impl<'ctx> AppState<'ctx> {
     }
 }
 
-fn apply_preview_filter(
-    filter: Option<&Vec<String>>,
-    lines: &[String],
-) -> Option<sanitize::SanitizedText> {
-    let args = filter?;
-    if args.is_empty() {
-        return None;
-    }
-
-    let input = lines.join("\n");
-    let output = run_preview_filter(args, &input)?;
-    let sanitized = sanitize::sanitize_ansi(&output);
-    if sanitized.lines.is_empty() {
-        return None;
-    }
-    Some(sanitized)
-}
-
-fn lines_to_plain_text(lines: &[String]) -> Option<Text<'static>> {
+fn markdown_lines_to_text(lines: &[String]) -> Option<Text<'static>> {
     if lines.is_empty() {
         return None;
     }
-    Some(Text::from(lines.join("\n")))
+    let markdown = lines.join("\n");
+    let text = md_to_text(&markdown);
+    Some(text_to_owned(text))
 }
 
-fn run_preview_filter(args: &[String], input: &str) -> Option<String> {
-    let mut command = Command::new(&args[0]);
-    if args.len() > 1 {
-        command.args(&args[1..]);
+fn text_to_owned(text: Text<'_>) -> Text<'static> {
+    let lines = text
+        .lines
+        .into_iter()
+        .map(|line| {
+            let spans = line
+                .spans
+                .into_iter()
+                .map(|span| Span {
+                    style: span.style,
+                    content: Cow::Owned(span.content.into_owned()),
+                })
+                .collect();
+            Line {
+                style: line.style,
+                alignment: line.alignment,
+                spans,
+            }
+        })
+        .collect();
+    Text {
+        alignment: text.alignment,
+        style: text.style,
+        lines,
     }
-    if env::var_os("TERM").is_none() {
-        command.env("TERM", "xterm-256color");
-    }
-    if env::var_os("COLORTERM").is_none() {
-        command.env("COLORTERM", "truecolor");
-    }
-    if env::var_os("CLICOLOR_FORCE").is_none() {
-        command.env("CLICOLOR_FORCE", "1");
-    }
-
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .ok()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        if !input.is_empty() && stdin.write_all(input.as_bytes()).is_err() {
-            return None;
-        }
-        if !input.ends_with('\n') && stdin.write_all(b"\n").is_err() {
-            return None;
-        }
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
 }
 
 fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
@@ -1764,7 +1711,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: Some("default".into()),
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: Some(vec!["cat".into()]),
             },
             providers,
             snippets,
@@ -2005,34 +1951,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preview_filter_helpers_run_commands() {
-        let lines = vec!["line one".to_string(), "line two".to_string()];
-        let filtered =
-            apply_preview_filter(Some(&vec!["cat".into()]), &lines).expect("filter result");
-        assert_eq!(filtered.lines, lines);
-        assert!(filtered.styled.is_some());
-
-        let plain = lines_to_plain_text(&lines).expect("plain text");
-        assert!(!plain.lines.is_empty());
-
-        let ansi_output = "\u{1b}[31mred\u{1b}[0m";
-        let ansi = super::sanitize::sanitize_ansi(ansi_output);
-        assert_eq!(ansi.lines.len(), 1);
-        assert!(ansi.lines[0].contains("red"));
-        assert!(ansi.styled.is_some());
-
-        let output = run_preview_filter(&["cat".into()], "hello").expect("output");
-        assert!(output.contains("hello"));
-        assert!(run_preview_filter(&["false".into()], "ignored").is_none());
-        assert!(apply_preview_filter(None, &lines).is_none());
-        assert!(lines_to_plain_text(&[]).is_none());
-        let empty_sanitized = super::sanitize::sanitize_ansi("");
-        assert!(empty_sanitized.lines.is_empty());
-        assert!(empty_sanitized.styled.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn state_filtering_and_provider_cycle() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
@@ -2157,22 +2075,26 @@ mod tests {
     fn session_preview_from_result_success() {
         let session = make_session_entry("sess-success");
         let transcript = make_transcript("sess-success");
-        let preview = AppState::session_preview_from_result(
-            &session,
-            Ok(Some(transcript.clone())),
-            Some(&vec!["cat".into()]),
-        );
+        let preview = AppState::session_preview_from_result(&session, Ok(Some(transcript)));
         assert!(preview.lines.join("\n").contains("Hello world"));
         assert!(preview.title.is_some());
-
-        let no_filter = AppState::session_preview_from_result(&session, Ok(Some(transcript)), None);
-        assert!(no_filter.lines.join(" ").contains("Hello"));
+        let styled = preview
+            .styled
+            .as_ref()
+            .expect("expected styled markdown output");
+        assert!(
+            styled
+                .lines
+                .iter()
+                .any(|line| line.style != Style::default()
+                    || line.spans.iter().any(|span| span.style != Style::default()))
+        );
     }
 
     #[test]
     fn session_preview_from_result_missing_transcript() {
         let session = make_session_entry("sess-missing");
-        let preview = AppState::session_preview_from_result(&session, Ok(None), None);
+        let preview = AppState::session_preview_from_result(&session, Ok(None));
         assert_eq!(preview.lines, vec![String::from("No transcript available")]);
         assert_eq!(preview.title.as_deref(), Some("sess-missing"));
     }
@@ -2180,12 +2102,12 @@ mod tests {
     #[test]
     fn session_preview_from_result_error() {
         let session = make_session_entry("sess-error");
-        let preview = AppState::session_preview_from_result(&session, Err(eyre!("boom")), None);
+        let preview = AppState::session_preview_from_result(&session, Err(eyre!("boom")));
         assert!(preview.lines[0].contains("boom"));
     }
 
-    #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
     fn handle_key_navigation_and_provider_cycle() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
@@ -2583,14 +2505,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preview_filter_sanitizes_osc_sequences() -> Result<()> {
+    fn preview_renders_markdown_without_filter() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
-        config.defaults.preview_filter = Some(vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            "printf '\\033]8;;https://example.com\\033\\\\link\\033]8;;\\033\\\\\\n'".into(),
-        ]);
         let directories = build_directories(&temp);
         directories.ensure_all()?;
         let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
@@ -2603,9 +2520,9 @@ mod tests {
             .unwrap()
             .to_path_buf();
         fs::create_dir_all(&session_dir)?;
-        let session_path = session_dir.join("sanitize.jsonl");
+        let session_path = session_dir.join("markdown.jsonl");
         fs::File::create(&session_path)?.write_all(b"{\"event\":\"preview\"}\n")?;
-        insert_session(&mut db, &session_path, "sess-sanitize")?;
+        insert_session(&mut db, &session_path, "sess-markdown")?;
 
         let mut ctx = UiContext {
             config: &config,
@@ -2616,21 +2533,28 @@ mod tests {
         let mut state = AppState::new(&mut ctx)?;
         let preview = state.preview();
         let joined = preview.lines.join("\n");
-        assert_eq!(joined, "link");
         assert!(
-            !joined.contains('\u{1b}'),
-            "preview output still contains escape sequences: {joined:?}"
+            joined.contains("**Provider**") || joined.contains("# Codex Session"),
+            "expected markdown markers in preview lines: {joined:?}"
         );
-        assert!(preview.styled.is_some());
-
-        let cached_preview = state
-            .preview_cache
-            .values()
-            .next()
-            .expect("cached preview entry");
-        let cached_joined = cached_preview.lines.join("\n");
-        assert_eq!(cached_joined, "link");
-        assert!(!cached_joined.contains('\u{1b}'));
+        let styled = preview
+            .styled
+            .as_ref()
+            .expect("expected styled markdown output without external helpers");
+        let first_line = styled
+            .lines
+            .first()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        assert!(
+            !first_line.contains("**"),
+            "expected markdown renderer to strip formatting markers, saw: {first_line:?}"
+        );
         Ok(())
     }
 
@@ -2913,43 +2837,6 @@ mod tests {
         state.entries.clear();
         assert_eq!(state.status_message(), None);
         Ok(())
-    }
-
-    #[test]
-    fn sanitize_ansi_strips_osc_sequences() {
-        let osc = "\u{1b}]8;;https://example.com\u{1b}\\link\u{1b}]8;;\u{1b}\\";
-        let sanitized = super::sanitize::sanitize_ansi(osc);
-        let joined = sanitized.lines.join("\n");
-        assert!(
-            !joined.contains('\u{1b}'),
-            "sanitized text still contains escape sequences: {joined:?}"
-        );
-        assert_eq!(sanitized.lines, vec!["link".to_string()]);
-        assert!(
-            sanitized.styled.is_some(),
-            "expected styled text to be available"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preview_filter_handles_empty_and_failure() {
-        let lines = vec!["alpha line".to_string()];
-        assert!(apply_preview_filter(None, &lines).is_none());
-
-        let empty_args: Vec<String> = Vec::new();
-        assert!(apply_preview_filter(Some(&empty_args), &lines).is_none());
-
-        let no_output = vec!["/bin/sh".into(), "-c".into(), "true".into()];
-        assert!(apply_preview_filter(Some(&no_output), &lines).is_none());
-
-        let failing = vec!["/bin/false".into()];
-        assert!(apply_preview_filter(Some(&failing), &lines).is_none());
-
-        let echo = vec!["/bin/sh".into(), "-c".into(), "cat".into()];
-        let filtered = apply_preview_filter(Some(&echo), &lines).expect("filtered lines");
-        assert_eq!(filtered.lines, lines);
-        assert!(filtered.styled.is_some());
     }
 
     #[cfg(unix)]
@@ -3847,7 +3734,7 @@ mod tests {
             "session:codex/refactor-feature".into(),
             Preview {
                 lines: preview_lines.clone(),
-                styled: lines_to_plain_text(&preview_lines),
+                styled: markdown_lines_to_text(&preview_lines),
                 title: Some("codex/refactor-feature".into()),
                 timestamp: Some("2023-10-22 19:00 UTC".into()),
                 updated_at: Instant::now(),

@@ -7,21 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<!-- markdownlint-disable-next-line MD024 -->
 ### Breaking
 
 - Release artifacts now build from the dedicated `tx` CLI crate, producing `tx-<target>` archives and installer scripts. Existing automation that downloaded `tool-executor-<target>` assets must update to the new filenames. Keep the `tool-executor` library and `tx` CLI crate versions in sync for the v0.4.0 release onward.
 
+<!-- markdownlint-disable-next-line MD024 -->
 ### Added
 
 - Nothing yet.
 
+<!-- markdownlint-disable-next-line MD024 -->
 ### Changed
 
 - Nothing yet.
 
+<!-- markdownlint-disable-next-line MD024 -->
 ### Fixed
 
 - Nothing yet.
+
+## [0.5.0] - 2025-11-01
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Breaking
+
+- Removed the `preview_filter` configuration option and its runtime plumbing. The TUI no longer shells out to external preview commands, so existing configs referencing tools like `glow` must delete the key.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Built-in Markdown rendering for session and profile previews via `tui-markdown`, so headings, emphasis, and code blocks display without relying on external filters.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Upgraded the TUI stack to `ratatui` 0.29.0 (and aligned `unicode-width` to 0.2.0) to support the embedded Markdown renderer.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Preview panes no longer emit OSC/DCS escape sequences triggered by external filters because rendering now happens entirely inside the binary.
 
 ## [0.4.1] - 2025-11-01
 
