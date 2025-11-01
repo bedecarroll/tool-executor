@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::Value;
 use serde_json::json;
@@ -121,7 +122,8 @@ fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
         .assert()
         .success()
         .stdout(contains("provider = \"codex\""))
-        .stdout(contains("Session logs are discovered automatically"));
+        .stdout(contains("stdin_to = \"codex:{prompt}\""))
+        .stdout(contains("Session logs are discovered automatically").not());
     temp.close()?;
     Ok(())
 }
@@ -134,7 +136,8 @@ fn config_default_raw_outputs_template_without_substitution() -> color_eyre::Res
         .assert()
         .success()
         .stdout(contains("provider = \"codex\""))
-        .stdout(contains("Session logs are discovered automatically"));
+        .stdout(contains("stdin_to = \"codex:{prompt}\""))
+        .stdout(contains("Session logs are discovered automatically").not());
     temp.close()?;
     Ok(())
 }
