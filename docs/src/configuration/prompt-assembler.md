@@ -32,13 +32,13 @@ When the feature is active:
 - `Enter` launches the pipeline immediately; `Tab` prints it for shell reuse.
 - When a previous session is highlighted you can press `Ctrl+Y` to print its ID or `Ctrl+E` to export its transcript before switching back to the profile pane.
 
-Behind the scenes tx inserts `pa <prompt>` as a pre snippet before your provider. Combine the feature with `stdin_mode = "capture-arg"` to pass assembled prompts as arguments:
+Behind the scenes tx inserts `pa <prompt>` as a pre snippet before your provider. Combine the feature with `stdin_mode = "capture_arg"` to pass assembled prompts as arguments:
 
 ```toml
 [providers.codex]
 bin = "codex"
 flags = ["--search"]
-stdin_mode = "capture-arg"
+stdin_mode = "capture_arg"
 stdin_to = "codex:{prompt}"
 ```
 

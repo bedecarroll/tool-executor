@@ -1,7 +1,8 @@
+#:schema https://tx.bedecarroll.com/assets/config-schema.json
 provider = "codex"
 
 [providers.codex]
 bin = "codex"
 flags = []
-stdin_mode = "capture-arg"
+stdin_mode = "capture_arg"
 stdin_to = "codex:{prompt}"
