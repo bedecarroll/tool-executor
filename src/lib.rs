@@ -378,6 +378,7 @@ provider = "alt"
         let summary = SessionSummary {
             id: "sess-1".into(),
             provider: "demo".into(),
+            wrapper: None,
             label: Some("Demo".into()),
             path: session_path.path().to_path_buf(),
             uuid: Some("uuid-1".into()),

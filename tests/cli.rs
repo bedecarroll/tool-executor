@@ -298,6 +298,7 @@ fn search_returns_results_with_role_filter() -> color_eyre::Result<()> {
     let summary = SessionSummary {
         id: "sess-1".into(),
         provider: "codex".into(),
+        wrapper: None,
         label: Some("Label".into()),
         path: temp.child("sess.jsonl").path().to_path_buf(),
         uuid: Some("uuid-1".into()),

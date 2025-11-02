@@ -10,7 +10,7 @@ use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, Transcript,
 };
 
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 pub struct Database {
     conn: Connection,
@@ -52,18 +52,70 @@ impl Database {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
 
-        if current != SCHEMA_VERSION {
-            self.conn.execute_batch(
-                r"
-                DROP TABLE IF EXISTS messages_fts;
-                DROP TABLE IF EXISTS messages;
-                DROP TABLE IF EXISTS sessions;
-                ",
-            )?;
+        if current == SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        if current > SCHEMA_VERSION {
+            return Err(eyre!(
+                "database schema version {current} is newer than this binary supports ({SCHEMA_VERSION})"
+            ));
+        }
+
+        if current == 0 {
             self.create_schema()?;
+            return Ok(());
+        }
+
+        if current < 5 {
+            self.migrate_to_v5()?;
+            return Ok(());
         }
 
         Ok(())
+    }
+
+    fn migrate_to_v5(&self) -> Result<()> {
+        let needs_wrapper = !self.has_column("sessions", "wrapper")?;
+
+        if needs_wrapper {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN wrapper TEXT", [])?;
+        }
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp)",
+            [],
+        )?;
+
+        self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
+        Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name.eq_ignore_ascii_case(column) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn create_schema(&self) -> Result<()> {
@@ -72,6 +124,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
+                wrapper TEXT,
                 label TEXT,
                 path TEXT NOT NULL,
                 uuid TEXT,
@@ -126,6 +179,7 @@ impl Database {
                 SELECT
                     id,
                     provider,
+                    wrapper,
                     label,
                     path,
                     uuid,
@@ -159,6 +213,7 @@ impl Database {
             INSERT INTO sessions (
                 id,
                 provider,
+                wrapper,
                 label,
                 path,
                 uuid,
@@ -170,9 +225,10 @@ impl Database {
                 size,
                 mtime
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
+                wrapper = excluded.wrapper,
                 label = excluded.label,
                 path = excluded.path,
                 uuid = excluded.uuid,
@@ -187,6 +243,7 @@ impl Database {
             params![
                 s.id,
                 s.provider,
+                s.wrapper.as_deref(),
                 s.label.as_deref(),
                 s.path.to_string_lossy(),
                 s.uuid.as_deref(),
@@ -247,6 +304,7 @@ impl Database {
             SELECT
                 id,
                 provider,
+                wrapper,
                 label,
                 path,
                 uuid,
@@ -307,7 +365,7 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<Vec<SessionQuery>> {
         let mut query = String::from(
-            "SELECT id, provider, label, first_prompt, actionable, last_active FROM sessions",
+            "SELECT id, provider, wrapper, label, first_prompt, actionable, last_active FROM sessions",
         );
         let mut clauses = Vec::new();
         let mut params: Vec<SqlValue> = Vec::new();
@@ -358,7 +416,7 @@ impl Database {
         actionable_only: bool,
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
-            "SELECT id, provider, label, NULL AS role, first_prompt, last_active, actionable FROM sessions WHERE first_prompt LIKE ?",
+            "SELECT id, provider, wrapper, label, NULL AS role, first_prompt, last_active, actionable FROM sessions WHERE first_prompt LIKE ?",
         );
         let mut params: Vec<SqlValue> = vec![SqlValue::from(format!("%{term}%"))];
 
@@ -395,7 +453,7 @@ impl Database {
     ) -> Result<Vec<SearchHit>> {
         let mut query = String::from(
             r"
-            SELECT s.id, s.provider, s.label, messages_fts.role, messages_fts.content, s.last_active, s.actionable
+            SELECT s.id, s.provider, s.wrapper, s.label, messages_fts.role, messages_fts.content, s.last_active, s.actionable
             FROM messages_fts
             JOIN sessions s ON s.id = messages_fts.session_id
             WHERE messages_fts MATCH ?
@@ -471,6 +529,7 @@ impl Database {
             SELECT
                 id,
                 provider,
+                wrapper,
                 label,
                 path,
                 uuid,
@@ -501,6 +560,7 @@ impl Database {
             SELECT
                 id,
                 provider,
+                wrapper,
                 label,
                 path,
                 uuid,
@@ -556,6 +616,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
         id: row.get("id")?,
         provider: row.get("provider")?,
+        wrapper: row.get::<_, Option<String>>("wrapper")?,
         label: row.get::<_, Option<String>>("label")?,
         path: PathBuf::from(path),
         uuid: row.get::<_, Option<String>>("uuid")?,
@@ -573,10 +634,11 @@ fn map_query(row: &Row<'_>) -> rusqlite::Result<SessionQuery> {
     Ok(SessionQuery {
         id: row.get(0)?,
         provider: row.get(1)?,
-        label: row.get(2)?,
-        first_prompt: row.get(3)?,
-        actionable: row.get::<_, i64>(4)? != 0,
-        last_active: row.get(5)?,
+        wrapper: row.get(2)?,
+        label: row.get(3)?,
+        first_prompt: row.get(4)?,
+        actionable: row.get::<_, i64>(5)? != 0,
+        last_active: row.get(6)?,
     })
 }
 
@@ -584,11 +646,12 @@ fn map_search_hit(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
         session_id: row.get(0)?,
         provider: row.get(1)?,
-        label: row.get(2)?,
-        role: row.get(3)?,
-        snippet: row.get(4)?,
-        last_active: row.get(5)?,
-        actionable: row.get::<_, i64>(6)? != 0,
+        wrapper: row.get(2)?,
+        label: row.get(3)?,
+        role: row.get(4)?,
+        snippet: row.get(5)?,
+        last_active: row.get::<_, Option<i64>>(6)?,
+        actionable: row.get::<_, i64>(7)? != 0,
     })
 }
 
@@ -597,6 +660,7 @@ mod tests {
     use super::*;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
+    use rusqlite::Connection;
     use std::path::PathBuf;
     use time::OffsetDateTime;
 
@@ -619,6 +683,7 @@ mod tests {
         let summary = SessionSummary {
             id: id.into(),
             provider: provider.into(),
+            wrapper: None,
             label: Some(prompt.into()),
             path: PathBuf::from(format!("{id}.jsonl")),
             uuid: None,
@@ -645,6 +710,7 @@ mod tests {
         let summary = SessionSummary {
             id: "session-1".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("demo".into()),
             path: PathBuf::from("session-1.jsonl"),
             uuid: None,
@@ -809,6 +875,7 @@ mod tests {
         let summary = SessionSummary {
             id: "sess-uuid".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("UUID".into()),
             path: PathBuf::from("sess-uuid.jsonl"),
             uuid: Some("abc-123".into()),
@@ -837,6 +904,135 @@ mod tests {
     }
 
     #[test]
+    fn upsert_session_preserves_wrapper() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "sess-wrap".into(),
+            provider: "codex".into(),
+            wrapper: Some("shellwrap".into()),
+            label: Some("Wrapped".into()),
+            path: PathBuf::from("sess-wrap.jsonl"),
+            uuid: None,
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(now));
+        message.is_first = true;
+
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+
+        let stored = db.session_summary("sess-wrap")?.expect("stored summary");
+        assert_eq!(stored.wrapper.as_deref(), Some("shellwrap"));
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_adds_wrapper_without_dropping_sessions() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("tx.sqlite3");
+
+        {
+            let conn = Connection::open(db_path.path())?;
+            conn.execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    label TEXT,
+                    path TEXT NOT NULL,
+                    uuid TEXT,
+                    first_prompt TEXT,
+                    actionable INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER,
+                    started_at INTEGER,
+                    last_active INTEGER,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    mtime INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    session_id TEXT NOT NULL,
+                    idx INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source TEXT,
+                    timestamp INTEGER,
+                    is_first INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_id, idx),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    session_id UNINDEXED,
+                    role UNINDEXED,
+                    content
+                );
+
+                INSERT INTO sessions (
+                    id,
+                    provider,
+                    label,
+                    path,
+                    uuid,
+                    first_prompt,
+                    actionable,
+                    created_at,
+                    started_at,
+                    last_active,
+                    size,
+                    mtime
+                )
+                VALUES (
+                    'sess-legacy',
+                    'codex',
+                    'Legacy',
+                    'sess-legacy.jsonl',
+                    NULL,
+                    'Hello',
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1
+                );
+
+                PRAGMA user_version = 4;
+                ",
+            )?;
+        }
+
+        let db = Database::open(db_path.path())?;
+        let summary = db
+            .session_summary("sess-legacy")?
+            .expect("legacy summary should exist");
+        assert_eq!(summary.wrapper, None);
+
+        let mut stmt = db.conn.prepare("PRAGMA table_info(sessions)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            columns.iter().any(|name| name == "wrapper"),
+            "wrapper column missing after migration"
+        );
+
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+
+        Ok(())
+    }
+
+    #[test]
     fn fetch_transcript_returns_none_for_unknown_identifier() -> Result<()> {
         let db = create_db()?;
         assert!(db.fetch_transcript("missing")?.is_none());
@@ -850,6 +1046,7 @@ mod tests {
         let summary = SessionSummary {
             id: "uuid-session".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("By UUID".into()),
             path: PathBuf::from("uuid-session.jsonl"),
             uuid: Some("uuid-lookup".into()),

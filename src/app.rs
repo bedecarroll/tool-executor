@@ -13,14 +13,17 @@ use tracing::debug;
 use which::which;
 
 use crate::cli::{
-    Cli, ConfigCommand, ConfigDefaultCommand, ConfigSchemaCommand, ExportCommand, ResumeCommand,
-    SearchCommand, SelfUpdateCommand,
+    Cli, ConfigCommand, ConfigDefaultCommand, ConfigSchemaCommand, ExportCommand,
+    InternalPromptAssemblerCommand, ResumeCommand, SearchCommand, SelfUpdateCommand,
 };
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
 use crate::db::Database;
 use crate::indexer::{IndexError, IndexReport, Indexer};
-use crate::pipeline::{Invocation, PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
+use crate::internal::assemble_prompt;
+use crate::pipeline::{
+    Invocation, PipelinePlan, PipelineRequest, PromptInvocation, SessionContext, build_pipeline,
+};
 use crate::prompts::{PromptAssembler, PromptStatus};
 use crate::providers;
 use crate::session::{SearchHit, SessionSummary, Transcript};
@@ -207,21 +210,39 @@ impl<'cli> App<'cli> {
             .session_summary_for_identifier(&cmd.session_id)?
             .ok_or_else(|| eyre!("session '{}' not found", cmd.session_id))?;
 
-        if let Some(profile_name) = &cmd.profile {
-            let profile = self
-                .loaded
-                .config
-                .profiles
-                .get(profile_name)
-                .ok_or_else(|| eyre!("profile '{}' not found", profile_name))?;
-            if profile.provider != summary.provider {
-                return Err(AppError::ProviderMismatch {
-                    expected: summary.provider.clone(),
-                    actual: profile.provider.clone(),
+        let (prompt_invocation, profile_inline_pre) = if let Some(profile_name) = &cmd.profile {
+            let (prompt_invocation, inline_pre) = {
+                let profile = self
+                    .loaded
+                    .config
+                    .profiles
+                    .get(profile_name)
+                    .ok_or_else(|| eyre!("profile '{}' not found", profile_name))?;
+                if profile.provider != summary.provider {
+                    return Err(AppError::ProviderMismatch {
+                        expected: summary.provider.clone(),
+                        actual: profile.provider.clone(),
+                    }
+                    .into());
                 }
-                .into());
+                let prompt_invocation =
+                    profile
+                        .prompt_assembler
+                        .as_ref()
+                        .map(|prompt| PromptInvocation {
+                            name: prompt.clone(),
+                            args: profile.prompt_assembler_args.clone(),
+                        });
+                let inline_pre: Vec<String> = Vec::new();
+                (prompt_invocation, inline_pre)
+            };
+            if let Some(invocation) = prompt_invocation.as_ref() {
+                self.ensure_prompt_available(&invocation.name)?;
             }
-        }
+            (prompt_invocation, inline_pre)
+        } else {
+            (None, Vec::new())
+        };
 
         let vars = parse_vars(&cmd.vars)?;
         let working_dir = summary.path.parent().map_or_else(
@@ -238,16 +259,19 @@ impl<'cli> App<'cli> {
         }
         provider_args.extend(cmd.provider_args.clone());
 
+        let capture_prompt = prompt_invocation.is_some() || !profile_inline_pre.is_empty();
+
         let request = PipelineRequest {
             config: &self.loaded.config,
             provider_hint: Some(summary.provider.as_str()),
             profile: cmd.profile.as_deref(),
             additional_pre: cmd.pre_snippets.clone(),
             additional_post: cmd.post_snippets.clone(),
-            inline_pre: Vec::new(),
+            inline_pre: profile_inline_pre,
             wrap: cmd.wrap.as_deref(),
             provider_args,
-            capture_prompt: false,
+            capture_prompt,
+            prompt_assembler: prompt_invocation,
             vars,
             session: SessionContext {
                 id: Some(summary.id.clone()),
@@ -277,6 +301,50 @@ impl<'cli> App<'cli> {
         }
 
         execute_plan(&plan).wrap_err("failed to execute pipeline")
+    }
+
+    fn ensure_prompt_available(&mut self, prompt_name: &str) -> Result<()> {
+        let status = if let Some(prompt) = self.prompt.as_mut() {
+            if self.loaded.config.features.prompt_assembler.is_none() {
+                return Err(eyre!(
+                    "profile references prompt '{}' but prompt-assembler is disabled",
+                    prompt_name
+                ));
+            }
+            prompt.refresh(false)
+        } else {
+            let cfg = self
+                .loaded
+                .config
+                .features
+                .prompt_assembler
+                .clone()
+                .ok_or_else(|| {
+                    eyre!(
+                        "profile references prompt '{}' but prompt-assembler is disabled",
+                        prompt_name
+                    )
+                })?;
+            let mut prompt = PromptAssembler::new(cfg);
+            let status = prompt.refresh(false);
+            self.prompt = Some(prompt);
+            status
+        };
+
+        match status {
+            PromptStatus::Ready { profiles, .. } => {
+                if profiles.iter().any(|vp| vp.name == prompt_name) {
+                    Ok(())
+                } else {
+                    Err(eyre!("prompt assembler prompt '{}' not found", prompt_name))
+                }
+            }
+            PromptStatus::Unavailable { message } => Err(eyre!(message)),
+            PromptStatus::Disabled => Err(eyre!(
+                "prompt assembler is disabled but profile references prompt '{}'",
+                prompt_name
+            )),
+        }
     }
 
     /// Export a session transcript in human or Markdown form.
@@ -537,29 +605,48 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
 }
 
 pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
-    execute_plan_with_prompt(plan, io::stdin().is_terminal(), |label| {
+    const DEFAULT_PROMPT_LIMIT: usize = 1_048_576;
+    let assembled_prompt = if let Some(invocation) = &plan.prompt_assembler {
+        let cmd = InternalPromptAssemblerCommand {
+            prompt: invocation.name.clone(),
+            prompt_args: invocation.args.clone(),
+            prompt_limit: DEFAULT_PROMPT_LIMIT,
+        };
+        Some(assemble_prompt(&cmd)?)
+    } else {
+        None
+    };
+
+    execute_plan_with_prompt(plan, io::stdin().is_terminal(), assembled_prompt, |label| {
         prompt_for_stdin(label).map(Some)
     })
+}
+
+fn should_warn_capture(
+    plan: &PipelinePlan,
+    capture_input: Option<&str>,
+    stdin_is_terminal: bool,
+) -> bool {
+    capture_input.is_none()
+        && stdin_is_terminal
+        && plan.pipeline.contains("internal capture-arg")
+        && !plan.capture_has_pre_commands
 }
 
 fn execute_plan_with_prompt<P>(
     plan: &PipelinePlan,
     stdin_is_terminal: bool,
+    mut capture_input: Option<String>,
     mut prompt: P,
 ) -> Result<()>
 where
     P: FnMut(Option<&str>) -> Result<Option<String>>,
 {
-    let capture_input = if plan.needs_stdin_prompt && stdin_is_terminal {
-        prompt(plan.stdin_prompt_label.as_deref())?
-    } else {
-        None
-    };
+    if capture_input.is_none() && plan.needs_stdin_prompt && stdin_is_terminal {
+        capture_input = prompt(plan.stdin_prompt_label.as_deref())?;
+    }
 
-    if capture_input.is_none()
-        && plan.pipeline.contains("internal capture-arg")
-        && stdin_is_terminal
-    {
+    if should_warn_capture(plan, capture_input.as_deref(), stdin_is_terminal) {
         eprintln!(
             "tx: capturing prompt input. Type your prompt, then press Ctrl-D (Ctrl-Z on Windows) to continue."
         );
@@ -716,6 +803,7 @@ fn summary_to_json(
     json!({
         "id": summary.id,
         "provider": summary.provider,
+        "wrapper": summary.wrapper,
         "label": summary.label,
         "path": summary.path.to_string_lossy(),
         "uuid": summary.uuid,
@@ -887,6 +975,7 @@ mod tests {
         SessionSummary {
             id: "id".into(),
             provider: "codex".into(),
+            wrapper: Some("shellwrap".into()),
             label: Some("demo".into()),
             path: PathBuf::from("/tmp/file.jsonl"),
             uuid: Some("abc".into()),
@@ -957,6 +1046,7 @@ mod tests {
         assert_eq!(value["id"], "id");
         assert_eq!(value["snippet"], "snippet");
         assert_eq!(value["snippet_role"], "user");
+        assert_eq!(value["wrapper"], "shellwrap");
     }
 
     #[test]
@@ -965,6 +1055,7 @@ mod tests {
             SearchHit {
                 session_id: "keep-1".into(),
                 provider: "codex".into(),
+                wrapper: None,
                 label: None,
                 role: Some("user".into()),
                 snippet: Some("hello".into()),
@@ -974,6 +1065,7 @@ mod tests {
             SearchHit {
                 session_id: "skip-role".into(),
                 provider: "codex".into(),
+                wrapper: None,
                 label: None,
                 role: Some("assistant".into()),
                 snippet: None,
@@ -983,6 +1075,7 @@ mod tests {
             SearchHit {
                 session_id: "stale".into(),
                 provider: "codex".into(),
+                wrapper: None,
                 label: None,
                 role: Some("user".into()),
                 snippet: None,
@@ -992,6 +1085,7 @@ mod tests {
             SearchHit {
                 session_id: "keep-2".into(),
                 provider: "codex".into(),
+                wrapper: None,
                 label: None,
                 role: Some("USER".into()),
                 snippet: None,
@@ -1036,6 +1130,7 @@ mod tests {
         let hits = vec![SearchHit {
             session_id: "missing".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: None,
             role: Some("user".into()),
             snippet: None,
@@ -1084,6 +1179,7 @@ mod tests {
         Ok((sessions_dir, session_path))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn fixture_config(sessions_dir: &Path) -> Config {
         let mut providers = IndexMap::new();
         providers.insert(
@@ -1139,6 +1235,8 @@ mod tests {
                 pre: vec!["pre".into()],
                 post: Vec::new(),
                 wrap: Some("wrap".into()),
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
         profiles.insert(
@@ -1150,6 +1248,8 @@ mod tests {
                 pre: Vec::new(),
                 post: Vec::new(),
                 wrap: None,
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
 
@@ -1224,6 +1324,7 @@ mod tests {
         let summary = SessionSummary {
             id: "sess-1".into(),
             provider: "codex".into(),
+            wrapper: Some("shellwrap".into()),
             label: Some("Demo Session".into()),
             path: session_path,
             uuid: Some("uuid-1".into()),
@@ -1380,6 +1481,7 @@ mod tests {
         let hit = SearchHit {
             session_id: "sess-123".into(),
             provider: "codex".into(),
+            wrapper: Some("shellwrap".into()),
             label: Some("Sample".into()),
             role: Some("user".into()),
             snippet: Some("Hello world".into()),
@@ -1501,8 +1603,10 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd,
+            prompt_assembler: None,
         };
 
         execute_plan(&plan)?;
@@ -1543,8 +1647,10 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd,
+            prompt_assembler: None,
         };
 
         let err = execute_plan(&plan).unwrap_err();
@@ -1602,12 +1708,80 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: true,
+            capture_has_pre_commands: false,
             stdin_prompt_label: Some("Prompt".into()),
             cwd: temp.path().to_path_buf(),
+            prompt_assembler: None,
         };
 
-        execute_plan_with_prompt(&plan, true, |_| Ok(Some("payload".into())))?;
+        execute_plan_with_prompt(&plan, true, None, |_| Ok(Some("payload".into())))?;
         assert_eq!(std::fs::read_to_string(output.path())?, "payload");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_plan_uses_prompt_assembler_output() -> Result<()> {
+        let _env = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+
+        let pa_dir = temp.child("bin");
+        pa_dir.create_dir_all()?;
+        let pa = pa_dir.child("pa");
+        pa.write_str(
+            "#!/bin/sh\nif [ \"$1\" = \"show\" ] && [ \"${2:-}\" = \"--json\" ]; then\n  shift 2\n  printf '%s' '{\"profile\":{\"content\":\"Demo {0}\\n\"}}'\n  exit 0\nfi\nshift\nprintf 'Demo %s\\n' \"${1:-}\"\n",
+        )?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa.path(), perms.clone())?;
+
+        let capture = temp.child("capture.sh");
+        capture.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+        fs::set_permissions(capture.path(), perms)?;
+
+        let output = temp.child("prompt.txt");
+        let command = format!("{} {}", capture.path().display(), output.path().display());
+
+        let original_path = std::env::var("PATH").ok();
+        let new_path = if let Some(ref existing) = original_path {
+            format!("{}:{}", pa_dir.path().display(), existing)
+        } else {
+            pa_dir.path().display().to_string()
+        };
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let plan = PipelinePlan {
+            pipeline: command.clone(),
+            display: "capture".into(),
+            friendly_display: "capture".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell { command },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
+            stdin_prompt_label: None,
+            cwd: temp.path().to_path_buf(),
+            prompt_assembler: Some(PromptInvocation {
+                name: "demo".into(),
+                args: vec!["value".into()],
+            }),
+        };
+
+        execute_plan(&plan)?;
+        unsafe {
+            if let Some(value) = original_path {
+                std::env::set_var("PATH", value);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        let contents = std::fs::read_to_string(output.path())?;
+        assert_eq!(contents.trim_end(), "Demo value");
         Ok(())
     }
 
@@ -1640,11 +1814,13 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd: std::env::current_dir()?,
+            prompt_assembler: None,
         };
 
-        execute_plan_with_prompt(&plan, true, |_| Ok(None))?;
+        execute_plan_with_prompt(&plan, true, None, |_| Ok(None))?;
 
         #[cfg(windows)]
         {
@@ -1658,6 +1834,39 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_warn_capture_respects_pre_pipeline() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let base = PipelinePlan {
+            pipeline: "internal capture-arg".into(),
+            display: "capture".into(),
+            friendly_display: "capture".into(),
+            env: Vec::new(),
+            invocation: Invocation::Shell {
+                command: "true".into(),
+            },
+            provider: "codex".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
+            stdin_prompt_label: None,
+            cwd: cwd.clone(),
+            prompt_assembler: None,
+        };
+
+        assert!(should_warn_capture(&base, None, true));
+        assert!(!should_warn_capture(&base, Some("payload"), true));
+        assert!(!should_warn_capture(&base, None, false));
+
+        let mut with_pre = base;
+        with_pre.pipeline = "internal capture-arg --pre 'echo hi'".into();
+        with_pre.capture_has_pre_commands = true;
+        assert!(!should_warn_capture(&with_pre, None, true));
         Ok(())
     }
 
@@ -1678,8 +1887,10 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd: cwd.clone(),
+            prompt_assembler: None,
         };
 
         execute_plan(&success_plan)?;
@@ -1728,8 +1939,10 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd,
+            prompt_assembler: None,
         };
 
         emit_command(&plan, EmitMode::Json)?;

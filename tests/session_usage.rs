@@ -6,6 +6,7 @@ fn session_summary_has_path_matches() {
     let summary = SessionSummary {
         id: "demo".into(),
         provider: "codex".into(),
+        wrapper: None,
         label: None,
         path: std::path::PathBuf::from("/tmp/demo.jsonl"),
         uuid: None,
@@ -32,6 +33,7 @@ fn transcript_markdown_captures_user_and_assistant_roles() {
         session: SessionSummary {
             id: "demo".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: None,
             path: std::path::PathBuf::from("/tmp/demo.jsonl"),
             uuid: None,

@@ -26,7 +26,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use shell_escape::unix::escape as shell_escape;
 use std::borrow::Cow;
 use tui_markdown::from_str as md_to_text;
 
@@ -34,8 +33,10 @@ use crate::app::{self, EmitMode, UiContext};
 use crate::config::model::SearchMode;
 #[cfg(all(test, unix))]
 use crate::indexer::Indexer;
-use crate::pipeline::{PipelinePlan, PipelineRequest, SessionContext, build_pipeline};
-use crate::prompts::PromptStatus;
+use crate::pipeline::{
+    PipelinePlan, PipelineRequest, PromptInvocation, SessionContext, build_pipeline,
+};
+use crate::prompts::{PromptStatus, VirtualProfile};
 use crate::providers;
 use crate::session::{SearchHit, SessionQuery, Transcript};
 use time::format_description::FormatItem;
@@ -240,6 +241,7 @@ enum Entry {
 struct SessionEntry {
     id: String,
     provider: String,
+    wrapper: Option<String>,
     label: Option<String>,
     first_prompt: Option<String>,
     actionable: bool,
@@ -268,6 +270,9 @@ struct ProfileEntry {
     tags: Vec<String>,
     inline_pre: Vec<String>,
     stdin_supported: bool,
+    prompt_assembler: Option<String>,
+    prompt_assembler_args: Vec<String>,
+    prompt_available: bool,
     kind: ProfileKind,
     preview_lines: Vec<String>,
 }
@@ -300,6 +305,7 @@ impl SessionEntry {
         Self {
             id: query.id,
             provider: query.provider,
+            wrapper: query.wrapper,
             label: query.label,
             first_prompt: query.first_prompt,
             actionable: query.actionable,
@@ -313,6 +319,7 @@ impl SessionEntry {
         Self {
             id: hit.session_id,
             provider: hit.provider,
+            wrapper: hit.wrapper,
             label: hit.label,
             first_prompt: hit.snippet.clone(),
             actionable: hit.actionable,
@@ -328,6 +335,13 @@ impl SessionEntry {
             return true;
         }
         if self.provider.to_ascii_lowercase().contains(&needle) {
+            return true;
+        }
+        if self
+            .wrapper
+            .as_ref()
+            .is_some_and(|wrapper| wrapper.to_ascii_lowercase().contains(&needle))
+        {
             return true;
         }
         if self
@@ -700,6 +714,31 @@ impl<'ctx> AppState<'ctx> {
         self.profiles.clear();
         let mut seen = HashSet::new();
 
+        let mut prompt_profiles: Vec<VirtualProfile> = Vec::new();
+        let mut available_prompts: HashSet<String> = HashSet::new();
+        let mut prompt_warning: Option<String> = None;
+
+        if let Some(prompt) = self.ctx.prompt.as_mut() {
+            match prompt.refresh(false) {
+                PromptStatus::Ready { profiles, .. } => {
+                    available_prompts.extend(profiles.iter().map(|vp| vp.name.clone()));
+                    prompt_profiles = profiles;
+                }
+                PromptStatus::Unavailable { message } => {
+                    prompt_warning = Some(message);
+                }
+                PromptStatus::Disabled => {}
+            }
+        }
+
+        let default_provider = self
+            .ctx
+            .config
+            .defaults
+            .provider
+            .clone()
+            .or_else(|| self.ctx.config.providers.keys().next().cloned());
+
         for (name, profile) in &self.ctx.config.profiles {
             let profile_name = name.clone();
             let key = profile_name.to_ascii_lowercase();
@@ -709,6 +748,24 @@ impl<'ctx> AppState<'ctx> {
                     "duplicate profile name '{profile_name}' detected; keeping first definition"
                 );
                 continue;
+            }
+            let mut prompt_available = true;
+            if let Some(prompt_name) = &profile.prompt_assembler {
+                prompt_available = available_prompts.contains(prompt_name);
+                if !prompt_available && self.message.is_none() {
+                    let message = prompt_warning.clone().unwrap_or_else(|| {
+                        if self.ctx.prompt.is_some() {
+                            format!(
+                                "prompt assembler prompt '{prompt_name}' referenced by profile '{profile_name}' not found"
+                            )
+                        } else {
+                            format!(
+                                "profile '{profile_name}' references prompt '{prompt_name}' but prompt-assembler is disabled or unavailable"
+                            )
+                        }
+                    });
+                    self.message = Some(message);
+                }
             }
             self.profiles.push(ProfileEntry {
                 display: profile_name.clone(),
@@ -725,6 +782,9 @@ impl<'ctx> AppState<'ctx> {
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
                 stdin_supported: false,
+                prompt_assembler: profile.prompt_assembler.clone(),
+                prompt_assembler_args: profile.prompt_assembler_args.clone(),
+                prompt_available,
                 kind: ProfileKind::Config { name: profile_name },
                 preview_lines: Vec::new(),
             });
@@ -755,61 +815,53 @@ impl<'ctx> AppState<'ctx> {
                 tags: Vec::new(),
                 inline_pre: Vec::new(),
                 stdin_supported: false,
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
+                prompt_available: true,
                 kind: ProfileKind::Provider,
                 preview_lines: vec![command],
             });
         }
 
-        if let Some(prompt) = self.ctx.prompt.as_mut() {
-            let prompt = &mut **prompt;
-            match prompt.refresh(false) {
-                PromptStatus::Ready { profiles, .. } => {
-                    if let Some(provider) = self
-                        .ctx
-                        .config
-                        .defaults
-                        .provider
-                        .clone()
-                        .or_else(|| self.ctx.config.providers.keys().next().cloned())
-                    {
-                        for vp in profiles {
-                            let profile_name = vp.key.clone();
-                            let key = profile_name.to_ascii_lowercase();
-                            if !seen.insert(key) {
-                                warn!(
-                                    entry = %profile_name,
-                                    "virtual profile '{profile_name}' conflicts with an existing entry; skipping"
-                                );
-                                continue;
-                            }
-                            self.profiles.push(ProfileEntry {
-                                display: profile_name.clone(),
-                                provider: provider.clone(),
-                                pre: Vec::new(),
-                                post: Vec::new(),
-                                wrap: None,
-                                description: vp.description.clone(),
-                                tags: vp.tags.clone(),
-                                inline_pre: vec![format!(
-                                    "pa {}",
-                                    shell_escape(Cow::Borrowed(vp.name.as_str()))
-                                )],
-                                stdin_supported: vp.stdin_supported,
-                                kind: ProfileKind::Virtual,
-                                preview_lines: vp.contents.clone(),
-                            });
-                        }
-                    } else {
-                        self.message = Some(
-                            "prompt profiles unavailable: no providers configured".to_string(),
+        if !prompt_profiles.is_empty() {
+            if let Some(provider) = default_provider {
+                for vp in prompt_profiles {
+                    let profile_name = vp.key.clone();
+                    let key = profile_name.to_ascii_lowercase();
+                    if !seen.insert(key) {
+                        warn!(
+                            entry = %profile_name,
+                            "virtual profile '{profile_name}' conflicts with an existing entry; skipping"
                         );
+                        continue;
                     }
+                    self.profiles.push(ProfileEntry {
+                        display: profile_name.clone(),
+                        provider: provider.clone(),
+                        pre: Vec::new(),
+                        post: Vec::new(),
+                        wrap: None,
+                        description: vp.description.clone(),
+                        tags: vp.tags.clone(),
+                        inline_pre: Vec::new(),
+                        stdin_supported: vp.stdin_supported,
+                        prompt_assembler: Some(vp.name.clone()),
+                        prompt_assembler_args: Vec::new(),
+                        prompt_available: true,
+                        kind: ProfileKind::Virtual,
+                        preview_lines: vp.contents.clone(),
+                    });
                 }
-                PromptStatus::Unavailable { message } => {
-                    self.message = Some(message);
-                }
-                PromptStatus::Disabled => {}
+            } else if self.message.is_none() {
+                self.message =
+                    Some("prompt profiles unavailable: no providers configured".to_string());
             }
+        }
+
+        if let Some(message) = prompt_warning
+            && self.message.is_none()
+        {
+            self.message = Some(message);
         }
     }
 
@@ -918,6 +970,7 @@ impl<'ctx> AppState<'ctx> {
                 let query = SessionQuery {
                     id: summary.id.clone(),
                     provider: summary.provider.clone(),
+                    wrapper: summary.wrapper.clone(),
                     label: summary.label.clone(),
                     first_prompt: summary.first_prompt.clone(),
                     actionable: summary.actionable,
@@ -1144,6 +1197,7 @@ impl<'ctx> AppState<'ctx> {
             wrap: None,
             provider_args,
             capture_prompt: false,
+            prompt_assembler: None,
             vars: HashMap::new(),
             session: SessionContext {
                 id: Some(summary.id.clone()),
@@ -1162,7 +1216,25 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn plan_for_profile(&mut self, profile: &ProfileEntry) -> Result<Option<PipelinePlan>> {
-        let capture_prompt = !profile.pre.is_empty() || !profile.inline_pre.is_empty();
+        if let Some(prompt_name) = profile.prompt_assembler.as_deref()
+            && !profile.prompt_available
+        {
+            return Err(eyre!(
+                "profile '{}' references unknown prompt '{}'",
+                profile.display,
+                prompt_name
+            ));
+        }
+        let prompt_invocation = profile
+            .prompt_assembler
+            .as_ref()
+            .map(|name| PromptInvocation {
+                name: name.clone(),
+                args: profile.prompt_assembler_args.clone(),
+            });
+        let capture_prompt = prompt_invocation.is_some()
+            || !profile.pre.is_empty()
+            || !profile.inline_pre.is_empty();
         let request = match &profile.kind {
             ProfileKind::Config { name } => PipelineRequest {
                 config: self.ctx.config,
@@ -1170,10 +1242,11 @@ impl<'ctx> AppState<'ctx> {
                 profile: Some(name.as_str()),
                 additional_pre: Vec::new(),
                 additional_post: Vec::new(),
-                inline_pre: Vec::new(),
+                inline_pre: profile.inline_pre.clone(),
                 wrap: profile.wrap.as_deref(),
                 provider_args: Vec::new(),
                 capture_prompt,
+                prompt_assembler: prompt_invocation.clone(),
                 vars: HashMap::new(),
                 session: SessionContext::default(),
                 cwd: env::current_dir()?,
@@ -1188,6 +1261,7 @@ impl<'ctx> AppState<'ctx> {
                 wrap: profile.wrap.as_deref(),
                 provider_args: Vec::new(),
                 capture_prompt,
+                prompt_assembler: prompt_invocation.clone(),
                 vars: HashMap::new(),
                 session: SessionContext::default(),
                 cwd: env::current_dir()?,
@@ -1202,6 +1276,7 @@ impl<'ctx> AppState<'ctx> {
                 wrap: None,
                 provider_args: Vec::new(),
                 capture_prompt,
+                prompt_assembler: None,
                 vars: HashMap::new(),
                 session: SessionContext::default(),
                 cwd: env::current_dir()?,
@@ -1322,7 +1397,12 @@ impl<'ctx> AppState<'ctx> {
                 }
             }
             Ok(None) => {
-                let lines = vec!["No transcript available".to_string()];
+                let mut lines = Vec::new();
+                if let Some(wrapper) = session.wrapper.as_deref() {
+                    lines.push(format!("**Wrapper**: `{wrapper}`"));
+                    lines.push(String::new());
+                }
+                lines.push("No transcript available".to_string());
                 let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
@@ -1333,7 +1413,11 @@ impl<'ctx> AppState<'ctx> {
                 }
             }
             Err(err) => {
-                let lines = vec![format!("preview error: {err}")];
+                let mut lines = vec![format!("preview error: {err}")];
+                if let Some(wrapper) = session.wrapper.as_deref() {
+                    lines.insert(0, String::new());
+                    lines.insert(0, format!("**Wrapper**: `{wrapper}`"));
+                }
                 let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,
@@ -1619,9 +1703,10 @@ mod tests {
     use crate::config::Config;
     use crate::config::model::{
         Defaults, FeatureConfig, ProfileConfig, ProviderConfig, SearchMode, SnippetConfig,
+        StdinMapping, StdinMode, WrapperConfig, WrapperMode,
     };
     #[cfg(unix)]
-    use crate::config::model::{PromptAssemblerConfig, Snippet, WrapperConfig, WrapperMode};
+    use crate::config::model::{PromptAssemblerConfig, Snippet};
     use crate::db::Database;
     #[cfg(unix)]
     use crate::pipeline::Invocation;
@@ -1703,6 +1788,8 @@ mod tests {
                 pre: Vec::new(),
                 post: Vec::new(),
                 wrap: None,
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
 
@@ -1734,6 +1821,7 @@ mod tests {
         let summary = SessionSummary {
             id: id.into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some(format!("Session {id}")),
             path: path.to_path_buf(),
             uuid: Some(format!("uuid-{id}")),
@@ -1767,6 +1855,7 @@ mod tests {
         let summary = SessionSummary {
             id: id.into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some(format!("Session {id}")),
             path: path.to_path_buf(),
             uuid: None,
@@ -1859,6 +1948,7 @@ mod tests {
         let entry = SessionEntry {
             id: "sess".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("Demo".into()),
             first_prompt: Some("Hello prompt".into()),
             actionable: true,
@@ -1888,6 +1978,9 @@ mod tests {
             tags: vec!["team".into()],
             inline_pre: Vec::new(),
             stdin_supported: true,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+            prompt_available: true,
             kind: ProfileKind::Config {
                 name: "default".into(),
             },
@@ -2033,6 +2126,7 @@ mod tests {
         SessionEntry {
             id: id.into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("Demo".into()),
             first_prompt: Some("Hello".into()),
             actionable: true,
@@ -2046,6 +2140,7 @@ mod tests {
         let summary = SessionSummary {
             id: id.into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("Demo".into()),
             path: PathBuf::from("/tmp/demo.jsonl"),
             uuid: Some("uuid-demo".into()),
@@ -2104,6 +2199,37 @@ mod tests {
         let session = make_session_entry("sess-error");
         let preview = AppState::session_preview_from_result(&session, Err(eyre!("boom")));
         assert!(preview.lines[0].contains("boom"));
+    }
+
+    #[test]
+    fn session_preview_from_result_includes_wrapper_metadata() {
+        let mut session = make_session_entry("sess-wrapper");
+        session.wrapper = Some("shellwrap".into());
+        let mut transcript = make_transcript("sess-wrapper");
+        transcript.session.wrapper = Some("shellwrap".into());
+
+        let preview = AppState::session_preview_from_result(&session, Ok(Some(transcript)));
+        let joined = preview.lines.join("\n");
+        assert!(
+            joined.contains("**Wrapper**: `shellwrap`"),
+            "expected wrapper metadata in preview:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn session_preview_from_result_missing_transcript_with_wrapper() {
+        let mut session = make_session_entry("sess-missing-wrapper");
+        session.wrapper = Some("shellwrap".into());
+
+        let preview = AppState::session_preview_from_result(&session, Ok(None));
+        assert_eq!(
+            preview.lines,
+            vec![
+                String::from("**Wrapper**: `shellwrap`"),
+                String::new(),
+                String::from("No transcript available")
+            ]
+        );
     }
 
     #[test]
@@ -2573,8 +2699,10 @@ mod tests {
             post_snippets: Vec::new(),
             wrapper: None,
             needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
             stdin_prompt_label: None,
             cwd: std::env::current_dir()?,
+            prompt_assembler: None,
         };
 
         dispatch_outcome(Some(Outcome::Emit(plan.clone())))?;
@@ -3220,6 +3348,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn load_profiles_handles_prompt_statuses() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
@@ -3232,6 +3361,8 @@ mod tests {
                 pre: Vec::new(),
                 post: Vec::new(),
                 wrap: None,
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
         config.profiles.insert(
@@ -3243,6 +3374,8 @@ mod tests {
                 pre: Vec::new(),
                 post: Vec::new(),
                 wrap: None,
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
 
@@ -3278,7 +3411,7 @@ mod tests {
 
         let script = temp.child("pa");
         script.write_str(
-            "#!/bin/sh\necho '[{\"name\":\"virtual\",\"description\":\"Virtual entry\",\"stdin_supported\":true}]'\n",
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  echo '[{\"name\":\"virtual\",\"description\":\"Virtual entry\",\"stdin_supported\":true}]'\nelif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  echo '{\"profile\":{\"content\":\"Virtual content\"}}'\nelse\n  exit 1\nfi\n",
         )?;
         #[cfg(unix)]
         {
@@ -3287,7 +3420,7 @@ mod tests {
         }
 
         let _guard = PathGuard::push(&temp);
-        let mut prompt = PromptAssembler::new(PromptAssemblerConfig {
+        let mut prompt_assembler = PromptAssembler::new(PromptAssemblerConfig {
             namespace: "tests".into(),
         });
 
@@ -3295,7 +3428,7 @@ mod tests {
             config: &config,
             directories: &directories,
             db: &mut db,
-            prompt: Some(&mut prompt),
+            prompt: Some(&mut prompt_assembler),
         };
 
         let mut state = AppState::new(&mut ctx)?;
@@ -3362,6 +3495,7 @@ mod tests {
         state.entries = vec![Entry::Session(SessionEntry {
             id: "missing".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("missing".into()),
             first_prompt: None,
             actionable: true,
@@ -3431,8 +3565,11 @@ mod tests {
             wrap: None,
             description: Some("Original description".into()),
             tags: vec!["team".into()],
-            inline_pre: vec!["pa demo".into()],
+            inline_pre: Vec::new(),
             stdin_supported: true,
+            prompt_assembler: Some("demo".into()),
+            prompt_assembler_args: Vec::new(),
+            prompt_available: true,
             kind: ProfileKind::Virtual,
             preview_lines: vec!["Instruction 1".into(), "Instruction 2".into()],
         })];
@@ -3583,6 +3720,149 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn plan_for_profile_injects_prompt_assembler() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let pa_script = temp.child("pa");
+        pa_script.write_str(
+            "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  echo '[{\"name\":\"demo\",\"description\":\"Demo prompt\",\"stdin_supported\":true}]'\nelif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  if [ \"$3\" = \"demo\" ]; then\n    echo '{\"profile\":{\"content\":\"Instruction\"}}'\n  else\n    exit 1\n  fi\nelse\n  exit 1\nfi\n",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(pa_script.path(), perms)?;
+        }
+
+        let _path_guard = PathGuard::push(&temp);
+
+        config.features.prompt_assembler = Some(PromptAssemblerConfig {
+            namespace: "pa".into(),
+        });
+        let mut prompt_assembler =
+            PromptAssembler::new(config.features.prompt_assembler.clone().unwrap());
+
+        let provider = config
+            .providers
+            .get_mut("codex")
+            .expect("codex provider to exist");
+        provider.stdin = Some(StdinMapping {
+            args: vec!["{prompt}".into()],
+            mode: StdinMode::CaptureArg,
+        });
+
+        let wrapper = WrapperConfig {
+            name: "troubleshooting".into(),
+            mode: WrapperMode::Shell {
+                command: "tmux new-session -s demo '{{CMD}}'".into(),
+            },
+        };
+        config
+            .wrappers
+            .insert(wrapper.name.clone(), wrapper.clone());
+
+        config.profiles.insert(
+            "troubleshooting".into(),
+            ProfileConfig {
+                name: "troubleshooting".into(),
+                provider: "codex".into(),
+                description: Some("Troubleshooting run".into()),
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: Some(wrapper.name.clone()),
+                prompt_assembler: Some("demo".into()),
+                prompt_assembler_args: vec!["--limit".into(), "5".into()],
+            },
+        );
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: Some(&mut prompt_assembler),
+        };
+        let mut state = AppState::new(&mut ctx)?;
+
+        let profile = state
+            .profiles
+            .iter()
+            .find(|entry| entry.display == "troubleshooting")
+            .cloned()
+            .expect("profile to be present");
+        assert!(profile.inline_pre.is_empty());
+        assert_eq!(
+            profile.prompt_assembler_args,
+            vec!["--limit".to_string(), "5".to_string()]
+        );
+
+        let plan = state.plan_for_profile(&profile)?.expect("plan");
+        let prompt = plan
+            .prompt_assembler
+            .as_ref()
+            .expect("plan should include prompt invocation");
+        assert_eq!(prompt.name, "demo");
+        assert_eq!(prompt.args, vec!["--limit".to_string(), "5".to_string()]);
+        assert!(
+            !plan.pipeline.contains("internal prompt-assembler"),
+            "pipeline should not embed prompt helper: {}",
+            plan.pipeline
+        );
+        assert!(
+            plan.pipeline.contains("internal capture-arg"),
+            "pipeline should capture prompt: {}",
+            plan.pipeline
+        );
+        assert_eq!(plan.wrapper.as_deref(), Some(wrapper.name.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn plan_for_profile_errors_when_prompt_missing() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.profiles.insert(
+            "missing".into(),
+            ProfileConfig {
+                name: "missing".into(),
+                provider: "codex".into(),
+                description: None,
+                pre: Vec::new(),
+                post: Vec::new(),
+                wrap: None,
+                prompt_assembler: Some("absent".into()),
+                prompt_assembler_args: Vec::new(),
+            },
+        );
+
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+        let mut state = AppState::new(&mut ctx)?;
+
+        let profile = state
+            .profiles
+            .iter()
+            .find(|entry| entry.display == "missing")
+            .cloned()
+            .expect("profile to exist");
+        let err = state.plan_for_profile(&profile).unwrap_err();
+        assert!(err.to_string().contains("unknown prompt"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn typing_uppercase_r_in_normal_mode_updates_filter() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());
@@ -3634,8 +3914,11 @@ mod tests {
                 wrap: Some("shellwrap".into()),
                 description: Some("Run codex with helpers".into()),
                 tags: vec!["team".into(), "demo".into()],
-                inline_pre: vec!["pa demo".into()],
+                inline_pre: Vec::new(),
                 stdin_supported: true,
+                prompt_assembler: Some("demo".into()),
+                prompt_assembler_args: Vec::new(),
+                prompt_available: true,
                 kind: ProfileKind::Config {
                     name: "wrapped".into(),
                 },
@@ -3703,6 +3986,7 @@ mod tests {
             Entry::Session(SessionEntry {
                 id: "codex/refactor-feature".into(),
                 provider: "codex".into(),
+                wrapper: Some("shellwrap".into()),
                 label: Some("Refactor Feature".into()),
                 first_prompt: Some("refactor feature layout".into()),
                 actionable: true,
@@ -3713,6 +3997,7 @@ mod tests {
             Entry::Session(SessionEntry {
                 id: "codex/refactor-tests".into(),
                 provider: "codex".into(),
+                wrapper: None,
                 label: Some("Refactor Tests".into()),
                 first_prompt: Some("improve test names".into()),
                 actionable: true,
