@@ -19,8 +19,8 @@ Sessions the indexer marks as unactionable stay hidden from default listings but
 | `bin` | `string` | ✅ | Executable or absolute path. |
 | `flags` | `array<string>` | | Default arguments passed to the provider. |
 | `env` | `array<string>` | | Environment entries (`KEY=value`). Supports `${env:VAR}` interpolation. |
-| `stdin_to` | `string` | | Template describing how to inject captured stdin into the argv list. Requires `stdin_mode = "capture-arg"`. |
-| `stdin_mode` | `string` | | Delivery mode: `pipe` (default) streams stdin; `capture-arg` passes stdin as an argument. |
+| `stdin_to` | `string` | | Template describing how to inject captured stdin into the argv list. Requires `stdin_mode = "capture_arg"`. |
+| `stdin_mode` | `string` | | Delivery mode: `pipe` (default) streams stdin; `capture_arg` passes stdin as an argument. |
 
 ## Snippet Commands (`[snippets.pre]`, `[snippets.post]`)
 
