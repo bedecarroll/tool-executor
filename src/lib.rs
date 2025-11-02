@@ -69,9 +69,12 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
 
 fn init_tracing(cli: &Cli) {
     let level = desired_level(cli);
-    let filter = tracing_subscriber::EnvFilter::builder()
+    let mut filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(level.into())
         .from_env_lossy();
+    if let Ok(directive) = "tui_markdown=off".parse::<tracing_subscriber::filter::Directive>() {
+        filter = filter.add_directive(directive);
+    }
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)

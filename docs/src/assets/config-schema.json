@@ -6,16 +6,6 @@
     "features": {
       "$ref": "#/definitions/RawFeatures"
     },
-    "preview_filter": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/CommandSpec"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "profile": {
       "type": [
         "string",
@@ -55,19 +45,6 @@
     }
   },
   "definitions": {
-    "CommandSpec": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      ]
-    },
     "RawFeatures": {
       "type": "object",
       "properties": {

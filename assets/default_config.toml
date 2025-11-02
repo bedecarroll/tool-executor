@@ -1,7 +1,7 @@
 provider = "codex"
-# preview_filter = "glow -s dark" # Optional: pipe TUI preview through an external command.
 
 [providers.codex]
 bin = "codex"
-flags = ["--search"]
-# Session logs are discovered automatically under $CODEX_HOME (defaults to ~/.codex).
+flags = []
+stdin_mode = "capture-arg"
+stdin_to = "codex:{prompt}"

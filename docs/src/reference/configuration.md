@@ -9,7 +9,6 @@ This table lists every key tx reads from configuration files. Types refer to TOM
 | `provider` | `string` | `codex` | Provider used when starting a new session without a profile. Must match a key under `[providers]`. |
 | `profile` | `string` | _unset_ | Preferred profile when creating sessions. Must match a key under `[profiles]`. |
 | `search_mode` | `string` | `first_prompt` | Initial search mode in the TUI. Accepts `first_prompt` or `full_text`. |
-| `preview_filter` | `string` or `array` | _unset_ | Optional command that post-processes preview text. Strings are parsed with `shlex`; arrays stay literal. |
 
 Sessions the indexer marks as unactionable stay hidden from default listings but remain searchable.
 

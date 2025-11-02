@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::Value;
 use serde_json::json;
@@ -10,7 +11,7 @@ use tool_executor::session::{MessageRecord, SessionIngest, SessionSummary};
 use tool_executor::test_support::toml_path;
 
 fn base_command(temp: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("tx").expect("binary exists");
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("tx");
     let config_dir = temp.child("config-root");
     config_dir.create_dir_all().unwrap();
     cmd.env("TX_CONFIG_DIR", config_dir.path());
@@ -121,7 +122,8 @@ fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
         .assert()
         .success()
         .stdout(contains("provider = \"codex\""))
-        .stdout(contains("Session logs are discovered automatically"));
+        .stdout(contains("stdin_to = \"codex:{prompt}\""))
+        .stdout(contains("Session logs are discovered automatically").not());
     temp.close()?;
     Ok(())
 }
@@ -134,7 +136,8 @@ fn config_default_raw_outputs_template_without_substitution() -> color_eyre::Res
         .assert()
         .success()
         .stdout(contains("provider = \"codex\""))
-        .stdout(contains("Session logs are discovered automatically"));
+        .stdout(contains("stdin_to = \"codex:{prompt}\""))
+        .stdout(contains("Session logs are discovered automatically").not());
     temp.close()?;
     Ok(())
 }
@@ -249,6 +252,36 @@ session_roots = ["{sessions}"]
         .arg("doctor")
         .assert()
         .success();
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn doctor_notes_removed_preview_filter() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+preview_filter = "glow"
+provider = "demo"
+
+[providers.demo]
+bin = "echo"
+session_roots = ["{sessions}"]
+"#,
+        sessions = toml_path(sessions_dir.path())
+    );
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.arg("doctor")
+        .assert()
+        .success()
+        .stdout(contains("Ignoring configuration key `preview_filter`"));
 
     temp.close()?;
     Ok(())

@@ -10,7 +10,6 @@ fn default_config_template_parses() -> Result<()> {
 
     assert_eq!(config.defaults.provider.as_deref(), Some("codex"));
     assert_eq!(config.defaults.search_mode, SearchMode::FirstPrompt);
-    assert!(config.defaults.preview_filter.is_none());
 
     Ok(())
 }

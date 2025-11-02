@@ -760,6 +760,16 @@ fn run_doctor(loaded: &LoadedConfig, db: &Database) -> Result<()> {
     println!("tx doctor");
     println!("=========");
 
+    if !loaded.diagnostics.is_empty() {
+        for diag in &loaded.diagnostics {
+            match diag.level {
+                DiagnosticLevel::Warning => println!("warning: {}", diag.message),
+                DiagnosticLevel::Error => println!("error: {}", diag.message),
+            }
+        }
+        println!();
+    }
+
     for (name, provider) in &loaded.config.providers {
         match which(&provider.bin) {
             Ok(path) => println!("✔ provider {} binary found at {}", name, path.display()),
@@ -1168,7 +1178,6 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: Some("default".into()),
                 search_mode: SearchMode::FirstPrompt,
-                preview_filter: Some(vec!["cat".into()]),
             },
             providers,
             snippets,
