@@ -103,7 +103,7 @@ version = "1.43"
 features = [ "filters",]
 
 [dev-dependencies.criterion]
-version = "0.5"
+version = "0.7"
 
 [lints.clippy]
 module_name_repetitions = "allow"
