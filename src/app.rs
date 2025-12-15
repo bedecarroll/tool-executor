@@ -2142,8 +2142,12 @@ else
 fi
 "#,
         )?;
-        let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(pa_bin.path(), perms)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(pa_bin.path(), perms)?;
+        }
 
         // Preserve PATH while prepending the stub.
         let original_path = std::env::var("PATH").ok();
