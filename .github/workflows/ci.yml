@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload test report artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: nextest-junit-${{ matrix.os }}
           path: target/nextest/ci/junit.xml
@@ -95,7 +95,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: ${{ success() && matrix.os == 'ubuntu-latest' }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-html
           path: coverage/html
