@@ -2113,4 +2113,101 @@ namespace = "tests"
         assert_eq!(app.db.count_sessions()?, 0);
         Ok(())
     }
+
+    #[test]
+    fn ensure_prompt_available_succeeds_when_prompt_exists() -> Result<()> {
+        let _env = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+
+        // Stub a minimal `pa` binary that returns a single prompt.
+        let pa_dir = temp.child("padir");
+        pa_dir.create_dir_all()?;
+        let pa_bin = pa_dir.child("pa");
+        pa_bin.write_str(
+            r#"#!/bin/sh
+if [ "$1" = "list" ] && [ "$2" = "--json" ]; then
+  echo '[{"name":"demo/prompt","stdin_supported":true}]'
+elif [ "$1" = "show" ] && [ "$2" = "--json" ]; then
+  echo '{"profile":{"content":"demo prompt"}}'
+else
+  exit 1
+fi
+"#,
+        )?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa_bin.path(), perms)?;
+
+        // Preserve PATH while prepending the stub.
+        struct VarGuard {
+            key: &'static str,
+            original: Option<String>,
+        }
+        impl Drop for VarGuard {
+            fn drop(&mut self) {
+                if let Some(value) = &self.original {
+                    unsafe { std::env::set_var(self.key, value) };
+                } else {
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+        let original_path = std::env::var("PATH").ok();
+        let prepended_path = match &original_path {
+            Some(value) if !value.is_empty() => {
+                format!("{}:{}", pa_dir.path().display(), value)
+            }
+            _ => pa_dir.path().display().to_string(),
+        };
+        unsafe {
+            std::env::set_var("PATH", &prepended_path);
+        }
+        let _path_guard = VarGuard {
+            key: "PATH",
+            original: original_path,
+        };
+
+        // Minimal config with prompt-assembler enabled.
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let sessions_dir = config_dir.child("sessions");
+        sessions_dir.create_dir_all()?;
+        let config_toml = format!(
+            r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+session_roots = ["{root}"]
+
+[features.pa]
+enabled = true
+namespace = "pa"
+"#,
+            root = toml_path(sessions_dir.path())
+        );
+        config_dir.child("config.toml").write_str(&config_toml)?;
+
+        let data_dir = temp.child("data");
+        data_dir.create_dir_all()?;
+        let cache_dir = temp.child("cache");
+        cache_dir.create_dir_all()?;
+        let home_dir = temp.child("home");
+        home_dir.create_dir_all()?;
+
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+        let _home_guard = EnvOverride::set_path("HOME", home_dir.path());
+        let _profile_guard = EnvOverride::set_path("USERPROFILE", home_dir.path());
+
+        let cli = Cli {
+            config_dir: Some(config_dir.path().to_path_buf()),
+            verbose: 0,
+            quiet: false,
+            command: None,
+        };
+
+        let mut app = App::bootstrap(&cli)?;
+        app.ensure_prompt_available("demo/prompt")?;
+        Ok(())
+    }
 }
