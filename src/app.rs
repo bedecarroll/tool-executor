@@ -955,6 +955,14 @@ mod tests {
             }
             Self { key, original }
         }
+
+        fn set_var(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvOverride {
@@ -2138,33 +2146,12 @@ fi
         fs::set_permissions(pa_bin.path(), perms)?;
 
         // Preserve PATH while prepending the stub.
-        struct VarGuard {
-            key: &'static str,
-            original: Option<String>,
-        }
-        impl Drop for VarGuard {
-            fn drop(&mut self) {
-                if let Some(value) = &self.original {
-                    unsafe { std::env::set_var(self.key, value) };
-                } else {
-                    unsafe { std::env::remove_var(self.key) };
-                }
-            }
-        }
         let original_path = std::env::var("PATH").ok();
         let prepended_path = match &original_path {
-            Some(value) if !value.is_empty() => {
-                format!("{}:{}", pa_dir.path().display(), value)
-            }
+            Some(value) if !value.is_empty() => format!("{}:{}", pa_dir.path().display(), value),
             _ => pa_dir.path().display().to_string(),
         };
-        unsafe {
-            std::env::set_var("PATH", &prepended_path);
-        }
-        let _path_guard = VarGuard {
-            key: "PATH",
-            original: original_path,
-        };
+        let _path_guard = EnvOverride::set_var("PATH", &prepended_path);
 
         // Minimal config with prompt-assembler enabled.
         let config_dir = temp.child("config");
