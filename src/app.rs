@@ -923,24 +923,20 @@ mod tests {
     use crate::db::Database;
     use crate::indexer::IndexError;
     use crate::session::{MessageRecord, SearchHit, SessionIngest, SessionSummary, Transcript};
-    use crate::test_support::toml_path;
+    use crate::test_support::{ENV_LOCK, toml_path};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use color_eyre::eyre::eyre;
     use indexmap::IndexMap;
     use std::collections::HashMap;
-    #[cfg(unix)]
     use std::env;
     use std::fs;
     use std::io::{Cursor, Write};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::sync::{LazyLock, Mutex};
     use time::OffsetDateTime;
     use toml::Value;
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     struct EnvOverride {
         key: &'static str,
@@ -2130,7 +2126,25 @@ namespace = "tests"
         // Stub a minimal `pa` binary that returns a single prompt.
         let pa_dir = temp.child("padir");
         pa_dir.create_dir_all()?;
+        #[cfg(windows)]
+        let pa_bin = pa_dir.child("pa.cmd");
+        #[cfg(not(windows))]
         let pa_bin = pa_dir.child("pa");
+        #[cfg(windows)]
+        pa_bin.write_str(
+            r#"@echo off
+if "%~1"=="list" if "%~2"=="--json" (
+  echo [{"name":"demo/prompt","stdin_supported":true}]
+  exit /b 0
+)
+if "%~1"=="show" if "%~2"=="--json" (
+  echo {"profile":{"content":"demo prompt"}}
+  exit /b 0
+)
+exit /b 1
+"#,
+        )?;
+        #[cfg(not(windows))]
         pa_bin.write_str(
             r#"#!/bin/sh
 if [ "$1" = "list" ] && [ "$2" = "--json" ]; then
@@ -2150,10 +2164,13 @@ fi
         }
 
         // Preserve PATH while prepending the stub.
-        let original_path = std::env::var("PATH").ok();
-        let prepended_path = match &original_path {
-            Some(value) if !value.is_empty() => format!("{}:{}", pa_dir.path().display(), value),
-            _ => pa_dir.path().display().to_string(),
+        let prepended_path = match std::env::var_os("PATH") {
+            Some(value) => {
+                let mut paths = std::env::split_paths(&value).collect::<Vec<_>>();
+                paths.insert(0, pa_dir.path().to_path_buf());
+                std::env::join_paths(paths)?
+            }
+            None => std::env::join_paths([pa_dir.path()])?,
         };
         let _path_guard = EnvOverride::set_var("PATH", &prepended_path);
 

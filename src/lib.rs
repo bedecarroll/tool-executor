@@ -114,16 +114,13 @@ mod tests {
     use crate::cli::{InternalCaptureArgCommand, InternalCommand};
     use crate::db::Database;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
-    use crate::test_support::toml_path;
+    use crate::test_support::{ENV_LOCK, toml_path};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{LazyLock, Mutex};
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn desired_level_handles_quiet_and_verbose() {

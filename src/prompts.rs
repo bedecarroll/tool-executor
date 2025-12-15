@@ -185,14 +185,12 @@ fn extract_profile_lines(detail: &Value) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{LazyLock, Mutex};
-
-    static ENV_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn with_fake_pa(script: &str) -> (TempDir, PromptAssemblerConfig) {
         let temp = TempDir::new().expect("tempdir");
@@ -217,7 +215,7 @@ mod tests {
 
     impl PathGuard {
         fn new(dir: &TempDir) -> Self {
-            let lock = ENV_GUARD.lock().unwrap();
+            let lock = ENV_LOCK.lock().unwrap();
             let original = env::var("PATH").ok();
             let mut paths = vec![dir.path().to_path_buf()];
             if let Some(existing) = &original {

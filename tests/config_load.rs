@@ -9,10 +9,8 @@ fn lower_path(path: &Path) -> String {
 }
 #[cfg(not(windows))]
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
 use tool_executor::config;
-
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+use tool_executor::test_support::ENV_LOCK;
 
 fn set_env(key: &str, value: &std::path::Path) {
     unsafe {

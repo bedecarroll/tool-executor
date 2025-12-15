@@ -281,6 +281,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::cli::{InternalCaptureArgCommand, InternalCommand, InternalPromptAssemblerCommand};
+    use crate::test_support::ENV_LOCK;
     #[cfg(unix)]
     use assert_fs::TempDir;
     #[cfg(unix)]
@@ -292,11 +293,6 @@ mod tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(unix)]
-    use std::sync::{LazyLock, Mutex};
-
-    #[cfg(unix)]
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn resolve_provider_args_appends_prompt_when_missing_placeholder() {
