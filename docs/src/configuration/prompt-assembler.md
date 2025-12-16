@@ -32,7 +32,7 @@ When the feature is active:
 - `Enter` launches the pipeline immediately; `Tab` prints it for shell reuse.
 - When a previous session is highlighted you can press `Ctrl+Y` to print its ID or `Ctrl+E` to export its transcript before switching back to the profile pane.
 
-Behind the scenes tx inserts `pa <prompt>` as a pre snippet before your provider. Combine the feature with `stdin_mode = "capture_arg"` to pass assembled prompts as arguments:
+Before any wrapper or provider is launched, tx feeds the selected prompt to `pa`, prompting you in the controlling terminal for each missing positional argument (such as `{0}`). The assembled text is stored in `TX_CAPTURE_STDIN_DATA`, which the capture helper reads when it spawns your provider. Combine the feature with `stdin_mode = "capture_arg"` to pass the rendered prompt as an argument:
 
 ```toml
 [providers.codex]
@@ -42,7 +42,19 @@ stdin_mode = "capture_arg"
 stdin_to = "codex:{prompt}"
 ```
 
-With that configuration, selecting `pa/hello` captures the generator output and invokes the provider with `codex --search "<prompt-text>"`.
+With that configuration, selecting `pa/hello` gathers the prompt before any wrapper starts and then invokes the provider with `codex --search "<prompt-text>"`.
+
+Prefer using the `prompt_assembler` key on a profile when you want the same behavior without maintaining a manual snippet:
+
+```toml
+[profiles.troubleshooting]
+provider = "codex"
+wrap = "troubleshooting_tmux"
+prompt_assembler = "troubleshooting"
+prompt_assembler_args = ["--limit", "5"]
+```
+
+The profile variant still runs the wrapper, sets up snippets, and injects the assembled prompt as a provider argument.
 
 ## Troubleshooting
 

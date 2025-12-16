@@ -63,6 +63,7 @@ mod tests {
         SessionSummary {
             id: "sess-1".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("demo".into()),
             path: PathBuf::from("/tmp/session.jsonl"),
             uuid: None,

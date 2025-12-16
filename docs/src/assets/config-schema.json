@@ -87,6 +87,21 @@
             "type": "string"
           }
         },
+        "prompt_assembler": {
+          "description": "Prompt name to render via the prompt-assembler helper before launching the provider.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt_assembler_args": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "provider": {
           "type": "string"
         },

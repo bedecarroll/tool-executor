@@ -103,6 +103,9 @@ pub enum InternalCommand {
     /// Run a provider after capturing stdin as a positional prompt argument.
     #[command(name = "capture-arg", hide = true)]
     CaptureArg(InternalCaptureArgCommand),
+    /// Assemble a prompt via the prompt-assembler CLI, prompting for missing arguments.
+    #[command(name = "prompt-assembler", hide = true)]
+    PromptAssembler(InternalPromptAssemblerCommand),
 }
 
 #[derive(Debug, Args)]
@@ -120,6 +123,19 @@ pub struct InternalCaptureArgCommand {
     #[arg(long = "arg", action = ArgAction::Append, allow_hyphen_values = true)]
     pub provider_args: Vec<String>,
     /// Maximum captured prompt size in bytes.
+    #[arg(long = "prompt-limit", default_value = "1048576")]
+    pub prompt_limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct InternalPromptAssemblerCommand {
+    /// Prompt name to render via the prompt-assembler.
+    #[arg(long)]
+    pub prompt: String,
+    /// Additional arguments forwarded to the prompt-assembler.
+    #[arg(long = "arg", action = ArgAction::Append, allow_hyphen_values = true)]
+    pub prompt_args: Vec<String>,
+    /// Maximum assembled prompt size in bytes.
     #[arg(long = "prompt-limit", default_value = "1048576")]
     pub prompt_limit: usize,
 }

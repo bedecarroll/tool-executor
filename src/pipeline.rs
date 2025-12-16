@@ -13,6 +13,12 @@ use crate::config::model::{
 };
 
 #[derive(Debug, Clone)]
+pub struct PromptInvocation {
+    pub name: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PipelineRequest<'a> {
     pub config: &'a Config,
     pub provider_hint: Option<&'a str>,
@@ -23,6 +29,7 @@ pub struct PipelineRequest<'a> {
     pub wrap: Option<&'a str>,
     pub provider_args: Vec<String>,
     pub capture_prompt: bool,
+    pub prompt_assembler: Option<PromptInvocation>,
     pub vars: HashMap<String, String>,
     pub session: SessionContext,
     pub cwd: PathBuf,
@@ -48,8 +55,10 @@ pub struct PipelinePlan {
     pub post_snippets: Vec<String>,
     pub wrapper: Option<String>,
     pub needs_stdin_prompt: bool,
+    pub capture_has_pre_commands: bool,
     pub stdin_prompt_label: Option<String>,
     pub cwd: PathBuf,
+    pub prompt_assembler: Option<PromptInvocation>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +92,8 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         .as_ref()
         .is_some_and(|stdin| matches!(stdin.mode, StdinMode::CaptureArg));
     let provider_args = build_provider_args(provider, request, provider_capture);
-    let capture_prompt = request.capture_prompt && provider_capture;
+    let capture_prompt =
+        (request.capture_prompt || request.prompt_assembler.is_some()) && provider_capture;
 
     let stages = compose_stages(
         provider,
@@ -146,8 +156,10 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         post_snippets: post_snippet_names,
         wrapper: wrap_name,
         needs_stdin_prompt: false,
+        capture_has_pre_commands: capture_prompt && !pre_commands.is_empty(),
         stdin_prompt_label: None,
         cwd: request.cwd.clone(),
+        prompt_assembler: request.prompt_assembler.clone(),
     })
 }
 
@@ -234,8 +246,9 @@ fn build_provider_args(
 ) -> Vec<String> {
     let mut provider_args = provider.flags.clone();
     if let Some(stdin) = &provider.stdin {
+        let wants_capture = request.capture_prompt || request.prompt_assembler.is_some();
         if provider_capture {
-            if request.capture_prompt {
+            if wants_capture {
                 provider_args.extend(stdin.args.clone());
             }
         } else {
@@ -630,10 +643,14 @@ mod tests {
             profile: None,
             additional_pre: Vec::new(),
             additional_post: Vec::new(),
-            inline_pre: vec!["pa hello".into()],
+            inline_pre: Vec::new(),
             wrap: None,
             provider_args: Vec::new(),
-            capture_prompt: true,
+            capture_prompt: false,
+            prompt_assembler: Some(PromptInvocation {
+                name: "hello".into(),
+                args: Vec::new(),
+            }),
             vars: HashMap::new(),
             session: SessionContext::default(),
             cwd: PathBuf::from("/tmp"),
@@ -641,19 +658,13 @@ mod tests {
 
         let plan = build_pipeline(&request).expect("pipeline builds");
         assert!(
-            plan.pipeline.contains("pa hello"),
-            "expected inline pre command in pipeline: {}",
-            plan.pipeline
-        );
-        assert!(
             plan.pipeline.contains("{prompt}"),
             "expected captured prompt placeholder in pipeline: {}",
             plan.pipeline
         );
-        assert_eq!(
-            plan.friendly_display, r#"codex --search "$(pa hello)""#,
-            "expected friendly display to use command substitution"
-        );
+        assert!(plan.prompt_assembler.is_some());
+        assert_eq!(plan.display, plan.pipeline);
+        assert_eq!(plan.friendly_display, "codex --search");
     }
 
     #[test]
@@ -702,6 +713,7 @@ mod tests {
             wrap: None,
             provider_args: Vec::new(),
             capture_prompt: false,
+            prompt_assembler: None,
             vars: HashMap::new(),
             session: SessionContext::default(),
             cwd: PathBuf::from("/tmp"),
@@ -775,6 +787,7 @@ mod tests {
             wrap: None,
             provider_args: Vec::new(),
             capture_prompt: true,
+            prompt_assembler: None,
             vars: HashMap::new(),
             session: SessionContext::default(),
             cwd: PathBuf::from("/tmp"),
@@ -895,6 +908,7 @@ mod tests {
             wrap: None,
             provider_args: vec!["--extra".into()],
             capture_prompt: false,
+            prompt_assembler: None,
             vars: HashMap::new(),
             session: SessionContext::default(),
             cwd: std::env::current_dir().unwrap(),

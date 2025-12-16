@@ -9,6 +9,7 @@ use time::macros::format_description;
 pub struct SessionSummary {
     pub id: String,
     pub provider: String,
+    pub wrapper: Option<String>,
     pub label: Option<String>,
     pub path: PathBuf,
     pub uuid: Option<String>,
@@ -42,6 +43,7 @@ pub struct MessageRecord {
 pub struct SessionQuery {
     pub id: String,
     pub provider: String,
+    pub wrapper: Option<String>,
     pub label: Option<String>,
     pub first_prompt: Option<String>,
     pub actionable: bool,
@@ -63,6 +65,7 @@ impl SessionSummary {
 pub struct SearchHit {
     pub session_id: String,
     pub provider: String,
+    pub wrapper: Option<String>,
     pub label: Option<String>,
     pub role: Option<String>,
     pub snippet: Option<String>,
@@ -82,6 +85,9 @@ impl Transcript {
         let mut lines = Vec::new();
         let header_id = self.session.uuid.as_deref().unwrap_or(&self.session.id);
         lines.push(format!("# Codex Session {header_id}"));
+        if let Some(wrapper) = self.session.wrapper.as_deref() {
+            lines.push(format!("**Wrapper**: `{wrapper}`"));
+        }
         lines.push(String::new());
 
         let mut emitted = 0usize;
@@ -221,6 +227,7 @@ mod tests {
         SessionSummary {
             id: "sample".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("demo".into()),
             path: PathBuf::from("/tmp/sample.jsonl"),
             uuid: Some("abc123".into()),

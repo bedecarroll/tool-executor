@@ -388,15 +388,14 @@ fn read_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use assert_fs::TempDir;
     use assert_fs::fixture::{FileTouch, FileWriteStr, PathChild, PathCreateDir};
     use color_eyre::Result;
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::sync::{LazyLock, Mutex};
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    use std::fs;
     fn path_contains_component(path: &std::path::Path, needle: &str) -> bool {
         path.components().any(|component| {
             component

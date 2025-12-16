@@ -30,6 +30,7 @@ mod tests {
         let summary = SessionSummary {
             id: "sess".into(),
             provider: "other".into(),
+            wrapper: None,
             label: None,
             path: "/tmp/other.jsonl".into(),
             uuid: None,

@@ -106,6 +106,8 @@ pub struct ProfileConfig {
     pub pre: Vec<String>,
     pub post: Vec<String>,
     pub wrap: Option<String>,
+    pub prompt_assembler: Option<String>,
+    pub prompt_assembler_args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +546,13 @@ pub(crate) struct RawProfile {
     post: Vec<String>,
     #[serde(default)]
     wrap: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Prompt name to render via the prompt-assembler helper before launching the provider."
+    )]
+    prompt_assembler: Option<String>,
+    #[serde(default)]
+    prompt_assembler_args: Vec<String>,
 }
 
 impl RawProfile {
@@ -558,6 +567,11 @@ impl RawProfile {
             pre: self.pre,
             post: self.post,
             wrap: self.wrap,
+            prompt_assembler: self
+                .prompt_assembler
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            prompt_assembler_args: self.prompt_assembler_args,
         }
     }
 }
@@ -694,6 +708,8 @@ mod tests {
                 pre: vec!["prep".into()],
                 post: vec!["cleanup".into()],
                 wrap: Some("shellwrap".into()),
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
 
@@ -936,6 +952,8 @@ mod tests {
                 pre: vec!["setup".into()],
                 post: vec!["teardown".into()],
                 wrap: Some("missing-wrap".into()),
+                prompt_assembler: None,
+                prompt_assembler_args: Vec::new(),
             },
         );
 

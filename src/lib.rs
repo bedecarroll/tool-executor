@@ -114,16 +114,13 @@ mod tests {
     use crate::cli::{InternalCaptureArgCommand, InternalCommand};
     use crate::db::Database;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
-    use crate::test_support::toml_path;
+    use crate::test_support::{ENV_LOCK, toml_path};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{LazyLock, Mutex};
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn desired_level_handles_quiet_and_verbose() {
@@ -378,6 +375,7 @@ provider = "alt"
         let summary = SessionSummary {
             id: "sess-1".into(),
             provider: "demo".into(),
+            wrapper: None,
             label: Some("Demo".into()),
             path: session_path.path().to_path_buf(),
             uuid: Some("uuid-1".into()),

@@ -125,6 +125,72 @@ fn config_schema_exposes_stdin_mode_enum() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn config_schema_includes_profile_prompt_assembler() -> Result<()> {
+    let schema_json = config::schema(false)?;
+    let schema: Value = serde_json::from_str(&schema_json)?;
+
+    let definitions = schema
+        .get("definitions")
+        .and_then(Value::as_object)
+        .expect("schema definitions to exist");
+    let raw_profile = definitions
+        .get("RawProfile")
+        .and_then(Value::as_object)
+        .expect("RawProfile definition to exist");
+    let properties = raw_profile
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("RawProfile properties to exist");
+    let prompt_assembler = properties
+        .get("prompt_assembler")
+        .and_then(Value::as_object)
+        .expect("prompt_assembler property to exist");
+
+    let ty = prompt_assembler
+        .get("type")
+        .and_then(Value::as_array)
+        .expect("prompt_assembler type to be an array");
+    let types: Vec<_> = ty
+        .iter()
+        .map(|value| value.as_str().expect("type value to be a string"))
+        .collect();
+
+    assert!(
+        types.contains(&"string"),
+        "prompt_assembler should accept strings"
+    );
+    assert!(
+        types.contains(&"null"),
+        "prompt_assembler should accept null"
+    );
+
+    let prompt_args = properties
+        .get("prompt_assembler_args")
+        .and_then(Value::as_object)
+        .expect("prompt_assembler_args property to exist");
+    assert_eq!(
+        prompt_args
+            .get("type")
+            .and_then(Value::as_str)
+            .expect("prompt_assembler_args type to exist"),
+        "array"
+    );
+    let items = prompt_args
+        .get("items")
+        .and_then(Value::as_object)
+        .expect("prompt_assembler_args items to exist");
+    assert_eq!(
+        items
+            .get("type")
+            .and_then(Value::as_str)
+            .expect("prompt_assembler_args item type to exist"),
+        "string"
+    );
+
+    Ok(())
+}
+
 fn normalize_newlines(input: &str) -> String {
     input.replace("\r\n", "\n")
 }

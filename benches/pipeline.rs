@@ -84,6 +84,8 @@ fn sample_config_with_root(root: PathBuf) -> Config {
             pre: vec!["lint".into()],
             post: vec!["notify".into()],
             wrap: Some("shellwrap".into()),
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
         },
     );
 
@@ -114,6 +116,7 @@ fn sample_request(config: &Config) -> PipelineRequest<'_> {
         wrap: None,
         provider_args: vec!["--color".into()],
         capture_prompt: false,
+        prompt_assembler: None,
         vars: HashMap::from([
             ("cwd".into(), "/tmp/project".into()),
             ("branch".into(), "main".into()),
@@ -148,6 +151,7 @@ fn sample_ingest(path: &Path) -> SessionIngest {
     let summary = SessionSummary {
         id: "codex/demo".into(),
         provider: "codex".into(),
+        wrapper: Some("shellwrap".into()),
         label: Some("Demo".into()),
         path: path.to_path_buf(),
         uuid: Some("uuid-demo".into()),

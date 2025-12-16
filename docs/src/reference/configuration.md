@@ -42,6 +42,8 @@ Values are shell commands executed before or after the provider. They can refere
 | `pre` | `array<string>` | | Ordered list of pre-snippet names. |
 | `post` | `array<string>` | | Ordered list of post-snippet names. |
 | `wrap` | `string` | | Wrapper name. |
+| `prompt_assembler` | `string` | | Prompt name to run through the prompt-assembler helper before launching the provider (requires `[features.pa]`). Missing positional arguments are requested interactively. |
+| `prompt_assembler_args` | `array<string>` | | Extra arguments forwarded to the helper when `prompt_assembler` is set. |
 
 ## Prompt Assembler (`[features.pa]`)
 

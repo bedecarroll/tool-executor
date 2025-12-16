@@ -1,12 +1,18 @@
-use std::io::{Read, Write};
+use std::collections::HashSet;
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 
 use color_eyre::Result;
-use color_eyre::eyre::{WrapErr, eyre};
+use color_eyre::eyre::{Context, eyre};
+use regex::Regex;
+use serde_json::Value;
 
-use crate::cli::{InternalCaptureArgCommand, InternalCommand};
+use crate::cli::{InternalCaptureArgCommand, InternalCommand, InternalPromptAssemblerCommand};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
+static PROMPT_ARG_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{(\d+)\}").expect("valid placeholder regex"));
 
 /// Execute an internal helper command without bootstrapping the full application.
 ///
@@ -17,6 +23,11 @@ const PROMPT_PLACEHOLDER: &str = "{prompt}";
 pub fn run(command: &InternalCommand) -> Result<()> {
     match command {
         InternalCommand::CaptureArg(cmd) => capture_arg(cmd),
+        InternalCommand::PromptAssembler(cmd) => {
+            let text = assemble_prompt(cmd)?;
+            print!("{text}");
+            Ok(())
+        }
     }
 }
 
@@ -61,6 +72,106 @@ fn capture_arg(cmd: &InternalCaptureArgCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Assemble a prompt via the `pa` CLI, prompting for any missing positional arguments.
+///
+/// # Errors
+///
+/// Returns an error if prompt metadata cannot be read, argument collection fails, the
+/// assembled prompt exceeds the configured size limit, or `pa` exits unsuccessfully.
+pub fn assemble_prompt(cmd: &InternalPromptAssemblerCommand) -> Result<String> {
+    let mut args = cmd.prompt_args.clone();
+    let required = required_argument_count(&cmd.prompt)?;
+    while args.len() < required {
+        let index = args.len();
+        let value = prompt_for_argument(&cmd.prompt, index)?;
+        args.push(value);
+    }
+
+    let mut child = Command::new("pa");
+    child.arg(&cmd.prompt);
+    child.args(&args);
+    child.stdin(Stdio::inherit());
+    child.stderr(Stdio::inherit());
+    child.stdout(Stdio::piped());
+
+    let mut process = child
+        .spawn()
+        .wrap_err_with(|| format!("failed to execute 'pa {}'", cmd.prompt))?;
+
+    let mut stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| eyre!("failed to capture prompt output"))?;
+    let mut buffer = Vec::new();
+    read_with_limit(&mut stdout, cmd.prompt_limit, &mut buffer)?;
+
+    let status = process.wait().wrap_err("failed to wait for pa to exit")?;
+    if !status.success() {
+        return Err(eyre!("pa exited with status {status}"));
+    }
+
+    buffer_to_string(buffer)
+}
+
+fn required_argument_count(prompt: &str) -> Result<usize> {
+    let detail = fetch_prompt_detail(prompt)?;
+    let content = detail
+        .get("profile")
+        .and_then(|profile| profile.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let mut seen = HashSet::new();
+    let mut max_index = None;
+    for caps in PROMPT_ARG_TOKEN.captures_iter(content) {
+        let index = caps
+            .get(1)
+            .and_then(|m| m.as_str().parse::<usize>().ok())
+            .unwrap_or(0);
+        if seen.insert(index) {
+            max_index = Some(max_index.map_or(index, |max: usize| max.max(index)));
+        }
+    }
+
+    Ok(max_index.map_or(0, |idx| idx + 1))
+}
+
+fn fetch_prompt_detail(name: &str) -> Result<Value> {
+    let output = Command::new("pa")
+        .args(["show", "--json", name])
+        .output()
+        .with_context(|| format!("failed to execute 'pa show --json {name}'"))?;
+
+    if !output.status.success() {
+        return Err(eyre!(
+            "pa exited with status {} while loading prompt '{name}'",
+            output.status
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("failed to parse JSON output from 'pa show --json {name}'"))
+}
+
+fn prompt_for_argument(prompt: &str, index: usize) -> Result<String> {
+    let mut stderr = io::stderr();
+    writeln!(
+        stderr,
+        "tx: prompt '{prompt}' requires a value for placeholder {{{index}}}"
+    )?;
+    write!(stderr, "> ")?;
+    stderr.flush()?;
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .wrap_err("failed to read prompt argument")?;
+    while line.ends_with(['\n', '\r']) {
+        line.pop();
+    }
+    Ok(line)
 }
 
 fn run_pre_pipeline(commands: &[String], input: Option<&str>, limit: usize) -> Result<String> {
@@ -169,7 +280,9 @@ fn resolve_provider_args(args: &[String], prompt: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::cli::{InternalCaptureArgCommand, InternalCommand};
+    use crate::cli::{InternalCaptureArgCommand, InternalCommand, InternalPromptAssemblerCommand};
+    #[cfg(unix)]
+    use crate::test_support::ENV_LOCK;
     #[cfg(unix)]
     use assert_fs::TempDir;
     #[cfg(unix)]
@@ -181,11 +294,6 @@ mod tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(unix)]
-    use std::sync::{LazyLock, Mutex};
-
-    #[cfg(unix)]
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn resolve_provider_args_appends_prompt_when_missing_placeholder() {
@@ -464,5 +572,74 @@ mod tests {
             err.to_string().contains("exceeds configured limit"),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_assembler_uses_placeholder_metadata() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let args_log = temp.child("args.log");
+        let output_log = temp.child("output.log");
+        let pa = temp.child("pa");
+        pa.write_str(
+            r#"#!/bin/sh
+if [ "$1" = "show" ] && [ "${2:-}" = "--json" ]; then
+  shift 2
+  printf '%s' '{"profile":{"content":"Demo {0}\n"}}'
+  exit 0
+fi
+if [ $# -gt 0 ]; then
+  shift
+fi
+if [ -n "${PA_ARGS_LOG:-}" ]; then
+  printf '%s' "$*" > "$PA_ARGS_LOG"
+fi
+first_arg=${1:-}
+printf 'Demo %s\n' "$first_arg"
+if [ -n "${PA_OUTPUT_LOG:-}" ]; then
+  printf 'Demo %s\n' "$first_arg" > "$PA_OUTPUT_LOG"
+fi
+"#,
+        )?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa.path(), perms)?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = if original_path.is_empty() {
+            pa_dir.clone()
+        } else {
+            format!("{pa_dir}:{original_path}")
+        };
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+            std::env::set_var("PA_ARGS_LOG", args_log.path());
+            std::env::set_var("PA_OUTPUT_LOG", output_log.path());
+        }
+
+        let cmd = InternalPromptAssemblerCommand {
+            prompt: "demo".into(),
+            prompt_args: vec!["value".into()],
+            prompt_limit: 1024,
+        };
+
+        let result = assemble_prompt(&cmd);
+
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+            std::env::remove_var("PA_ARGS_LOG");
+            std::env::remove_var("PA_OUTPUT_LOG");
+        }
+
+        let text = result?;
+
+        let args_written = std::fs::read_to_string(args_log.path())?;
+        assert_eq!(args_written, "value");
+
+        let output_written = std::fs::read_to_string(output_log.path())?;
+        assert_eq!(output_written.trim_end(), "Demo value");
+        assert_eq!(text.trim_end(), "Demo value");
+        Ok(())
     }
 }

@@ -195,6 +195,7 @@ impl<'a> Indexer<'a> {
         let summary = SessionSummary {
             id: session_id,
             provider: provider.name.clone(),
+            wrapper: state.wrapper,
             label,
             path: path.to_path_buf(),
             uuid: session_uuid,
@@ -210,6 +211,7 @@ impl<'a> Indexer<'a> {
         Ok(SessionIngest::new(summary, state.messages))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn collect_ingest_state(session_id: &str, path: &Path) -> Result<IngestState> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -231,6 +233,27 @@ impl<'a> Indexer<'a> {
                 }
             };
             state.saw_any_record = true;
+
+            if state.wrapper.is_none() {
+                let wrapper = value
+                    .get("wrapper")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        value
+                            .get("payload")
+                            .and_then(|payload| payload.get("wrapper"))
+                            .and_then(Value::as_str)
+                    })
+                    .or_else(|| {
+                        value
+                            .get("metadata")
+                            .and_then(|meta| meta.get("wrapper"))
+                            .and_then(Value::as_str)
+                    });
+                if let Some(name) = wrapper {
+                    state.wrapper = Some(name.to_string());
+                }
+            }
 
             if state.session_uuid.is_none() {
                 state.session_uuid = session_uuid_from_value(&value);
@@ -358,6 +381,7 @@ struct IngestState {
     session_uuid: Option<String>,
     earliest_timestamp: Option<i64>,
     latest_timestamp: Option<i64>,
+    wrapper: Option<String>,
 }
 
 fn update_existing_source(existing: &mut MessageRecord, source: Option<&String>) {
@@ -800,6 +824,7 @@ mod tests {
         let summary = SessionSummary {
             id: "codex/missing.jsonl".into(),
             provider: "codex".into(),
+            wrapper: None,
             label: Some("orphaned".into()),
             path: missing_path.path().to_path_buf(),
             uuid: Some("missing".into()),
