@@ -2187,6 +2187,8 @@ fi
             let merged = exts.join(";");
             Some(EnvOverride::set_var("PATHEXT", merged))
         };
+        #[cfg(windows)]
+        let _pa_bin_guard = EnvOverride::set_var("TX_TEST_PA_BIN", pa_bin.path());
 
         // Minimal config with prompt-assembler enabled.
         let config_dir = temp.child("config");

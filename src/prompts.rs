@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::process::Command;
 
 use color_eyre::Result;
@@ -49,7 +50,7 @@ impl PromptAssembler {
 }
 
 fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> {
-    let output = Command::new("pa")
+    let output = pa_command()
         .args(["list", "--json"])
         .output()
         .context("failed to execute 'pa list --json'")?;
@@ -138,7 +139,7 @@ fn fetch_prompts(config: &PromptAssemblerConfig) -> Result<Vec<VirtualProfile>> 
 }
 
 fn fetch_prompt_detail(name: &str) -> Result<Value> {
-    let output = Command::new("pa")
+    let output = pa_command()
         .args(["show", "--json", name])
         .output()
         .with_context(|| format!("failed to execute 'pa show --json {name}'"))?;
@@ -152,6 +153,11 @@ fn fetch_prompt_detail(name: &str) -> Result<Value> {
 
     serde_json::from_slice(&output.stdout)
         .with_context(|| format!("failed to parse JSON output from 'pa show --json {name}'"))
+}
+
+fn pa_command() -> Command {
+    let bin = std::env::var_os("TX_TEST_PA_BIN").unwrap_or_else(|| OsString::from("pa"));
+    Command::new(bin)
 }
 
 fn extract_profile_lines(detail: &Value) -> Vec<String> {
