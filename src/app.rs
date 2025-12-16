@@ -929,10 +929,10 @@ mod tests {
     use color_eyre::eyre::eyre;
     use indexmap::IndexMap;
     use std::collections::HashMap;
-    use std::fs;
-    use std::io::{Cursor, Write};
     #[cfg(unix)]
     use std::env;
+    use std::fs;
+    use std::io::{Cursor, Write};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -2174,6 +2174,19 @@ fi
             None => std::env::join_paths([pa_dir.path()])?,
         };
         let _path_guard = EnvOverride::set_var("PATH", &prepended_path);
+        #[cfg(windows)]
+        let _pathext_guard = {
+            // Ensure .cmd is considered when resolving "pa" on Windows.
+            let existing = std::env::var_os("PATHEXT")
+                .map(|os| os.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut exts: Vec<&str> = existing.split(';').filter(|s| !s.is_empty()).collect();
+            if !exts.iter().any(|e| e.eq_ignore_ascii_case(".CMD")) {
+                exts.insert(0, ".CMD");
+            }
+            let merged = exts.join(";");
+            Some(EnvOverride::set_var("PATHEXT", merged))
+        };
 
         // Minimal config with prompt-assembler enabled.
         let config_dir = temp.child("config");
