@@ -281,6 +281,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::cli::{InternalCaptureArgCommand, InternalCommand, InternalPromptAssemblerCommand};
+    #[cfg(unix)]
     use crate::test_support::ENV_LOCK;
     #[cfg(unix)]
     use assert_fs::TempDir;

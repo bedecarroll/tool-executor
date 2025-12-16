@@ -929,9 +929,10 @@ mod tests {
     use color_eyre::eyre::eyre;
     use indexmap::IndexMap;
     use std::collections::HashMap;
-    use std::env;
     use std::fs;
     use std::io::{Cursor, Write};
+    #[cfg(unix)]
+    use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
