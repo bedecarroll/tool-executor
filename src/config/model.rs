@@ -2,13 +2,11 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 use directories::BaseDirs;
 use indexmap::IndexMap;
-use schemars::JsonSchema;
-use schemars::r#gen::SchemaGenerator;
-use schemars::schema::{InstanceType, Metadata, Schema, SchemaObject, SingleOrVec};
+use schemars::{JsonSchema, Schema, generate::SchemaGenerator, json_schema};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
-use serde_json::json;
 use shellexpand::full;
+use std::borrow::Cow;
 use std::env;
 use std::path::PathBuf;
 use toml::Value;
@@ -353,25 +351,17 @@ impl<'de> Deserialize<'de> for RawStdinMode {
 }
 
 impl JsonSchema for RawStdinMode {
-    fn schema_name() -> String {
-        "RawStdinMode".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("RawStdinMode")
     }
 
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
-        let schema = SchemaObject {
-            instance_type: Some(SingleOrVec::from(InstanceType::String)),
-            enum_values: Some(vec![json!("pipe"), json!("capture_arg")]),
-            metadata: Some(Box::new(Metadata {
-                default: Some(json!("pipe")),
-                description: Some(
-                    "Controls how tx streams prompts to provider executables. Use 'capture_arg' to pass the prompt as an argument."
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-        Schema::Object(schema)
+        json_schema!({
+            "type": "string",
+            "enum": ["pipe", "capture_arg"],
+            "default": "pipe",
+            "description": "Controls how tx streams prompts to provider executables. Use 'capture_arg' to pass the prompt as an argument."
+        })
     }
 }
 

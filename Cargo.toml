@@ -27,7 +27,7 @@ members = [ "crates/tx",]
 
 [dependencies]
 blake3 = "1.8"
-clap_complete = "4.5"
+clap_complete = "4.5.61"
 clap_mangen = "0.2.31"
 color-eyre = "0.6"
 crossterm = "0.29"
@@ -41,7 +41,7 @@ shlex = "1.3"
 once_cell = "1.21"
 shell-escape = "0.1"
 thiserror = "2.0.17"
-tracing = "0.1"
+tracing = "0.1.43"
 walkdir = "2.5"
 which = "8.0"
 unicode-width = "0.2.0"
@@ -53,11 +53,11 @@ tempfile = "3.23"
 assert_cmd = "2.1"
 
 [dependencies.clap]
-version = "4.5.51"
+version = "4.5.53"
 features = [ "derive",]
 
 [dependencies.indexmap]
-version = "2.12"
+version = "2.12.1"
 features = [ "serde",]
 
 [dependencies.ratatui]
@@ -74,11 +74,11 @@ version = "1.0"
 features = [ "derive",]
 
 [dependencies.tui-markdown]
-version = "0.3"
+version = "0.3.6"
 default-features = true
 
 [dependencies.schemars]
-version = "0.8"
+version = "1.1"
 features = [ "derive", "indexmap2",]
 
 [dependencies.time]
@@ -90,7 +90,7 @@ version = "0.9.8"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
-version = "0.3"
+version = "0.3.22"
 features = [ "env-filter", "fmt",]
 
 [dependencies.self_update]
@@ -99,11 +99,11 @@ default-features = false
 features = [ "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls",]
 
 [dev-dependencies.insta]
-version = "1.43"
+version = "1.44.3"
 features = [ "filters",]
 
 [dev-dependencies.criterion]
-version = "0.5"
+version = "0.8.1"
 
 [lints.clippy]
 module_name_repetitions = "allow"
@@ -131,5 +131,5 @@ level = "warn"
 priority = -1
 
 [workspace.metadata.dist.github-action-commits]
-"actions/upload-artifact" = "v5"
-"actions/download-artifact" = "v6"
+"actions/upload-artifact" = "v6"
+"actions/download-artifact" = "v7"
