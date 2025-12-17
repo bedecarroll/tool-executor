@@ -259,13 +259,17 @@ impl<'a> Indexer<'a> {
                 state.session_uuid = session_uuid_from_value(&value);
             }
 
-            if state.instructions_preview.is_none()
-                && let Some(instructions) = value
-                    .get("payload")
-                    .and_then(|payload| payload.get("instructions"))
-                    .and_then(Value::as_str)
+            if let Some(instructions) = value
+                .get("payload")
+                .and_then(|payload| payload.get("instructions"))
+                .and_then(Value::as_str)
             {
-                state.instructions_preview = summarize_instructions(instructions);
+                if state.instructions_preview.is_none() {
+                    state.instructions_preview = summarize_instructions(instructions);
+                }
+                if state.instructions_raw.is_none() {
+                    state.instructions_raw = Some(normalize_instruction_text(instructions));
+                }
             }
 
             let source = value
@@ -312,6 +316,12 @@ impl<'a> Indexer<'a> {
                     }
 
                     let is_user = normalized_role == "user";
+                    if is_user
+                        && state.messages.is_empty()
+                        && is_instruction_banner(&clean, state.instructions_raw.as_deref())
+                    {
+                        continue;
+                    }
                     let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
                     if state.first_prompt.is_none() && is_user {
                         state.first_prompt = Some(clean.clone());
@@ -376,6 +386,7 @@ struct IngestState {
     first_prompt: Option<String>,
     fallback_preview: Option<String>,
     instructions_preview: Option<String>,
+    instructions_raw: Option<String>,
     saw_instruction_block: bool,
     saw_any_record: bool,
     session_uuid: Option<String>,
@@ -453,6 +464,13 @@ fn compute_session_id(provider: &ProviderConfig, path: &Path) -> (String, String
 fn extract_messages(value: &Value) -> Vec<(String, String)> {
     let mut messages = Vec::new();
 
+    let is_tooling_warning = |text: &str| {
+        let normalized = text.trim();
+        normalized.eq_ignore_ascii_case(
+            "Warning: apply_patch was requested via shell_command. Use the apply_patch tool instead of exec_command.",
+        )
+    };
+
     if let Some(obj) = value.as_object() {
         if let Some(typ) = obj.get("type").and_then(Value::as_str) {
             match typ {
@@ -463,6 +481,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
                             .and_then(Value::as_str)
                             .is_some_and(|ty| ty == "user_message")
                         && let Some(text) = extract_text(payload)
+                        && !is_tooling_warning(&text)
                     {
                         messages.push(("user".to_string(), text));
                     }
@@ -471,6 +490,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
                     let container = obj.get("payload").unwrap_or(value);
                     if let Some(role) = container.get("role").and_then(Value::as_str)
                         && let Some(text) = extract_text(container)
+                        && !is_tooling_warning(&text)
                     {
                         messages.push((role.to_string(), text));
                     }
@@ -481,6 +501,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
 
         if let Some(role) = obj.get("role").and_then(Value::as_str)
             && let Some(text) = extract_text(value)
+            && !is_tooling_warning(&text)
         {
             messages.push((role.to_string(), text));
         }
@@ -548,6 +569,30 @@ fn clean_text(input: &str) -> Option<String> {
     }
 
     Some(trimmed.to_string())
+}
+
+fn normalize_instruction_text(raw: &str) -> String {
+    raw.replace("<INSTRUCTIONS>", "")
+        .replace("</INSTRUCTIONS>", "")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_instruction_banner(message: &str, instructions_raw: Option<&str>) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("<instructions>") {
+        return true;
+    }
+    if let Some(instructions_raw) = instructions_raw {
+        let normalized_message = normalize_instruction_text(message);
+        if normalized_message.contains(instructions_raw) {
+            return true;
+        }
+    }
+    false
 }
 
 fn summarize_instructions(raw: &str) -> Option<String> {
@@ -647,6 +692,40 @@ mod tests {
         );
         assert_eq!(ingest.summary.started_at, Some(now));
         assert_eq!(ingest.summary.last_active, Some(now));
+
+        Ok(())
+    }
+
+    #[test]
+    fn instruction_banners_are_excluded_from_transcript() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"# General guidance\\n\\nKeep things simple.\\n\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n<INSTRUCTIONS>\\n# General guidance\\n- Do not pre-optimize.\\n</INSTRUCTIONS>\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Real user question\"}]}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(
+            ingest.messages.len(),
+            1,
+            "instruction banner should be filtered"
+        );
+        assert_eq!(ingest.messages[0].role, "user");
+        assert_eq!(ingest.messages[0].content, "Real user question");
+        assert!(ingest.messages[0].is_first);
+        assert_eq!(
+            ingest.summary.first_prompt.as_deref(),
+            Some("Real user question")
+        );
+        assert!(ingest.summary.actionable);
 
         Ok(())
     }
