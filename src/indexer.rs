@@ -464,6 +464,13 @@ fn compute_session_id(provider: &ProviderConfig, path: &Path) -> (String, String
 fn extract_messages(value: &Value) -> Vec<(String, String)> {
     let mut messages = Vec::new();
 
+    let is_tooling_warning = |text: &str| {
+        let normalized = text.trim();
+        normalized.eq_ignore_ascii_case(
+            "Warning: apply_patch was requested via shell_command. Use the apply_patch tool instead of exec_command.",
+        )
+    };
+
     if let Some(obj) = value.as_object() {
         if let Some(typ) = obj.get("type").and_then(Value::as_str) {
             match typ {
@@ -474,6 +481,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
                             .and_then(Value::as_str)
                             .is_some_and(|ty| ty == "user_message")
                         && let Some(text) = extract_text(payload)
+                        && !is_tooling_warning(&text)
                     {
                         messages.push(("user".to_string(), text));
                     }
@@ -482,6 +490,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
                     let container = obj.get("payload").unwrap_or(value);
                     if let Some(role) = container.get("role").and_then(Value::as_str)
                         && let Some(text) = extract_text(container)
+                        && !is_tooling_warning(&text)
                     {
                         messages.push((role.to_string(), text));
                     }
@@ -492,6 +501,7 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
 
         if let Some(role) = obj.get("role").and_then(Value::as_str)
             && let Some(text) = extract_text(value)
+            && !is_tooling_warning(&text)
         {
             messages.push((role.to_string(), text));
         }
