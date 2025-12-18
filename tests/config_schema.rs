@@ -1,3 +1,4 @@
+use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use color_eyre::Result;
@@ -7,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use tool_executor::config;
 
+#[allow(deprecated)]
 #[test]
 fn config_schema_outputs_json_object() -> Result<()> {
     let temp = TempDir::new()?;
@@ -17,7 +19,7 @@ fn config_schema_outputs_json_object() -> Result<()> {
     data_dir.create_dir_all()?;
     cache_dir.create_dir_all()?;
 
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("tx");
+    let mut cmd = Command::cargo_bin("tx").expect("tx binary available");
     cmd.args(["config", "schema"])
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
@@ -37,6 +39,7 @@ fn config_schema_outputs_json_object() -> Result<()> {
     Ok(())
 }
 
+#[allow(deprecated)]
 #[test]
 fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
     let temp = TempDir::new()?;
@@ -47,7 +50,7 @@ fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
     data_dir.create_dir_all()?;
     cache_dir.create_dir_all()?;
 
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("tx");
+    let mut cmd = Command::cargo_bin("tx").expect("tx binary available");
     cmd.args(["config", "schema", "--pretty"])
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
