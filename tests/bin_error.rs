@@ -24,7 +24,7 @@ fn resume_missing_session_prints_error_chain() -> Result<(), Box<dyn std::error:
     cache_dir.create_dir_all()?;
 
     #[allow(deprecated)]
-    Command::cargo_bin("tx")?
+    Command::cargo_bin("tx-dev")?
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
         .env("TX_CACHE_DIR", cache_dir.path())

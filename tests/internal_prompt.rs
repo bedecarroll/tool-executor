@@ -37,7 +37,7 @@ printf 'Hello %s\n' "${1:-}"
         .to_string();
 
     #[allow(deprecated)]
-    Command::cargo_bin("tx")?
+    Command::cargo_bin("tx-dev")?
         .env(
             "PATH",
             format!("{path}:{}", std::env::var("PATH").unwrap_or_default()),

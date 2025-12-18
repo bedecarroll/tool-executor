@@ -12,7 +12,7 @@ use tool_executor::test_support::toml_path;
 
 #[allow(deprecated)]
 fn base_command(temp: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("tx").expect("tx binary available");
+    let mut cmd = Command::cargo_bin("tx-dev").expect("tx-dev binary available");
     let config_dir = temp.child("config-root");
     config_dir.create_dir_all().unwrap();
     cmd.env("TX_CONFIG_DIR", config_dir.path());

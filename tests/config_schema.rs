@@ -19,7 +19,7 @@ fn config_schema_outputs_json_object() -> Result<()> {
     data_dir.create_dir_all()?;
     cache_dir.create_dir_all()?;
 
-    let mut cmd = Command::cargo_bin("tx").expect("tx binary available");
+    let mut cmd = Command::cargo_bin("tx-dev").expect("tx-dev binary available");
     cmd.args(["config", "schema"])
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
@@ -50,7 +50,7 @@ fn config_schema_docs_asset_matches_cli_output() -> Result<()> {
     data_dir.create_dir_all()?;
     cache_dir.create_dir_all()?;
 
-    let mut cmd = Command::cargo_bin("tx").expect("tx binary available");
+    let mut cmd = Command::cargo_bin("tx-dev").expect("tx-dev binary available");
     cmd.args(["config", "schema", "--pretty"])
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
