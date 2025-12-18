@@ -642,4 +642,44 @@ fi
         assert_eq!(text.trim_end(), "Demo value");
         Ok(())
     }
+
+    #[test]
+    fn assemble_prompt_propagates_non_zero_status() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().expect("tempdir");
+        let pa = temp.child("pa");
+        pa.write_str("#!/bin/sh\nexit 3\n").expect("write script");
+        #[cfg(unix)]
+        {
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(pa.path(), perms).expect("chmod");
+        }
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = if original_path.is_empty() {
+            pa_dir.clone()
+        } else {
+            format!("{pa_dir}:{original_path}")
+        };
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let cmd = InternalPromptAssemblerCommand {
+            prompt: "demo".into(),
+            prompt_args: Vec::new(),
+            prompt_limit: 256,
+        };
+
+        let err = assemble_prompt(&cmd).expect_err("pa failure should bubble up");
+        assert!(
+            err.to_string().contains("exited with status"),
+            "unexpected error: {err:?}"
+        );
+
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+    }
 }

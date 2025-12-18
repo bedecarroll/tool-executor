@@ -3249,6 +3249,8 @@ dependencies = [
 name = "tx"
 version = "0.5.0"
 dependencies = [
+ "assert_cmd",
+ "assert_fs",
  "color-eyre",
  "tool-executor",
 ]

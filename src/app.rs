@@ -205,10 +205,16 @@ impl<'cli> App<'cli> {
     /// Returns an error when the session cannot be loaded, the requested profile is
     /// incompatible, the pipeline cannot be constructed, or execution fails.
     pub fn resume(&mut self, cmd: &ResumeCommand) -> Result<()> {
-        let summary = self
-            .db
-            .session_summary_for_identifier(&cmd.session_id)?
-            .ok_or_else(|| eyre!("session '{}' not found", cmd.session_id))?;
+        let summary =
+            if let Some(summary) = self.db.session_summary_for_identifier(&cmd.session_id)? {
+                summary
+            } else if cmd.session_id.eq_ignore_ascii_case("last") {
+                self.db
+                    .latest_actionable_session()?
+                    .ok_or_else(|| eyre!("no previous sessions available to resume"))?
+            } else {
+                return Err(eyre!("session '{}' not found", cmd.session_id));
+            };
 
         let (prompt_invocation, profile_inline_pre) = if let Some(profile_name) = &cmd.profile {
             let (prompt_invocation, inline_pre) = {
@@ -1550,6 +1556,21 @@ mod tests {
         app.config(&ConfigCommand::Dump)?;
         app.config(&ConfigCommand::Where)?;
         app.config(&ConfigCommand::Default(ConfigDefaultCommand { raw: false }))?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_prompt_available_errors_when_disabled() -> Result<()> {
+        let (_temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+        app.loaded.config.features.prompt_assembler = None;
+
+        let err = app
+            .ensure_prompt_available("demo")
+            .expect_err("prompt lookup should fail when assembler disabled");
+        assert!(
+            err.to_string().contains("prompt-assembler is disabled"),
+            "unexpected error: {err:?}"
+        );
         Ok(())
     }
 

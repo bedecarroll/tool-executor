@@ -4063,6 +4063,16 @@ mod tests {
     }
 
     #[test]
+    fn buffer_to_string_strips_trailing_whitespace() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+        // Set an empty symbol to exercise the space fallback path.
+        buffer[(0, 0)].set_symbol("");
+
+        let rendered = buffer_to_string(&buffer);
+        assert_eq!(rendered, "");
+    }
+
+    #[test]
     fn empty_entry_placeholder_when_no_providers() -> Result<()> {
         let temp = TempDir::new()?;
         let mut config = build_config(temp.path());

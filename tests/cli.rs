@@ -426,3 +426,59 @@ fn resume_accepts_uuid_identifier() -> color_eyre::Result<()> {
     temp.close()?;
     Ok(())
 }
+
+#[test]
+fn resume_last_launches_most_recent_actionable_session() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let codex_home = temp.child("codex-home");
+    codex_home.create_dir_all()?;
+    let sessions_dir = codex_home.child("session");
+    sessions_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+
+[wrappers.print]
+shell = true
+cmd = "echo {{session.id}}"
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    sessions_dir.child("older.jsonl").write_str(
+        r#"{"timestamp":"2025-12-17T12:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Earlier"}}"#,
+    )?;
+    sessions_dir.child("non-actionable.jsonl").write_str(
+        r#"{"timestamp":"2025-12-18T06:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"assistant only"}]}}"#,
+    )?;
+    sessions_dir.child("latest.jsonl").write_str(
+        r#"{"timestamp":"2025-12-18T05:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Newest actionable"}}"#,
+    )?;
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .arg("resume")
+        .arg("last")
+        .arg("--emit-command")
+        .arg("--wrap")
+        .arg("print")
+        .env("CODEX_HOME", codex_home.path())
+        .env("TX_CONFIG_DIR", config_dir.path())
+        .output()?;
+    if !output.status.success() {
+        eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("codex/latest.jsonl"),
+        "expected latest actionable session id in stdout, got: {stdout}"
+    );
+
+    temp.close()?;
+    Ok(())
+}

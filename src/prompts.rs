@@ -375,4 +375,47 @@ exit 1
             other => panic!("unexpected status: {other:?}"),
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompts_enriches_entries_with_detail_fallbacks() -> Result<()> {
+        let temp = TempDir::new()?;
+        let pa = temp.child("pa");
+        pa.write_str(
+            r#"#!/bin/sh
+if [ "$1" = "list" ]; then
+  printf '{"prompts":[{"name":"demo"}]}'
+  exit 0
+fi
+if [ "$1" = "show" ]; then
+  printf '{"profile":{"content":"Line A\\nLine B\\n"},"description":"From detail","tags":["t1","t2"],"stdin_supported":true}'
+  exit 0
+fi
+exit 1
+"#,
+        )?;
+        #[cfg(unix)]
+        {
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(pa.path(), perms)?;
+        }
+
+        let _guard = set_path(&temp);
+
+        let cfg = PromptAssemblerConfig {
+            namespace: "tests".into(),
+        };
+        let profiles = fetch_prompts(&cfg)?;
+        assert_eq!(profiles.len(), 1);
+        let profile = &profiles[0];
+        assert_eq!(profile.name, "demo");
+        assert_eq!(profile.description.as_deref(), Some("From detail"));
+        assert_eq!(profile.tags, vec!["t1".to_string(), "t2".to_string()]);
+        assert!(profile.stdin_supported);
+        assert_eq!(
+            profile.contents,
+            vec!["Line A".to_string(), "Line B".to_string()]
+        );
+        Ok(())
+    }
 }

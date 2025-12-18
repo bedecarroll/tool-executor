@@ -596,6 +596,40 @@ impl Database {
         self.session_summary_by_uuid(identifier)
     }
 
+    /// Retrieve the most recently active actionable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn latest_actionable_session(&self) -> Result<Option<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT
+                id,
+                provider,
+                wrapper,
+                label,
+                path,
+                uuid,
+                first_prompt,
+                actionable,
+                created_at,
+                started_at,
+                last_active,
+                size,
+                mtime
+            FROM sessions
+            WHERE actionable = 1 AND last_active IS NOT NULL
+            ORDER BY last_active DESC
+            LIMIT 1
+            ",
+        )?;
+
+        stmt.query_row([], map_summary)
+            .optional()
+            .map_err(|err| eyre!("failed to fetch latest session: {err}"))
+    }
+
     /// Determine the provider associated with a session identifier.
     ///
     /// # Errors
@@ -900,6 +934,22 @@ mod tests {
 
         assert_eq!(db.provider_for("sess-uuid")?, Some("codex".into()));
         assert!(db.provider_for("missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn latest_actionable_session_ignores_inactive_entries() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "old", "codex", "Old", true, now - 10)?;
+        insert_session(&mut db, "inactive", "codex", "Inactive", false, now + 20)?;
+        insert_session(&mut db, "recent", "codex", "Recent", true, now)?;
+
+        let latest = db
+            .latest_actionable_session()?
+            .expect("expected a latest session");
+        assert_eq!(latest.id, "recent");
+
         Ok(())
     }
 
