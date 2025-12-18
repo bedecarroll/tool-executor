@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use indexmap::IndexMap;
 use serde_json::json;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use tool_executor::config::model::{

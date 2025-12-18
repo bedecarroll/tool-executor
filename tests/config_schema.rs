@@ -81,7 +81,7 @@ fn config_schema_exposes_stdin_mode_enum() -> Result<()> {
     let schema: Value = serde_json::from_str(&schema_json)?;
 
     let definitions = schema
-        .get("definitions")
+        .get("$defs")
         .and_then(Value::as_object)
         .expect("schema definitions to exist");
     let raw_provider = definitions
@@ -100,7 +100,7 @@ fn config_schema_exposes_stdin_mode_enum() -> Result<()> {
         .get("$ref")
         .and_then(Value::as_str)
         .expect("stdin_mode to reference RawStdinMode definition");
-    assert_eq!(reference, "#/definitions/RawStdinMode");
+    assert_eq!(reference, "#/$defs/RawStdinMode");
 
     let mode_definition = definitions
         .get("RawStdinMode")
@@ -131,7 +131,7 @@ fn config_schema_includes_profile_prompt_assembler() -> Result<()> {
     let schema: Value = serde_json::from_str(&schema_json)?;
 
     let definitions = schema
-        .get("definitions")
+        .get("$defs")
         .and_then(Value::as_object)
         .expect("schema definitions to exist");
     let raw_profile = definitions
