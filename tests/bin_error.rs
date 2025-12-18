@@ -33,7 +33,7 @@ fn resume_missing_session_prints_error_chain() -> Result<(), Box<dyn std::error:
         .arg("missing")
         .assert()
         .failure()
-        .stderr(contains("tx:"));
+        .stderr(contains("session 'missing' not found"));
 
     Ok(())
 }
