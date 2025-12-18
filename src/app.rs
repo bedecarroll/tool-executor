@@ -928,10 +928,12 @@ mod tests {
     use crate::config::{AppDirectories, ConfigSource, ConfigSourceKind, LoadedConfig};
     use crate::db::Database;
     use crate::indexer::IndexError;
+    use crate::pipeline::{Invocation, PipelinePlan};
     use crate::session::{MessageRecord, SearchHit, SessionIngest, SessionSummary, Transcript};
     use crate::test_support::{ENV_LOCK, toml_path};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
+    use clap::Parser;
     use color_eyre::eyre::eyre;
     use indexmap::IndexMap;
     use std::collections::HashMap;
@@ -1170,6 +1172,129 @@ mod tests {
         log_index_report(&report);
         report.errors.clear();
         log_index_report(&report);
+    }
+
+    #[test]
+    fn config_lint_returns_error_for_error_diagnostics() -> Result<()> {
+        let temp = TempDir::new()?;
+        let directories = setup_directories(&temp)?;
+        let (sessions_dir, _) = create_session_artifacts(&temp)?;
+        let config = fixture_config(&sessions_dir);
+        let diagnostics = vec![ConfigDiagnostic {
+            level: DiagnosticLevel::Error,
+            message: "broken config".into(),
+        }];
+        let sources = vec![ConfigSource {
+            path: directories.config_dir.join("config.toml"),
+            kind: ConfigSourceKind::Main,
+        }];
+        let merged = Value::Table(toml::map::Map::new());
+        let db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+        let cli = Cli::parse_from(["tx"]);
+        let app = App {
+            cli: &cli,
+            loaded: LoadedConfig {
+                config,
+                diagnostics,
+                sources,
+                merged,
+                directories: directories.clone(),
+            },
+            db,
+            prompt: None,
+        };
+
+        let err = app
+            .config_lint()
+            .expect_err("should surface configuration errors");
+        assert!(err.to_string().contains("configuration contains errors"));
+        Ok(())
+    }
+
+    #[test]
+    fn emit_command_covers_plain_and_json_modes() -> Result<()> {
+        let cwd = std::env::current_dir().expect("current dir");
+        let plan = PipelinePlan {
+            pipeline: "echo hi".into(),
+            display: "echo hi".into(),
+            friendly_display: "friendly hi".into(),
+            env: vec![("KEY".into(), "VALUE".into())],
+            invocation: Invocation::Shell {
+                command: "true".into(),
+            },
+            provider: "echo".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
+            stdin_prompt_label: None,
+            cwd,
+            prompt_assembler: None,
+        };
+
+        emit_command(
+            &plan,
+            EmitMode::Plain {
+                newline: false,
+                friendly: true,
+            },
+        )?;
+        emit_command(&plan, EmitMode::Json)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let log_path = temp.child("capture.log");
+        let script = temp.child("capture.sh");
+        script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(script.path(), perms)?;
+
+        let plan = PipelinePlan {
+            pipeline: "internal capture-arg".into(),
+            display: "log".into(),
+            friendly_display: "log".into(),
+            env: Vec::new(),
+            invocation: Invocation::Exec {
+                argv: vec![
+                    script.path().display().to_string(),
+                    log_path.path().display().to_string(),
+                ],
+            },
+            provider: "demo".into(),
+            pre_snippets: Vec::new(),
+            post_snippets: Vec::new(),
+            wrapper: None,
+            needs_stdin_prompt: false,
+            capture_has_pre_commands: false,
+            stdin_prompt_label: None,
+            cwd: temp.path().to_path_buf(),
+            prompt_assembler: None,
+        };
+
+        execute_plan_with_prompt(&plan, true, Some("payload".into()), |_| Ok(None))?;
+
+        let captured = std::fs::read_to_string(log_path.path())?;
+        assert_eq!(captured, "payload");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_prefers_environment_or_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("SHELL", "/bin/sh");
+        }
+
+        let shell = default_shell();
+        assert_eq!(shell.flag, "-c");
+        assert!(!shell.path.is_empty());
     }
 
     fn setup_directories(temp: &TempDir) -> Result<AppDirectories> {

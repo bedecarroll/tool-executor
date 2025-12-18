@@ -18,3 +18,44 @@ fn main() -> color_eyre::Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert_fs::TempDir;
+    use tool_executor::{
+        Cli,
+        cli::{Command as TopLevelCommand, ConfigCommand},
+        config::AppDirectories,
+    };
+
+    #[test]
+    fn main_handles_successful_run() -> color_eyre::Result<()> {
+        let temp = TempDir::new()?;
+        let directories = AppDirectories {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            cache_dir: temp.path().join("cache"),
+        };
+        directories.ensure_all()?;
+
+        // Provide the minimal config needed for a no-op run.
+        std::fs::write(
+            directories.config_dir.join("config.toml"),
+            r#"provider = "echo"
+[providers.echo]
+bin = "echo"
+session_roots = []
+"#,
+        )?;
+
+        let cli = Cli {
+            config_dir: Some(directories.config_dir.clone()),
+            verbose: 0,
+            quiet: false,
+            command: Some(TopLevelCommand::Config(ConfigCommand::Where)),
+        };
+
+        // Should complete without invoking process::exit.
+        tool_executor::run(&cli)
+    }
+}

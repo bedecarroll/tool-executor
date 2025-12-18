@@ -18,6 +18,7 @@ fn main_runs_config_where() -> Result<(), Box<dyn Error>> {
     let cache_dir = temp.child("cache");
     cache_dir.create_dir_all()?;
 
+    #[allow(deprecated)]
     Command::cargo_bin("tx")?
         .env("TX_CONFIG_DIR", config_dir.path())
         .env("TX_DATA_DIR", data_dir.path())
