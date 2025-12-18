@@ -643,6 +643,7 @@ fi
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn assemble_prompt_propagates_non_zero_status() {
         let _guard = ENV_LOCK.lock().unwrap();
