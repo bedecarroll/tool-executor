@@ -16,6 +16,10 @@ publish = false
 color-eyre = "0.6"
 tool-executor = { path = "../.." }
 
+[dev-dependencies]
+assert_cmd = "2.1"
+assert_fs = "1.1"
+
 [package.metadata.dist]
 dist = true
 unix-archive = ".tar.gz"

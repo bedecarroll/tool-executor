@@ -131,6 +131,23 @@ mod tests {
     }
 
     #[test]
+    fn merge_tables_replaces_non_table_with_table() -> Result<()> {
+        let mut target = table(vec![("outer", Value::Integer(5))]);
+        let addition = table(vec![(
+            "outer",
+            Value::Table(table(vec![("inner", Value::Integer(1))])),
+        )]);
+
+        merge_tables(&mut target, addition, None)?;
+
+        let Value::Table(updated) = target.get("outer").unwrap() else {
+            panic!("expected table");
+        };
+        assert_eq!(updated.get("inner"), Some(&Value::Integer(1)));
+        Ok(())
+    }
+
+    #[test]
     fn merge_tables_creates_array_when_target_missing() -> Result<()> {
         let mut target = table(Vec::<(String, Value)>::new());
         let addition = table(vec![(

@@ -16,7 +16,7 @@ license = "MIT"
 readme = "README.md"
 keywords = [ "cli",]
 categories = [ "command-line-utilities",]
-default-run = "tx"
+default-run = "tx-dev"
 
 [features]
 default = []

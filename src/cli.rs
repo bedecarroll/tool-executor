@@ -61,7 +61,7 @@ pub struct SearchCommand {
 
 #[derive(Debug, Args)]
 pub struct ResumeCommand {
-    /// Session identifier to resume.
+    /// Session identifier to resume (use 'last' for the most recent session).
     pub session_id: String,
     /// Optional profile to merge.
     #[arg(long)]
