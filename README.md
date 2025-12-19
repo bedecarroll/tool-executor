@@ -138,6 +138,10 @@ mise run coverage
 
 Both `mise run test` and `mise run coverage` drive `cargo llvm-cov` with the `ci` Nextest profile. The coverage task starts from a clean workspace, writes reports to `coverage/html/`, emits an lcov file, and fails if line coverage drops below 90%. Running `mise run test` performs the instrumented run, produces `target/nextest/ci/junit.xml` for Codecov’s Test Analytics dashboard, and follows up with `cargo insta test`.
 
+### Build cache
+
+CI enables [`sccache`](https://github.com/mozilla/sccache) (`RUSTC_WRAPPER=sccache`, `SCCACHE_GHA_ENABLED=true`) to reuse compiler outputs across jobs. To mirror that locally, install sccache via your package manager and export `RUSTC_WRAPPER=sccache` before running cargo; `sccache --show-stats` reports cache hits.
+
 ### Benchmarks
 
 Measure pipeline construction performance with Criterion:
