@@ -49,15 +49,15 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ansi-to-tui"
-version = "7.0.0"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67555e1f1ece39d737e28c8a017721287753af3f93225e4a445b29ccb0f5912c"
+checksum = "fdfd3cbf4843347ca072771a797484f1c3434a14d57f39d31c92dfb93a8799a8"
 dependencies = [
  "nom",
- "ratatui",
+ "ratatui-core",
  "simdutf8",
  "smallvec",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -427,6 +427,20 @@ name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b79c4069c6cad78e2e0cdfcbd26275770669fb39fd308a752dc110e83b9af32"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "static_assertions",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
 dependencies = [
  "castaway",
  "cfg-if",
@@ -1159,6 +1173,8 @@ version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -1532,6 +1548,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kasuari"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fe90c1150662e858c7d5f945089b7517b0a80d8bf7ba4b1b5ffc984e7230a5b"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1620,6 +1646,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96051b46fc183dc9cd4a223960ef37b9af631b55191852a8274bfef064cda20f"
+dependencies = [
+ "hashbrown 0.16.1",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1639,12 +1674,6 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
-
-[[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
@@ -1670,12 +1699,11 @@ dependencies = [
 
 [[package]]
 name = "nom"
-version = "7.1.3"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr",
- "minimal-lexical",
 ]
 
 [[package]]
@@ -2037,7 +2065,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.17",
+ "thiserror",
  "tokio",
  "tracing",
  "web-time",
@@ -2058,7 +2086,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.17",
+ "thiserror",
  "tinyvec",
  "tracing",
  "web-time",
@@ -2139,16 +2167,36 @@ checksum = "eabd94c2f37801c20583fc49dd5cd6b0ba68c716787c2dd6ed18571e1e63117b"
 dependencies = [
  "bitflags",
  "cassowary",
- "compact_str",
+ "compact_str 0.8.1",
  "crossterm 0.28.1",
  "indoc",
  "instability",
  "itertools 0.13.0",
- "lru",
+ "lru 0.12.5",
  "paste",
- "strum",
+ "strum 0.26.3",
  "unicode-segmentation",
- "unicode-truncate",
+ "unicode-truncate 1.1.0",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "ratatui-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ef8dea09a92caaf73bff7adb70b76162e5937524058a7e5bff37869cbbec293"
+dependencies = [
+ "bitflags",
+ "compact_str 0.9.0",
+ "hashbrown 0.16.1",
+ "indoc",
+ "itertools 0.14.0",
+ "kasuari",
+ "lru 0.16.2",
+ "strum 0.27.2",
+ "thiserror",
+ "unicode-segmentation",
+ "unicode-truncate 2.0.0",
  "unicode-width 0.2.0",
 ]
 
@@ -2198,7 +2246,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.16",
  "libredox",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -2752,7 +2800,7 @@ dependencies = [
  "cc",
  "hashbrown 0.16.1",
  "js-sys",
- "thiserror 2.0.17",
+ "thiserror",
  "wasm-bindgen",
 ]
 
@@ -2780,7 +2828,16 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.26.4",
+]
+
+[[package]]
+name = "strum"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+dependencies = [
+ "strum_macros 0.27.2",
 ]
 
 [[package]]
@@ -2793,6 +2850,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
+ "syn",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
  "syn",
 ]
 
@@ -2849,7 +2918,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "thiserror 2.0.17",
+ "thiserror",
  "walkdir",
  "yaml-rust",
 ]
@@ -2886,31 +2955,11 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl 2.0.17",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -3120,7 +3169,7 @@ dependencies = [
  "shellexpand",
  "shlex",
  "tempfile",
- "thiserror 2.0.17",
+ "thiserror",
  "time",
  "toml",
  "tracing",
@@ -3255,15 +3304,15 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui-markdown"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcc77f9d07ca84d2daa018ca91e6076ec9c36f36d4b0e964d5569c51f398b547"
+checksum = "e766339aabad4528c3fccddf4acf03bc2b7ae6642def41e43c7af1a11f183122"
 dependencies = [
  "ansi-to-tui",
  "itertools 0.14.0",
  "pretty_assertions",
  "pulldown-cmark",
- "ratatui",
+ "ratatui-core",
  "rstest",
  "syntect",
  "tracing",
@@ -3312,6 +3361,17 @@ dependencies = [
  "itertools 0.13.0",
  "unicode-segmentation",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "unicode-truncate"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fbf03860ff438702f3910ca5f28f8dac63c1c11e7efb5012b8b175493606330"
+dependencies = [
+ "itertools 0.13.0",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
@@ -3891,7 +3951,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "memchr",
- "thiserror 2.0.17",
+ "thiserror",
  "time",
  "zopfli",
 ]
@@ -3904,7 +3964,7 @@ checksum = "dba6063ff82cdbd9a765add16d369abe81e520f836054e997c2db217ceca40c0"
 dependencies = [
  "base64",
  "ed25519-dalek",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
