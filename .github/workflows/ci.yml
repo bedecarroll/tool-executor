@@ -35,14 +35,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Install mise
         uses: jdx/mise-action@v3
 
       # rustup caches can omit components; install them explicitly to guarantee rustfmt/clippy availability.
       - name: Install rust components
         run: rustup component add --toolchain 1.90.0 rustfmt clippy llvm-tools-preview
-      - name: Enable sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
