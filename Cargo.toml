@@ -49,7 +49,7 @@ unicode-width = "0.2.0"
 [dev-dependencies]
 assert_fs = "1.1"
 predicates = "3.1"
-tempfile = "3.23"
+tempfile = "3.24"
 assert_cmd = "2.1"
 
 [dependencies.clap]
@@ -61,7 +61,7 @@ version = "2.12.1"
 features = [ "serde",]
 
 [dependencies.ratatui]
-version = "0.29"
+version = "0.30"
 default-features = false
 features = [ "crossterm",]
 
@@ -74,11 +74,11 @@ version = "1.0"
 features = [ "derive",]
 
 [dependencies.tui-markdown]
-version = "0.3.6"
+version = "0.3.7"
 default-features = true
 
 [dependencies.schemars]
-version = "1.1"
+version = "1.2"
 features = [ "derive", "indexmap2",]
 
 [dependencies.time]
@@ -99,7 +99,7 @@ default-features = false
 features = [ "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls",]
 
 [dev-dependencies.insta]
-version = "1.45.0"
+version = "1.45.1"
 features = [ "filters",]
 
 [dev-dependencies.criterion]

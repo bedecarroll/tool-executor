@@ -151,6 +151,7 @@ fn run_app<'a, B, E>(
 ) -> Result<Option<Outcome>>
 where
     B: ratatui::backend::Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
     E: EventSource,
 {
     let mut state = AppState::new(ctx)?;
@@ -177,6 +178,7 @@ fn run_with_terminal<'a, B, E>(
 ) -> Result<Option<Outcome>>
 where
     B: ratatui::backend::Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
     E: EventSource,
 {
     run_app(ctx, terminal, events)
