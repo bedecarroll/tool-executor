@@ -22,7 +22,7 @@ run = [
   "cargo clippy --all-targets --all-features -- -D warnings",
   "typos",
   "markdownlint-cli2 \"**/*.md\" \"#target\" \"#coverage\" \"#dist\"",
-  "cargo deny check",
+  "mise x cargo:cargo-deny -- cargo-deny check",
 ]
 
 [tasks.lint-fix]
