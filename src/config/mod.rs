@@ -405,6 +405,20 @@ mod tests {
         })
     }
 
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(val) = value {
+            unsafe { std::env::set_var(key, val) };
+        } else {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    fn restore_env_branches(key: &str, value: Option<String>) {
+        restore_env(key, Some("tx-test-dummy".into()));
+        restore_env(key, None);
+        restore_env(key, value);
+    }
+
     #[test]
     fn resolve_directories_uses_env_overrides() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -431,33 +445,67 @@ mod tests {
         assert_eq!(dirs.data_dir, data_dir.path());
         assert_eq!(dirs.cache_dir, cache_dir.path());
 
-        if let Some(val) = orig_config {
-            unsafe {
-                std::env::set_var("TX_CONFIG_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_CONFIG_DIR");
-            }
+        restore_env_branches("TX_CONFIG_DIR", orig_config);
+        restore_env_branches("TX_DATA_DIR", orig_data);
+        restore_env_branches("TX_CACHE_DIR", orig_cache);
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_directories_defaults_without_env() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
+        let orig_data = std::env::var("TX_DATA_DIR").ok();
+        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+
+        unsafe {
+            std::env::remove_var("TX_CONFIG_DIR");
+            std::env::remove_var("TX_DATA_DIR");
+            std::env::remove_var("TX_CACHE_DIR");
         }
-        if let Some(val) = orig_data {
-            unsafe {
-                std::env::set_var("TX_DATA_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_DATA_DIR");
-            }
+
+        let dirs = resolve_directories(None)?;
+        assert!(path_contains_component(&dirs.config_dir, APP_NAME));
+        assert!(path_contains_component(&dirs.data_dir, APP_NAME));
+        assert!(path_contains_component(&dirs.cache_dir, APP_NAME));
+
+        restore_env_branches("TX_CONFIG_DIR", orig_config);
+        restore_env_branches("TX_DATA_DIR", orig_data);
+        restore_env_branches("TX_CACHE_DIR", orig_cache);
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_directories_prefers_override_over_env() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let override_dir = temp.child("override");
+        override_dir.create_dir_all()?;
+        let data_dir = temp.child("data");
+        data_dir.create_dir_all()?;
+        let cache_dir = temp.child("cache");
+        cache_dir.create_dir_all()?;
+
+        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
+        let orig_data = std::env::var("TX_DATA_DIR").ok();
+        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+
+        unsafe {
+            std::env::set_var("TX_CONFIG_DIR", temp.child("other").path());
+            std::env::set_var("TX_DATA_DIR", data_dir.path());
+            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
         }
-        if let Some(val) = orig_cache {
-            unsafe {
-                std::env::set_var("TX_CACHE_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_CACHE_DIR");
-            }
-        }
+
+        let dirs = resolve_directories(Some(override_dir.path()))?;
+        assert_eq!(dirs.config_dir, override_dir.path());
+        assert_eq!(dirs.data_dir, data_dir.path());
+        assert_eq!(dirs.cache_dir, cache_dir.path());
+
+        restore_env_branches("TX_CONFIG_DIR", orig_config);
+        restore_env_branches("TX_DATA_DIR", orig_data);
+        restore_env_branches("TX_CACHE_DIR", orig_cache);
 
         Ok(())
     }
@@ -551,6 +599,40 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
+    fn resolve_default_directories_uses_xdg_env() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_root = temp.child("xdg-config");
+        let data_root = temp.child("xdg-data");
+        let cache_root = temp.child("xdg-cache");
+        config_root.create_dir_all()?;
+        data_root.create_dir_all()?;
+        cache_root.create_dir_all()?;
+
+        let orig_config = std::env::var("XDG_CONFIG_HOME").ok();
+        let orig_data = std::env::var("XDG_DATA_HOME").ok();
+        let orig_cache = std::env::var("XDG_CACHE_HOME").ok();
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", config_root.path());
+            std::env::set_var("XDG_DATA_HOME", data_root.path());
+            std::env::set_var("XDG_CACHE_HOME", cache_root.path());
+        }
+
+        let (config, data, cache) = resolve_default_directories()?;
+        assert_eq!(config, config_root.path().join(APP_NAME));
+        assert_eq!(data, data_root.path().join(APP_NAME));
+        assert_eq!(cache, cache_root.path().join(APP_NAME));
+
+        restore_env_branches("XDG_CONFIG_HOME", orig_config);
+        restore_env_branches("XDG_DATA_HOME", orig_data);
+        restore_env_branches("XDG_CACHE_HOME", orig_cache);
+
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn resolve_default_directories_errors_without_sources() {
         let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
         assert!(
@@ -606,6 +688,25 @@ mod tests {
         dir.child("00-main.toml")
             .write_str("provider = \"codex\"")?;
         dir.child("notes.md").write_str("# ignore")?;
+        let files = read_toml_files(dir.path())?;
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("00-main.toml"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_toml_files_skips_subdirectories() -> Result<()> {
+        let temp = TempDir::new()?;
+        let dir = temp.child("conf.d");
+        dir.create_dir_all()?;
+        dir.child("00-main.toml")
+            .write_str("provider = \"codex\"")?;
+        let nested = dir.child("nested");
+        nested.create_dir_all()?;
+        nested
+            .child("01-nested.toml")
+            .write_str("provider = \"codex\"")?;
+
         let files = read_toml_files(dir.path())?;
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("00-main.toml"));
@@ -669,24 +770,8 @@ mod tests {
         assert!(loaded.config.providers.contains_key("extra"));
         assert!(loaded.sources.len() >= 2);
 
-        if let Some(val) = orig_data {
-            unsafe {
-                std::env::set_var("TX_DATA_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_DATA_DIR");
-            }
-        }
-        if let Some(val) = orig_cache {
-            unsafe {
-                std::env::set_var("TX_CACHE_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_CACHE_DIR");
-            }
-        }
+        restore_env_branches("TX_DATA_DIR", orig_data);
+        restore_env_branches("TX_CACHE_DIR", orig_cache);
         Ok(())
     }
 

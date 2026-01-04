@@ -194,6 +194,7 @@ mod tests {
     use crate::test_support::ENV_LOCK;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
+    use serde_json::json;
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -250,6 +251,20 @@ mod tests {
 
     fn set_path(dir: &TempDir) -> PathGuard {
         PathGuard::new(dir)
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(val) = value {
+            unsafe { env::set_var(key, val) };
+        } else {
+            unsafe { env::remove_var(key) };
+        }
+    }
+
+    fn restore_env_branches(key: &str, value: Option<String>) {
+        restore_env(key, Some("tx-test-dummy".into()));
+        restore_env(key, None);
+        restore_env(key, value);
     }
 
     #[cfg(unix)]
@@ -416,6 +431,189 @@ exit 1
             profile.contents,
             vec!["Line A".to_string(), "Line B".to_string()]
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_reports_process_failure() {
+        let (dir, _cfg) = with_fake_pa(
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  exit 2
+fi
+exit 1
+"#,
+        );
+        let _guard = set_path(&dir);
+        let err = fetch_prompt_detail("demo").unwrap_err();
+        assert!(err.to_string().contains("exited with status"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_errors_on_invalid_json() {
+        let (dir, _cfg) = with_fake_pa(
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  printf '{'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let _guard = set_path(&dir);
+        let err = fetch_prompt_detail("demo").unwrap_err();
+        assert!(err.to_string().contains("failed to parse JSON output"));
+    }
+
+    #[test]
+    fn extract_profile_lines_uses_parts_when_content_missing() {
+        let detail = json!({
+            "profile": {
+                "parts": [
+                    { "content": "Line one\nLine two\n" },
+                    { "content": "Line three" }
+                ]
+            }
+        });
+        let lines = extract_profile_lines(&detail);
+        assert_eq!(
+            lines,
+            vec![
+                "Line one".to_string(),
+                "Line two".to_string(),
+                "Line three".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_profile_lines_returns_empty_when_missing() {
+        let detail = json!({});
+        let lines = extract_profile_lines(&detail);
+        assert!(lines.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompts_skips_entries_without_name() -> Result<()> {
+        let (dir, cfg) = with_fake_pa(
+            r#"#!/bin/sh
+case "$1" in
+  list)
+    cat <<'JSON'
+[
+  { "name": "demo" },
+  { "tags": ["skip"] }
+]
+JSON
+    exit 0
+    ;;
+  show)
+    if [ "$3" = "demo" ]; then
+      cat <<'JSON'
+{ "profile": { "content": "Hello\n" } }
+JSON
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+"#,
+        );
+        let _guard = set_path(&dir);
+        let profiles = fetch_prompts(&cfg)?;
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "demo");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_assembler_refresh_reports_ready() {
+        let (dir, cfg) = with_fake_pa(
+            r#"#!/bin/sh
+case "$1" in
+  list)
+    cat <<'JSON'
+[{
+  "name": "demo",
+  "stdin_supported": true
+}]
+JSON
+    exit 0
+    ;;
+  show)
+    if [ "$3" = "demo" ]; then
+      cat <<'JSON'
+{
+  "profile": {
+    "content": "Line one\n"
+  }
+}
+JSON
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+"#,
+        );
+        let _guard = set_path(&dir);
+        let mut assembler = PromptAssembler::new(cfg);
+        match assembler.refresh(true) {
+            PromptStatus::Ready { profiles } => {
+                assert_eq!(profiles.len(), 1);
+                assert_eq!(profiles[0].name, "demo");
+            }
+            other => panic!("unexpected status: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pa_command_prefers_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original = env::var("TX_TEST_PA_BIN").ok();
+        unsafe {
+            env::set_var("TX_TEST_PA_BIN", "pa-override");
+        }
+        let cmd = pa_command();
+        assert_eq!(cmd.get_program(), "pa-override");
+        restore_env_branches("TX_TEST_PA_BIN", original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompts_keeps_entry_stdin_supported() -> Result<()> {
+        let (dir, cfg) = with_fake_pa(
+            r#"#!/bin/sh
+case "$1" in
+  list)
+    cat <<'JSON'
+[{
+  "name": "demo",
+  "stdin_supported": true
+}]
+JSON
+    exit 0
+    ;;
+  show)
+    if [ "$3" = "demo" ]; then
+      cat <<'JSON'
+{ "profile": { "content": "Hello\n" } }
+JSON
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+"#,
+        );
+        let _guard = set_path(&dir);
+        let profiles = fetch_prompts(&cfg)?;
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles[0].stdin_supported);
         Ok(())
     }
 }

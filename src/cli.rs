@@ -239,6 +239,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_role_accepts_assistant() {
+        let role = parse_role("assistant").expect("assistant is valid");
+        assert_eq!(role, "assistant");
+    }
+
+    #[test]
     fn parse_resume_collects_provider_args() {
         let cli = Cli::try_parse_from([
             "tx",
