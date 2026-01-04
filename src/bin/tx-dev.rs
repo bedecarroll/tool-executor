@@ -26,10 +26,13 @@ mod tests {
         Cli,
         cli::{Command as TopLevelCommand, ConfigCommand},
         config::AppDirectories,
+        test_support::ENV_LOCK,
     };
+    use std::env;
 
     #[test]
     fn main_handles_successful_run() -> color_eyre::Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
         let directories = AppDirectories {
             config_dir: temp.path().join("config"),
@@ -56,6 +59,26 @@ session_roots = []
         };
 
         // Should complete without invoking process::exit.
-        tool_executor::run(&cli)
+        let original_data = env::var("TX_DATA_DIR").ok();
+        let original_cache = env::var("TX_CACHE_DIR").ok();
+        unsafe {
+            env::set_var("TX_DATA_DIR", &directories.data_dir);
+            env::set_var("TX_CACHE_DIR", &directories.cache_dir);
+        }
+
+        let result = tool_executor::run(&cli);
+
+        if let Some(value) = original_data {
+            unsafe { env::set_var("TX_DATA_DIR", value) };
+        } else {
+            unsafe { env::remove_var("TX_DATA_DIR") };
+        }
+        if let Some(value) = original_cache {
+            unsafe { env::set_var("TX_CACHE_DIR", value) };
+        } else {
+            unsafe { env::remove_var("TX_CACHE_DIR") };
+        }
+
+        result
     }
 }

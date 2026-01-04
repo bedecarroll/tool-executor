@@ -3,7 +3,7 @@ min_version = "2025.9.10"
 [tools]
 rust = { version = "1.90.0", components = "rustfmt,clippy,llvm-tools-preview" }
 "cargo:cargo-binstall" = "latest"
-"cargo:cargo-deny" = "latest"
+"cargo:cargo-deny" = "0.18.6"
 "cargo:cargo-insta" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
 "cargo:cargo-nextest" = "latest"
@@ -22,7 +22,7 @@ run = [
   "cargo clippy --all-targets --all-features -- -D warnings",
   "typos",
   "markdownlint-cli2 \"**/*.md\" \"#target\" \"#coverage\" \"#dist\"",
-  "cargo deny check",
+  "mise x cargo:cargo-deny -- cargo-deny check",
 ]
 
 [tasks.lint-fix]
