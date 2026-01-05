@@ -376,6 +376,7 @@ provider = "alt"
             id: "sess-1".into(),
             provider: "demo".into(),
             wrapper: None,
+            model: None,
             label: Some("Demo".into()),
             path: session_path.path().to_path_buf(),
             uuid: Some("uuid-1".into()),

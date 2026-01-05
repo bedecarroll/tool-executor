@@ -196,6 +196,7 @@ impl<'a> Indexer<'a> {
             id: session_id,
             provider: provider.name.clone(),
             wrapper: state.wrapper,
+            model: state.model,
             label,
             path: path.to_path_buf(),
             uuid: session_uuid,
@@ -252,6 +253,29 @@ impl<'a> Indexer<'a> {
                     });
                 if let Some(name) = wrapper {
                     state.wrapper = Some(name.to_string());
+                }
+            }
+
+            if state.model.is_none() {
+                let model = value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        value
+                            .get("payload")
+                            .and_then(|payload| payload.get("model"))
+                            .and_then(Value::as_str)
+                    })
+                    .or_else(|| {
+                        value
+                            .get("metadata")
+                            .and_then(|meta| meta.get("model"))
+                            .and_then(Value::as_str)
+                    });
+                if let Some(name) = model
+                    && !name.is_empty()
+                {
+                    state.model = Some(name.to_string());
                 }
             }
 
@@ -393,6 +417,7 @@ struct IngestState {
     earliest_timestamp: Option<i64>,
     latest_timestamp: Option<i64>,
     wrapper: Option<String>,
+    model: Option<String>,
 }
 
 fn update_existing_source(existing: &mut MessageRecord, source: Option<&String>) {
@@ -698,6 +723,27 @@ mod tests {
     }
 
     #[test]
+    fn ingest_captures_model_from_session_meta() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"model\":\"o3-mini\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(ingest.summary.model.as_deref(), Some("o3-mini"));
+        assert_eq!(ingest.summary.first_prompt.as_deref(), Some("Hello"));
+        Ok(())
+    }
+
+    #[test]
     fn instruction_banners_are_excluded_from_transcript() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("session.jsonl");
@@ -907,6 +953,7 @@ mod tests {
             id: "codex/missing.jsonl".into(),
             provider: "codex".into(),
             wrapper: None,
+            model: None,
             label: Some("orphaned".into()),
             path: missing_path.path().to_path_buf(),
             uuid: Some("missing".into()),

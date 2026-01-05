@@ -10,7 +10,8 @@ use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, Transcript,
 };
 
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION_V5: i32 = 5;
 
 pub struct Database {
     conn: Connection,
@@ -67,9 +68,12 @@ impl Database {
             return Ok(());
         }
 
-        if current < 5 {
+        if current < SCHEMA_VERSION_V5 {
             self.migrate_to_v5()?;
-            return Ok(());
+        }
+
+        if current < SCHEMA_VERSION {
+            self.migrate_to_v6()?;
         }
 
         Ok(())
@@ -101,6 +105,19 @@ impl Database {
         )?;
 
         self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V5}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v6(&self) -> Result<()> {
+        let needs_model = !self.has_column("sessions", "model")?;
+
+        if needs_model {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN model TEXT", [])?;
+        }
+
+        self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
         Ok(())
     }
@@ -125,6 +142,7 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 wrapper TEXT,
+                model TEXT,
                 label TEXT,
                 path TEXT NOT NULL,
                 uuid TEXT,
@@ -180,6 +198,7 @@ impl Database {
                     id,
                     provider,
                     wrapper,
+                    model,
                     label,
                     path,
                     uuid,
@@ -214,6 +233,7 @@ impl Database {
                 id,
                 provider,
                 wrapper,
+                model,
                 label,
                 path,
                 uuid,
@@ -225,10 +245,11 @@ impl Database {
                 size,
                 mtime
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 wrapper = excluded.wrapper,
+                model = excluded.model,
                 label = excluded.label,
                 path = excluded.path,
                 uuid = excluded.uuid,
@@ -244,6 +265,7 @@ impl Database {
                 s.id,
                 s.provider,
                 s.wrapper.as_deref(),
+                s.model.as_deref(),
                 s.label.as_deref(),
                 s.path.to_string_lossy(),
                 s.uuid.as_deref(),
@@ -305,6 +327,7 @@ impl Database {
                 id,
                 provider,
                 wrapper,
+                model,
                 label,
                 path,
                 uuid,
@@ -530,6 +553,7 @@ impl Database {
                 id,
                 provider,
                 wrapper,
+                model,
                 label,
                 path,
                 uuid,
@@ -561,6 +585,7 @@ impl Database {
                 id,
                 provider,
                 wrapper,
+                model,
                 label,
                 path,
                 uuid,
@@ -608,6 +633,7 @@ impl Database {
                 id,
                 provider,
                 wrapper,
+                model,
                 label,
                 path,
                 uuid,
@@ -651,6 +677,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         id: row.get("id")?,
         provider: row.get("provider")?,
         wrapper: row.get::<_, Option<String>>("wrapper")?,
+        model: row.get::<_, Option<String>>("model")?,
         label: row.get::<_, Option<String>>("label")?,
         path: PathBuf::from(path),
         uuid: row.get::<_, Option<String>>("uuid")?,
@@ -718,6 +745,7 @@ mod tests {
             id: id.into(),
             provider: provider.into(),
             wrapper: None,
+            model: None,
             label: Some(prompt.into()),
             path: PathBuf::from(format!("{id}.jsonl")),
             uuid: None,
@@ -745,6 +773,7 @@ mod tests {
             id: "session-1".into(),
             provider: "codex".into(),
             wrapper: None,
+            model: None,
             label: Some("demo".into()),
             path: PathBuf::from("session-1.jsonl"),
             uuid: None,
@@ -910,6 +939,7 @@ mod tests {
             id: "sess-uuid".into(),
             provider: "codex".into(),
             wrapper: None,
+            model: None,
             label: Some("UUID".into()),
             path: PathBuf::from("sess-uuid.jsonl"),
             uuid: Some("abc-123".into()),
@@ -961,6 +991,7 @@ mod tests {
             id: "sess-wrap".into(),
             provider: "codex".into(),
             wrapper: Some("shellwrap".into()),
+            model: None,
             label: Some("Wrapped".into()),
             path: PathBuf::from("sess-wrap.jsonl"),
             uuid: None,
@@ -984,7 +1015,38 @@ mod tests {
     }
 
     #[test]
-    fn migrate_adds_wrapper_without_dropping_sessions() -> Result<()> {
+    fn upsert_session_persists_model() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "sess-model".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: Some("o3-mini".into()),
+            label: Some("Model".into()),
+            path: PathBuf::from("sess-model.jsonl"),
+            uuid: None,
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(now));
+        message.is_first = true;
+
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+
+        let stored = db.session_summary("sess-model")?.expect("stored summary");
+        assert_eq!(stored.model.as_deref(), Some("o3-mini"));
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_adds_wrapper_and_model_without_dropping_sessions() -> Result<()> {
         let temp = TempDir::new()?;
         let db_path = temp.child("tx.sqlite3");
 
@@ -1064,6 +1126,7 @@ mod tests {
             .session_summary("sess-legacy")?
             .expect("legacy summary should exist");
         assert_eq!(summary.wrapper, None);
+        assert_eq!(summary.model, None);
 
         let mut stmt = db.conn.prepare("PRAGMA table_info(sessions)")?;
         let columns = stmt
@@ -1072,6 +1135,10 @@ mod tests {
         assert!(
             columns.iter().any(|name| name == "wrapper"),
             "wrapper column missing after migration"
+        );
+        assert!(
+            columns.iter().any(|name| name == "model"),
+            "model column missing after migration"
         );
 
         let version: i32 = db
@@ -1097,6 +1164,7 @@ mod tests {
             id: "uuid-session".into(),
             provider: "codex".into(),
             wrapper: None,
+            model: None,
             label: Some("By UUID".into()),
             path: PathBuf::from("uuid-session.jsonl"),
             uuid: Some("uuid-lookup".into()),

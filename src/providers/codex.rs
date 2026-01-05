@@ -23,8 +23,16 @@ pub fn resume_info(summary: &SessionSummary) -> Result<Option<ResumePlan>> {
         return Ok(None);
     };
 
+    let mut args = Vec::new();
+    if let Some(model) = summary.model.as_deref() {
+        args.push("-m".to_string());
+        args.push(model.to_string());
+    }
+    args.push("resume".to_string());
+    args.push(uuid.clone());
+
     Ok(Some(ResumePlan {
-        args: vec!["resume".to_string(), uuid.clone()],
+        args,
         resume_token: Some(uuid),
     }))
 }
@@ -64,6 +72,7 @@ mod tests {
             id: "sess-1".into(),
             provider: "codex".into(),
             wrapper: None,
+            model: None,
             label: Some("demo".into()),
             path: PathBuf::from("/tmp/session.jsonl"),
             uuid: None,
@@ -107,6 +116,25 @@ mod tests {
         summary.uuid = Some("known-uuid".into());
         let plan = resume_info(&summary)?.expect("resume plan");
         assert_eq!(plan.args, vec!["resume".to_string(), "known-uuid".into()]);
+        assert_eq!(plan.resume_token.as_deref(), Some("known-uuid"));
+        Ok(())
+    }
+
+    #[test]
+    fn resume_info_includes_model_when_available() -> Result<()> {
+        let mut summary = sample_summary();
+        summary.uuid = Some("known-uuid".into());
+        summary.model = Some("o3-mini".into());
+        let plan = resume_info(&summary)?.expect("resume plan");
+        assert_eq!(
+            plan.args,
+            vec![
+                "-m".to_string(),
+                "o3-mini".to_string(),
+                "resume".to_string(),
+                "known-uuid".to_string()
+            ]
+        );
         assert_eq!(plan.resume_token.as_deref(), Some("known-uuid"));
         Ok(())
     }

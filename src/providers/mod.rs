@@ -31,6 +31,7 @@ mod tests {
             id: "sess".into(),
             provider: "other".into(),
             wrapper: None,
+            model: None,
             label: None,
             path: "/tmp/other.jsonl".into(),
             uuid: None,
