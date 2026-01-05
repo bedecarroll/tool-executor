@@ -1,6 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::env;
 #[cfg(all(not(test), not(coverage)))]
@@ -892,8 +891,7 @@ impl<'ctx> AppState<'ctx> {
             sessions.retain(|session| session.provider == *provider);
         }
 
-        let mut entries: Vec<Entry> = sessions.into_iter().map(Entry::Session).collect();
-
+        let mut profile_entries = Vec::new();
         for profile in &self.profiles {
             if let Some(provider) = &self.provider_filter
                 && &profile.provider != provider
@@ -903,19 +901,17 @@ impl<'ctx> AppState<'ctx> {
             if !self.filter.is_empty() && !profile.matches(&self.filter) {
                 continue;
             }
-            entries.push(Entry::Profile(profile.clone()));
+            profile_entries.push(Entry::Profile(profile.clone()));
         }
 
-        entries.sort_by(|a, b| match (a, b) {
-            (Entry::Profile(a), Entry::Profile(b)) => a.display.cmp(&b.display),
-            (Entry::Profile(_), Entry::Session(_)) => cmp::Ordering::Less,
-            (Entry::Session(_), Entry::Profile(_)) => cmp::Ordering::Greater,
-            (Entry::Session(a), Entry::Session(b)) => b
-                .last_active
+        sessions.sort_by(|a, b| {
+            b.last_active
                 .unwrap_or_default()
-                .cmp(&a.last_active.unwrap_or_default()),
-            _ => cmp::Ordering::Equal,
+                .cmp(&a.last_active.unwrap_or_default())
         });
+
+        let mut entries = profile_entries;
+        entries.extend(sessions.into_iter().map(Entry::Session));
 
         let is_filtered = !self.filter.is_empty() || self.provider_filter.is_some();
 
@@ -2659,6 +2655,15 @@ mod tests {
             prompt: None,
         };
         let mut state = AppState::new(&mut ctx)?;
+        if let Some((idx, _)) = state
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| matches!(entry, Entry::Session(_)))
+        {
+            state.index = idx;
+            state.list_state.select(Some(idx));
+        }
         let preview = state.preview();
         let joined = preview.lines.join("\n");
         assert!(
@@ -3460,6 +3465,66 @@ mod tests {
                 .message
                 .as_deref()
                 .is_some_and(|msg| msg.contains("prompt assembler unavailable"))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_entries_preserves_config_profile_order() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = build_config(temp.path());
+        config.profiles.clear();
+        config.defaults.profile = Some("gamma".into());
+
+        let make_profile = |name: &str| ProfileConfig {
+            name: name.into(),
+            provider: "codex".into(),
+            description: None,
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+        };
+
+        config
+            .profiles
+            .insert("gamma".into(), make_profile("gamma"));
+        config
+            .profiles
+            .insert("alpha".into(), make_profile("alpha"));
+        config.profiles.insert("beta".into(), make_profile("beta"));
+
+        let directories = build_directories(&temp);
+        directories.ensure_all()?;
+        let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+        let mut ctx = UiContext {
+            config: &config,
+            directories: &directories,
+            db: &mut db,
+            prompt: None,
+        };
+
+        let state = AppState::new(&mut ctx)?;
+        let profile_names: Vec<String> = state
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Profile(profile) => Some(profile.display.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            profile_names,
+            vec![
+                "gamma".to_string(),
+                "alpha".to_string(),
+                "beta".to_string(),
+                "codex".to_string(),
+            ]
         );
 
         Ok(())
