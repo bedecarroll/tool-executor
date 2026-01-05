@@ -610,6 +610,16 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
     Ok(())
 }
 
+fn emit_terminal_title(title: &str) -> Result<()> {
+    if !io::stdout().is_terminal() {
+        return Ok(());
+    }
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "\x1b]0;{title}\x07")?;
+    stdout.flush()?;
+    Ok(())
+}
+
 pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
     const DEFAULT_PROMPT_LIMIT: usize = 1_048_576;
     let assembled_prompt = if let Some(invocation) = &plan.prompt_assembler {
@@ -657,6 +667,8 @@ where
             "tx: capturing prompt input. Type your prompt, then press Ctrl-D (Ctrl-Z on Windows) to continue."
         );
     }
+
+    emit_terminal_title(&plan.terminal_title)?;
 
     match &plan.invocation {
         Invocation::Shell { command } => {
@@ -1223,6 +1235,7 @@ mod tests {
                 command: "true".into(),
             },
             provider: "echo".into(),
+            terminal_title: "echo".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1267,6 +1280,7 @@ mod tests {
                 ],
             },
             provider: "demo".into(),
+            terminal_title: "demo".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1414,6 +1428,7 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: Some("default".into()),
                 search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
             },
             providers,
             snippets,
@@ -1750,6 +1765,7 @@ mod tests {
                 command: "true".into(),
             },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1794,6 +1810,7 @@ mod tests {
                 command: "false".into(),
             },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1855,6 +1872,7 @@ mod tests {
             env: Vec::new(),
             invocation: Invocation::Shell { command },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1909,6 +1927,7 @@ mod tests {
             env: Vec::new(),
             invocation: Invocation::Shell { command },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -1961,6 +1980,7 @@ mod tests {
             env: Vec::new(),
             invocation: Invocation::Shell { command },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -2000,6 +2020,7 @@ mod tests {
                 command: "true".into(),
             },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -2034,6 +2055,7 @@ mod tests {
                 argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
             },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,
@@ -2086,6 +2108,7 @@ mod tests {
                 command: "true".into(),
             },
             provider: "codex".into(),
+            terminal_title: "codex".into(),
             pre_snippets: Vec::new(),
             post_snippets: Vec::new(),
             wrapper: None,

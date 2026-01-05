@@ -1,5 +1,6 @@
 #:schema https://tx.bedecarroll.com/assets/config-schema.json
 provider = "codex"
+terminal_title = "{{provider}}"
 
 [providers.codex]
 bin = "codex"

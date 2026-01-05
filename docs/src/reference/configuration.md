@@ -9,6 +9,7 @@ This table lists every key tx reads from configuration files. Types refer to TOM
 | `provider` | `string` | `codex` | Provider used when starting a new session without a profile. Must match a key under `[providers]`. |
 | `profile` | `string` | _unset_ | Preferred profile when creating sessions. Must match a key under `[profiles]`. |
 | `search_mode` | `string` | `first_prompt` | Initial search mode in the TUI. Accepts `first_prompt` or `full_text`. |
+| `terminal_title` | `string` | `{{provider}}` | Template used to set the terminal title when launching a session. Supports `{{provider}}`, `{{session.id}}` (empty for new sessions), and `{{cwd}}`. |
 
 Sessions the indexer marks as unactionable stay hidden from default listings but remain searchable.
 

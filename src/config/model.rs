@@ -26,6 +26,7 @@ pub struct Defaults {
     pub provider: Option<String>,
     pub profile: Option<String>,
     pub search_mode: SearchMode,
+    pub terminal_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +281,7 @@ pub(crate) struct RawDefaults {
     profile: Option<String>,
     #[serde(default = "RawDefaults::default_search_mode")]
     search_mode: String,
+    terminal_title: Option<String>,
 }
 
 impl RawDefaults {
@@ -301,6 +303,7 @@ impl RawDefaults {
             provider: self.provider,
             profile: self.profile,
             search_mode,
+            terminal_title: self.terminal_title,
         })
     }
 }
@@ -679,6 +682,7 @@ mod tests {
             provider: Some("codex".into()),
             profile: Some("demo".into()),
             search_mode: SearchMode::FirstPrompt,
+            terminal_title: None,
         };
 
         let snippets = SnippetConfig {
@@ -749,6 +753,7 @@ mod tests {
             provider: None,
             profile: None,
             search_mode: "invalid".into(),
+            terminal_title: None,
         };
         let err = defaults
             .into_defaults()
@@ -952,6 +957,7 @@ mod tests {
                 provider: Some("missing".into()),
                 profile: Some("absent-profile".into()),
                 search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
             },
             providers,
             snippets: SnippetConfig {
