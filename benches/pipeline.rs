@@ -154,6 +154,7 @@ fn sample_ingest(path: &Path) -> SessionIngest {
         id: "codex/demo".into(),
         provider: "codex".into(),
         wrapper: Some("shellwrap".into()),
+        model: None,
         label: Some("Demo".into()),
         path: path.to_path_buf(),
         uuid: Some("uuid-demo".into()),
