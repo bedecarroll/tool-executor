@@ -95,6 +95,7 @@ fn sample_config_with_root(root: PathBuf) -> Config {
             provider: Some("codex".into()),
             profile: Some("default".into()),
             search_mode: SearchMode::FirstPrompt,
+            terminal_title: None,
         },
         providers,
         snippets,

@@ -51,6 +51,7 @@ pub struct PipelinePlan {
     pub env: Vec<(String, String)>,
     pub invocation: Invocation,
     pub provider: String,
+    pub terminal_title: String,
     pub pre_snippets: Vec<String>,
     pub post_snippets: Vec<String>,
     pub wrapper: Option<String>,
@@ -145,6 +146,13 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         display.clone()
     };
 
+    let title_template = config
+        .defaults
+        .terminal_title
+        .as_deref()
+        .unwrap_or("{{provider}}");
+    let terminal_title = render_template(title_template, &template_ctx, CmdMode::Raw)?;
+
     Ok(PipelinePlan {
         pipeline,
         display,
@@ -152,6 +160,7 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         env,
         invocation,
         provider: provider.name.clone(),
+        terminal_title,
         pre_snippets: pre_snippet_names,
         post_snippets: post_snippet_names,
         wrapper: wrap_name,
@@ -602,6 +611,118 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn terminal_title_defaults_to_provider() -> Result<()> {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: Vec::new(),
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: None,
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args: Vec::new(),
+            capture_prompt: false,
+            prompt_assembler: None,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("workdir"),
+        };
+
+        let plan = build_pipeline(&request)?;
+        assert_eq!(plan.terminal_title, "codex");
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_title_renders_template_tokens() -> Result<()> {
+        let mut providers = IndexMap::new();
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                name: "codex".into(),
+                bin: "codex".into(),
+                flags: Vec::new(),
+                env: Vec::new(),
+                session_roots: Vec::new(),
+                stdin: None,
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                terminal_title: Some(
+                    "provider={{provider}} session=[{{session.id}}] cwd={{cwd}}".into(),
+                ),
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers: IndexMap::new(),
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: None,
+            provider_args: Vec::new(),
+            capture_prompt: false,
+            prompt_assembler: None,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("workdir"),
+        };
+
+        let plan = build_pipeline(&request)?;
+        assert_eq!(plan.terminal_title, "provider=codex session=[] cwd=workdir");
+        Ok(())
+    }
+
+    #[test]
     fn inline_pre_commands_are_included_for_capture_arg() {
         let mut providers = IndexMap::new();
         providers.insert(
@@ -624,6 +745,7 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -690,6 +812,7 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -764,6 +887,7 @@ mod tests {
                 provider: Some("codex".into()),
                 profile: None,
                 search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
             },
             providers,
             snippets: SnippetConfig {
@@ -888,6 +1012,7 @@ mod tests {
                     provider: Some("codex".into()),
                     profile: None,
                     search_mode: SearchMode::FirstPrompt,
+                    terminal_title: None,
                 },
                 providers: IndexMap::new(),
                 snippets: SnippetConfig {

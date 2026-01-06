@@ -37,6 +37,12 @@
     "snippets": {
       "$ref": "#/$defs/RawSnippets"
     },
+    "terminal_title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "wrappers": {
       "type": "object",
       "additionalProperties": {

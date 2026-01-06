@@ -1,3 +1,4 @@
+.agent
 target/
 debug/
 .DS_Store
