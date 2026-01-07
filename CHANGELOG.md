@@ -15,6 +15,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- markdownlint-disable-next-line MD024 -->
 ### Added
 
+- Nothing yet.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Nothing yet.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Nothing yet.
+
+## [0.6.0] - 2026-01-07
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Breaking
+
+- Release artifacts now build from the dedicated `tx` CLI crate, producing `tx-<target>` archives and installer scripts. Existing automation that downloaded `tool-executor-<target>` assets must update to the new filenames. Keep the `tool-executor` library and `tx` CLI crate versions in sync going forward.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
 - Added prompt_assembler support to profiles.
 - Added terminal title templating for CLI sessions.
 - Added resume-last shortcut and stored session model metadata to improve resume flows.
@@ -34,28 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Codex instruction banner ingestion.
 - Fixed TUI profile ordering.
 - Stabilized lint and tx-dev tests.
-
-## [0.6.0] - 2026-01-07
-
-<!-- markdownlint-disable-next-line MD024 -->
-### Breaking
-
-- Release artifacts now build from the dedicated `tx` CLI crate, producing `tx-<target>` archives and installer scripts. Existing automation that downloaded `tool-executor-<target>` assets must update to the new filenames. Keep the `tool-executor` library and `tx` CLI crate versions in sync for the v0.4.0 release onward.
-
-<!-- markdownlint-disable-next-line MD024 -->
-### Added
-
-- Nothing yet.
-
-<!-- markdownlint-disable-next-line MD024 -->
-### Changed
-
-- Nothing yet.
-
-<!-- markdownlint-disable-next-line MD024 -->
-### Fixed
-
-- Nothing yet.
 
 ## [0.5.0] - 2025-11-01
 
