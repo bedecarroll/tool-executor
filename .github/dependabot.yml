@@ -1,13 +1,28 @@
 version: 2
-
 updates:
   - package-ecosystem: cargo
-    directory: "/"
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      all-version-updates:
+        patterns:
+          - '*'
+      all-security-updates:
+        applies-to: security-updates
+        patterns:
+          - '*'
   - package-ecosystem: github-actions
-    directory: "/"
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      all-version-updates:
+        patterns:
+          - '*'
+      all-security-updates:
+        applies-to: security-updates
+        patterns:
+          - '*'
