@@ -27,7 +27,7 @@ members = [ "crates/tx",]
 
 [dependencies]
 blake3 = "1.8"
-clap_complete = "4.5.64"
+clap_complete = "4.5.65"
 clap_mangen = "0.2.31"
 color-eyre = "0.6"
 crossterm = "0.29"
@@ -44,7 +44,7 @@ thiserror = "2.0.17"
 tracing = "0.1.44"
 walkdir = "2.5"
 which = "8.0"
-unicode-width = "0.2.0"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 assert_fs = "1.1"
@@ -57,7 +57,7 @@ version = "4.5.54"
 features = [ "derive",]
 
 [dependencies.indexmap]
-version = "2.12.1"
+version = "2.13.0"
 features = [ "serde",]
 
 [dependencies.ratatui]
@@ -86,7 +86,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "0.9.10"
+version = "0.9.11"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
