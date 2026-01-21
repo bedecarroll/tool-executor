@@ -218,6 +218,19 @@ fn self_update_help_is_available() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn stats_codex_outputs_summary() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["stats", "codex"])
+        .assert()
+        .success()
+        .stdout(contains("Codex Stats"))
+        .stdout(contains("Sessions:"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn export_errors_when_session_missing() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);

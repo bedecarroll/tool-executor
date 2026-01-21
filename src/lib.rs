@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+pub mod commands;
 pub mod config;
 pub mod db;
 pub mod indexer;
@@ -39,6 +40,7 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         Some(Command::Search(cmd)) => app.search(cmd),
         Some(Command::Resume(cmd)) => app.resume(cmd),
         Some(Command::Export(cmd)) => app.export(cmd),
+        Some(Command::Stats(cmd)) => app.stats(cmd),
         Some(Command::Config(cmd)) => app.config(cmd),
         Some(Command::Doctor) => app.doctor(),
         Some(Command::Internal(_)) => unreachable!("internal command handled above"),

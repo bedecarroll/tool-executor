@@ -16,7 +16,8 @@ use walkdir::WalkDir;
 use crate::config::model::{Config, ProviderConfig};
 use crate::db::Database;
 use crate::session::{
-    MessageRecord, SessionIngest, SessionSummary, fallback_session_uuid, session_uuid_from_value,
+    MessageRecord, SessionIngest, SessionSummary, TokenUsageRecord, fallback_session_uuid,
+    session_uuid_from_value,
 };
 
 #[derive(Debug, Default)]
@@ -209,7 +210,7 @@ impl<'a> Indexer<'a> {
             mtime,
         };
 
-        Ok(SessionIngest::new(summary, state.messages))
+        Ok(SessionIngest::new(summary, state.messages).with_token_usage(state.token_usage))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -218,6 +219,7 @@ impl<'a> Indexer<'a> {
         let reader = BufReader::new(file);
         let mut state = IngestState::default();
         let mut seen_messages: HashMap<(String, String, Option<i64>), usize> = HashMap::new();
+        let mut seen_token_usage: HashSet<(i64, i64, i64, i64, i64, i64)> = HashSet::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -281,6 +283,26 @@ impl<'a> Indexer<'a> {
 
             if state.session_uuid.is_none() {
                 state.session_uuid = session_uuid_from_value(&value);
+            }
+
+            if value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|ty| ty == "session_meta")
+            {
+                state.current_model = "unknown".to_string();
+            }
+
+            if value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|ty| ty == "turn_context")
+                && let Some(model) = value
+                    .get("payload")
+                    .and_then(|payload| payload.get("model"))
+                    .and_then(Value::as_str)
+            {
+                state.current_model = model.to_string();
             }
 
             if let Some(instructions) = value
@@ -361,6 +383,22 @@ impl<'a> Indexer<'a> {
                     seen_messages.insert(key, state.messages.len() - 1);
                 }
             }
+
+            if let Some(usage) =
+                extract_token_usage(&value, &state.current_model, session_id, timestamp)
+            {
+                let key = (
+                    usage.timestamp,
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_output_tokens,
+                    usage.total_tokens,
+                );
+                if seen_token_usage.insert(key) {
+                    state.token_usage.push(usage);
+                }
+            }
         }
 
         Ok(state)
@@ -404,7 +442,6 @@ impl<'a> Indexer<'a> {
     }
 }
 
-#[derive(Default)]
 struct IngestState {
     messages: Vec<MessageRecord>,
     first_prompt: Option<String>,
@@ -418,6 +455,29 @@ struct IngestState {
     latest_timestamp: Option<i64>,
     wrapper: Option<String>,
     model: Option<String>,
+    token_usage: Vec<TokenUsageRecord>,
+    current_model: String,
+}
+
+impl Default for IngestState {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            first_prompt: None,
+            fallback_preview: None,
+            instructions_preview: None,
+            instructions_raw: None,
+            saw_instruction_block: false,
+            saw_any_record: false,
+            session_uuid: None,
+            earliest_timestamp: None,
+            latest_timestamp: None,
+            wrapper: None,
+            model: None,
+            token_usage: Vec::new(),
+            current_model: "unknown".to_string(),
+        }
+    }
 }
 
 fn update_existing_source(existing: &mut MessageRecord, source: Option<&String>) {
@@ -542,6 +602,71 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
     messages
 }
 
+fn extract_token_usage(
+    value: &Value,
+    current_model: &str,
+    session_id: &str,
+    timestamp: Option<i64>,
+) -> Option<TokenUsageRecord> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+
+    let ts = timestamp?;
+    let info = payload.get("info")?;
+    let last = info.get("last_token_usage")?;
+
+    let model = match current_model {
+        "" | "unknown" => None,
+        other => Some(other.to_string()),
+    };
+    let rate_limits = match payload.get("rate_limits") {
+        Some(Value::Null) | None => None,
+        Some(limits) => serde_json::to_string(limits).ok(),
+    };
+
+    Some(TokenUsageRecord {
+        session_id: session_id.to_string(),
+        timestamp: ts,
+        input_tokens: parse_usage_i64(last.get("input_tokens")),
+        cached_input_tokens: parse_usage_i64(last.get("cached_input_tokens")),
+        output_tokens: parse_usage_i64(last.get("output_tokens")),
+        reasoning_output_tokens: parse_usage_i64(last.get("reasoning_output_tokens")),
+        total_tokens: parse_usage_i64(last.get("total_tokens")),
+        model,
+        rate_limits,
+    })
+}
+
+fn parse_usage_i64(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Number(num)) => {
+            if let Some(value) = num.as_i64() {
+                value
+            } else if let Some(value) = num.as_u64() {
+                i64::try_from(value).unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        Some(Value::String(raw)) => {
+            if let Ok(value) = raw.parse::<i64>() {
+                value
+            } else if let Ok(value) = raw.parse::<u64>() {
+                i64::try_from(value).unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 fn extract_text(container: &Value) -> Option<String> {
     if let Some(content) = container.get("content")
         && let Some(items) = content.as_array()
@@ -651,6 +776,8 @@ mod tests {
     use indexmap::IndexMap;
     use serde_json::json;
     use std::convert::TryFrom;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
     fn provider_with_root(root: &Path) -> ProviderConfig {
         ProviderConfig {
@@ -807,6 +934,48 @@ mod tests {
         assert_eq!(ingest.summary.started_at, Some(now));
         assert_eq!(ingest.summary.last_active, Some(now));
 
+        Ok(())
+    }
+
+    #[test]
+    fn token_usage_events_are_ingested() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("usage.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"usage\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.1\"}}\n",
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-01-21T00:00:00Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":2,\"output_tokens\":5,\"reasoning_output_tokens\":1,\"total_tokens\":16}},\"rate_limits\":{\"primary\":{\"used_percent\":20,\"window_minutes\":60,\"resets_at\":1700000000}}}}\n",
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-01-21T00:00:00Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":2,\"output_tokens\":5,\"reasoning_output_tokens\":1,\"total_tokens\":16}},\"rate_limits\":{\"primary\":{\"used_percent\":20,\"window_minutes\":60,\"resets_at\":1700000000}}}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(
+            ingest.token_usage.len(),
+            1,
+            "expected token usage to dedupe"
+        );
+        let usage = &ingest.token_usage[0];
+        let expected_ts = OffsetDateTime::parse("2026-01-21T00:00:00Z", &Rfc3339)?.unix_timestamp();
+        assert_eq!(usage.timestamp, expected_ts);
+        assert_eq!(usage.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.cached_input_tokens, 2);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.reasoning_output_tokens, 1);
+        assert_eq!(usage.total_tokens, 16);
+        assert!(
+            usage
+                .rate_limits
+                .as_deref()
+                .is_some_and(|text| text.contains("primary")),
+            "expected rate limits to be captured"
+        );
         Ok(())
     }
 

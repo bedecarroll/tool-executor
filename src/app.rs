@@ -14,8 +14,9 @@ use which::which;
 
 use crate::cli::{
     Cli, ConfigCommand, ConfigDefaultCommand, ConfigSchemaCommand, ExportCommand,
-    InternalPromptAssemblerCommand, ResumeCommand, SearchCommand, SelfUpdateCommand,
+    InternalPromptAssemblerCommand, ResumeCommand, SearchCommand, SelfUpdateCommand, StatsCommand,
 };
+use crate::commands::stats;
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
 use crate::config::{ConfigSourceKind, LoadedConfig};
 use crate::db::Database;
@@ -367,6 +368,20 @@ impl<'cli> App<'cli> {
         export_markdown(&transcript);
 
         Ok(())
+    }
+
+    /// Render usage statistics for the selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stats cannot be retrieved or rendered.
+    pub fn stats(&self, cmd: &StatsCommand) -> Result<()> {
+        match cmd {
+            StatsCommand::Codex => {
+                let db_path = self.loaded.directories.data_dir.join("tx.sqlite3");
+                stats::codex(&self.db, &db_path)
+            }
+        }
     }
 
     /// Execute one of the configuration subcommands.

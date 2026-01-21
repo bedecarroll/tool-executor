@@ -26,6 +26,9 @@ pub enum Command {
     Resume(ResumeCommand),
     /// Export a session transcript.
     Export(ExportCommand),
+    /// Show usage statistics.
+    #[command(subcommand)]
+    Stats(StatsCommand),
     /// Inspect configuration files.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -96,6 +99,12 @@ pub struct ResumeCommand {
 pub struct ExportCommand {
     /// Session identifier to export.
     pub session_id: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StatsCommand {
+    /// Show Codex usage statistics.
+    Codex,
 }
 
 #[derive(Debug, Subcommand)]
@@ -274,5 +283,13 @@ mod tests {
             panic!("expected config default command");
         };
         assert!(cmd.raw);
+    }
+
+    #[test]
+    fn parse_stats_codex() {
+        let cli = Cli::try_parse_from(["tx", "stats", "codex"]).expect("parse stats");
+        let Command::Stats(StatsCommand::Codex) = cli.command.expect("stats command") else {
+            panic!("expected stats command");
+        };
     }
 }
