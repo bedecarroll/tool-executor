@@ -793,7 +793,7 @@ mod tests {
         db.upsert_session(&ingest)?;
 
         codex(&db, db_path.path())?;
-        temp.close()?;
+        drop(db);
         Ok(())
     }
 }
