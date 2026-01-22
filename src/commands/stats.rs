@@ -632,6 +632,11 @@ fn display_value(value: Option<&Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use crate::session::{MessageRecord, SessionIngest, SessionSummary};
+    use assert_fs::TempDir;
+    use assert_fs::prelude::*;
+    use time::OffsetDateTime;
 
     #[test]
     fn pricing_model_matches_prefixes() {
@@ -661,5 +666,134 @@ mod tests {
             + (500_000.0 * 0.125 / 1_000_000.0)
             + (1_000_000.0 * 10.0 / 1_000_000.0);
         assert!((cost - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_epoch_handles_seconds_and_millis() {
+        let seconds = Value::Number(1_700_000_000i64.into());
+        let millis = Value::Number(1_700_000_000_000i64.into());
+        let from_seconds = parse_epoch(&seconds).expect("seconds");
+        let from_millis = parse_epoch(&millis).expect("millis");
+        assert_eq!(from_seconds, 1_700_000_000);
+        assert_eq!(from_millis, 1_700_000_000);
+
+        let from_str = parse_epoch(&Value::String("1700000000".into())).expect("string");
+        assert_eq!(from_str, 1_700_000_000);
+    }
+
+    #[test]
+    fn render_rate_limits_formats_entries() {
+        let payload = r#"{
+            "primary": {"used_percent": 20, "window_minutes": 60, "resets_at": 1700000000000},
+            "secondary": {"used_percent": 5, "window_minutes": 15, "resets_at": 1700000000},
+            "credits": {"has_credits": true, "unlimited": false, "balance": 7},
+            "plan_type": "pro"
+        }"#;
+        let lines = render_rate_limits(Some(0), Some(payload), UtcOffset::UTC);
+        assert!(lines.iter().any(|line| line.contains("primary:")));
+        assert!(lines.iter().any(|line| line.contains("secondary:")));
+        assert!(lines.iter().any(|line| line.contains("credits:")));
+        assert!(lines.iter().any(|line| line.contains("plan_type:")));
+    }
+
+    #[test]
+    fn collect_token_stats_tracks_windows_and_costs() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let usage_priced = TokenUsageRecord {
+            session_id: "sess".into(),
+            timestamp: now - 10,
+            input_tokens: 1000,
+            cached_input_tokens: 100,
+            output_tokens: 500,
+            reasoning_output_tokens: 0,
+            total_tokens: 1500,
+            model: Some("gpt-5.2".into()),
+            rate_limits: None,
+        };
+        let usage_unpriced = TokenUsageRecord {
+            session_id: "sess".into(),
+            timestamp: now - 40 * 24 * 60 * 60,
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 15,
+            model: None,
+            rate_limits: None,
+        };
+        let stats = collect_token_stats(
+            &[usage_priced, usage_unpriced],
+            now - 24 * 60 * 60,
+            now - 7 * 24 * 60 * 60,
+            now - 30 * 24 * 60 * 60,
+            UtcOffset::UTC,
+        );
+        assert!(stats.cost_totals.all > 0.0);
+        assert!(stats.unpriced_tokens.all > 0);
+        assert!(!stats.by_day.is_empty());
+    }
+
+    #[test]
+    fn codex_stats_smoke_test() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "codex/demo".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: Some("gpt-5.2".into()),
+            label: Some("Demo".into()),
+            path: db_path.path().to_path_buf(),
+            uuid: Some("demo".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(now - 120),
+            started_at: Some(now - 120),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "Hello",
+            None,
+            Some(now - 120),
+        );
+        message.is_first = true;
+        let usage_priced = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now - 60,
+            input_tokens: 1000,
+            cached_input_tokens: 100,
+            output_tokens: 500,
+            reasoning_output_tokens: 0,
+            total_tokens: 1500,
+            model: Some("gpt-5.2".into()),
+            rate_limits: Some(
+                r#"{"primary":{"used_percent":20,"window_minutes":60,"resets_at":1700000000000},"secondary":{"used_percent":5,"window_minutes":15,"resets_at":1700000000},"credits":{"has_credits":true,"unlimited":false,"balance":7},"plan_type":"pro"}"#.into(),
+            ),
+        };
+        let usage_unpriced = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now - 30,
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 15,
+            model: None,
+            rate_limits: None,
+        };
+        let ingest = SessionIngest::new(summary, vec![message])
+            .with_token_usage(vec![usage_priced, usage_unpriced]);
+        db.upsert_session(&ingest)?;
+
+        codex(&db, db_path.path())?;
+        temp.close()?;
+        Ok(())
     }
 }
