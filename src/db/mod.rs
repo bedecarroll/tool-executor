@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 use color_eyre::Result;
 use color_eyre::eyre::{self, Context, eyre};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, params_from_iter};
 
 use crate::session::{
-    MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, Transcript,
+    MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, TokenUsageRecord,
+    Transcript,
 };
 
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 const SCHEMA_VERSION_V5: i32 = 5;
+const SCHEMA_VERSION_V6: i32 = 6;
 
 pub struct Database {
     conn: Connection,
@@ -72,8 +74,12 @@ impl Database {
             self.migrate_to_v5()?;
         }
 
-        if current < SCHEMA_VERSION {
+        if current < SCHEMA_VERSION_V6 {
             self.migrate_to_v6()?;
+        }
+
+        if current < SCHEMA_VERSION {
+            self.migrate_to_v7()?;
         }
 
         Ok(())
@@ -116,6 +122,41 @@ impl Database {
             self.conn
                 .execute("ALTER TABLE sessions ADD COLUMN model TEXT", [])?;
         }
+
+        self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V6}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v7(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS token_usage (
+                session_id TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                rate_limits TEXT,
+                PRIMARY KEY (
+                    session_id,
+                    timestamp,
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens,
+                    total_tokens
+                ),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+            ",
+        )?;
 
         self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
@@ -173,10 +214,34 @@ impl Database {
                 content
             );
 
+            CREATE TABLE IF NOT EXISTS token_usage (
+                session_id TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                rate_limits TEXT,
+                PRIMARY KEY (
+                    session_id,
+                    timestamp,
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens,
+                    total_tokens
+                ),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
             CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
             CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
             CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
             ",
         )?;
 
@@ -279,37 +344,10 @@ impl Database {
             ],
         )?;
 
-        tx.execute("DELETE FROM messages WHERE session_id = ?1", params![s.id])?;
-        tx.execute(
-            "DELETE FROM messages_fts WHERE session_id = ?1",
-            params![s.id],
-        )?;
-
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO messages (session_id, idx, role, content, source, timestamp, is_first) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?;
-            for message in &ingest.messages {
-                stmt.execute(params![
-                    message.session_id,
-                    message.index,
-                    message.role,
-                    message.content,
-                    message.source.as_deref(),
-                    message.timestamp,
-                    i64::from(message.is_first),
-                ])?;
-            }
-        }
-
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO messages_fts (session_id, role, content) VALUES (?1, ?2, ?3)",
-            )?;
-            for message in &ingest.messages {
-                stmt.execute(params![message.session_id, message.role, message.content,])?;
-            }
-        }
+        clear_session_data(&tx, &s.id)?;
+        insert_messages(&tx, ingest)?;
+        insert_message_fts(&tx, ingest)?;
+        insert_token_usage(&tx, ingest)?;
 
         tx.commit()?;
         Ok(())
@@ -343,6 +381,61 @@ impl Database {
             ",
         )?;
         let rows = stmt.query_map([provider], map_summary)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch token usage events for sessions owned by the specified provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token usage query fails.
+    pub fn token_usage_for_provider(&self, provider: &str) -> Result<Vec<TokenUsageRecord>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT
+                tu.session_id,
+                tu.timestamp,
+                tu.input_tokens,
+                tu.cached_input_tokens,
+                tu.output_tokens,
+                tu.reasoning_output_tokens,
+                tu.total_tokens,
+                tu.model,
+                tu.rate_limits
+            FROM token_usage tu
+            JOIN sessions s ON s.id = tu.session_id
+            WHERE s.provider = ?1
+            ",
+        )?;
+        let rows = stmt.query_map([provider], map_token_usage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch timestamps for user messages for the specified provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn user_message_timestamps(&self, provider: &str) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT m.timestamp
+            FROM messages m
+            JOIN sessions s ON s.id = m.session_id
+            WHERE s.provider = ?1
+              AND m.timestamp IS NOT NULL
+              AND lower(m.role) = 'user'
+            ",
+        )?;
+        let rows = stmt.query_map([provider], |row| row.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -671,6 +764,86 @@ impl Database {
     }
 }
 
+fn clear_session_data(tx: &Transaction<'_>, session_id: &str) -> Result<()> {
+    tx.execute(
+        "DELETE FROM messages WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM messages_fts WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM token_usage WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+fn insert_messages(tx: &Transaction<'_>, ingest: &SessionIngest) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO messages (session_id, idx, role, content, source, timestamp, is_first) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for message in &ingest.messages {
+        stmt.execute(params![
+            message.session_id,
+            message.index,
+            message.role,
+            message.content,
+            message.source.as_deref(),
+            message.timestamp,
+            i64::from(message.is_first),
+        ])?;
+    }
+    Ok(())
+}
+
+fn insert_message_fts(tx: &Transaction<'_>, ingest: &SessionIngest) -> Result<()> {
+    let mut stmt =
+        tx.prepare("INSERT INTO messages_fts (session_id, role, content) VALUES (?1, ?2, ?3)")?;
+    for message in &ingest.messages {
+        stmt.execute(params![message.session_id, message.role, message.content])?;
+    }
+    Ok(())
+}
+
+fn insert_token_usage(tx: &Transaction<'_>, ingest: &SessionIngest) -> Result<()> {
+    if ingest.token_usage.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = tx.prepare(
+        r"
+        INSERT INTO token_usage (
+            session_id,
+            timestamp,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens,
+            model,
+            rate_limits
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ",
+    )?;
+    for usage in &ingest.token_usage {
+        stmt.execute(params![
+            usage.session_id,
+            usage.timestamp,
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+            usage.total_tokens,
+            usage.model.as_deref(),
+            usage.rate_limits.as_deref(),
+        ])?;
+    }
+    Ok(())
+}
+
 fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     let path: String = row.get("path")?;
     Ok(SessionSummary {
@@ -716,6 +889,20 @@ fn map_search_hit(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
     })
 }
 
+fn map_token_usage(row: &Row<'_>) -> rusqlite::Result<TokenUsageRecord> {
+    Ok(TokenUsageRecord {
+        session_id: row.get(0)?,
+        timestamp: row.get(1)?,
+        input_tokens: row.get(2)?,
+        cached_input_tokens: row.get(3)?,
+        output_tokens: row.get(4)?,
+        reasoning_output_tokens: row.get(5)?,
+        total_tokens: row.get(6)?,
+        model: row.get(7)?,
+        rate_limits: row.get(8)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +911,72 @@ mod tests {
     use rusqlite::Connection;
     use std::path::PathBuf;
     use time::OffsetDateTime;
+
+    const LEGACY_SCHEMA: &str = r"
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            label TEXT,
+            path TEXT NOT NULL,
+            uuid TEXT,
+            first_prompt TEXT,
+            actionable INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER,
+            started_at INTEGER,
+            last_active INTEGER,
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            session_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT,
+            timestamp INTEGER,
+            is_first INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, idx),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            session_id UNINDEXED,
+            role UNINDEXED,
+            content
+        );
+
+        INSERT INTO sessions (
+            id,
+            provider,
+            label,
+            path,
+            uuid,
+            first_prompt,
+            actionable,
+            created_at,
+            started_at,
+            last_active,
+            size,
+            mtime
+        )
+        VALUES (
+            'sess-legacy',
+            'codex',
+            'Legacy',
+            'sess-legacy.jsonl',
+            NULL,
+            'Hello',
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+        );
+
+        PRAGMA user_version = 4;
+        ";
 
     fn create_db() -> Result<Database> {
         let conn = Connection::open_in_memory()?;
@@ -914,6 +1167,75 @@ mod tests {
     }
 
     #[test]
+    fn token_usage_and_prompt_timestamps_are_scoped_to_provider() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+
+        let summary = SessionSummary {
+            id: "sess-1".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("Usage".into()),
+            path: PathBuf::from("sess-1.jsonl"),
+            uuid: None,
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let message = MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(now));
+        let usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now,
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 15,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        db.upsert_session(
+            &SessionIngest::new(summary.clone(), vec![message]).with_token_usage(vec![usage]),
+        )?;
+
+        let other_summary = SessionSummary {
+            id: "sess-2".into(),
+            provider: "alt".into(),
+            wrapper: None,
+            model: None,
+            label: Some("Other".into()),
+            path: PathBuf::from("sess-2.jsonl"),
+            uuid: None,
+            first_prompt: Some("Hi".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let other_message =
+            MessageRecord::new(other_summary.id.clone(), 0, "user", "Hi", None, Some(now));
+        db.upsert_session(&SessionIngest::new(
+            other_summary.clone(),
+            vec![other_message],
+        ))?;
+
+        let usage_rows = db.token_usage_for_provider("codex")?;
+        assert_eq!(usage_rows.len(), 1);
+        assert_eq!(usage_rows[0].session_id, "sess-1");
+
+        let timestamps = db.user_message_timestamps("codex")?;
+        assert_eq!(timestamps, vec![now]);
+        Ok(())
+    }
+
+    #[test]
     fn list_sessions_applies_filters() -> Result<()> {
         let mut db = create_db()?;
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -1052,73 +1374,7 @@ mod tests {
 
         {
             let conn = Connection::open(db_path.path())?;
-            conn.execute_batch(
-                r"
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    label TEXT,
-                    path TEXT NOT NULL,
-                    uuid TEXT,
-                    first_prompt TEXT,
-                    actionable INTEGER NOT NULL DEFAULT 1,
-                    created_at INTEGER,
-                    started_at INTEGER,
-                    last_active INTEGER,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    mtime INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS messages (
-                    session_id TEXT NOT NULL,
-                    idx INTEGER NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    source TEXT,
-                    timestamp INTEGER,
-                    is_first INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (session_id, idx),
-                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                    session_id UNINDEXED,
-                    role UNINDEXED,
-                    content
-                );
-
-                INSERT INTO sessions (
-                    id,
-                    provider,
-                    label,
-                    path,
-                    uuid,
-                    first_prompt,
-                    actionable,
-                    created_at,
-                    started_at,
-                    last_active,
-                    size,
-                    mtime
-                )
-                VALUES (
-                    'sess-legacy',
-                    'codex',
-                    'Legacy',
-                    'sess-legacy.jsonl',
-                    NULL,
-                    'Hello',
-                    1,
-                    1,
-                    1,
-                    1,
-                    1,
-                    1
-                );
-
-                PRAGMA user_version = 4;
-                ",
-            )?;
+            conn.execute_batch(LEGACY_SCHEMA)?;
         }
 
         let db = Database::open(db_path.path())?;
@@ -1139,6 +1395,19 @@ mod tests {
         assert!(
             columns.iter().any(|name| name == "model"),
             "model column missing after migration"
+        );
+
+        let token_usage_exists: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'token_usage'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        assert!(
+            token_usage_exists.is_some(),
+            "token_usage table missing after migration"
         );
 
         let version: i32 = db

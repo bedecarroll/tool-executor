@@ -27,6 +27,7 @@ pub struct SessionSummary {
 pub struct SessionIngest {
     pub summary: SessionSummary,
     pub messages: Vec<MessageRecord>,
+    pub token_usage: Vec<TokenUsageRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,19 @@ pub struct MessageRecord {
     pub source: Option<String>,
     pub timestamp: Option<i64>,
     pub is_first: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenUsageRecord {
+    pub session_id: String,
+    pub timestamp: i64,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
+    pub model: Option<String>,
+    pub rate_limits: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +170,17 @@ impl Transcript {
 impl SessionIngest {
     #[must_use]
     pub fn new(summary: SessionSummary, messages: Vec<MessageRecord>) -> Self {
-        Self { summary, messages }
+        Self {
+            summary,
+            messages,
+            token_usage: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_token_usage(mut self, token_usage: Vec<TokenUsageRecord>) -> Self {
+        self.token_usage = token_usage;
+        self
     }
 }
 
