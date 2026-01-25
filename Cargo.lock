@@ -3064,7 +3064,7 @@ checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
 
 [[package]]
 name = "tool-executor"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -3244,7 +3244,7 @@ dependencies = [
 
 [[package]]
 name = "tx"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert_cmd",
  "assert_fs",

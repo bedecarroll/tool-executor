@@ -5,7 +5,7 @@ required-features = [ "benchmarks",]
 
 [package]
 name = "tool-executor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.90"
 authors = [ "Bede Carroll <bedecarroll@users.noreply.github.com>",]
