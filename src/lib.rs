@@ -34,6 +34,10 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         return internal::run(cmd);
     }
 
+    if let Some(Command::Db(cmd)) = &cli.command {
+        return commands::db::run(cmd, cli.config_dir.as_deref(), cli.quiet);
+    }
+
     let mut app = app::App::bootstrap(cli)?;
 
     let outcome = match &cli.command {
@@ -43,6 +47,7 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         Some(Command::Stats(cmd)) => app.stats(cmd),
         Some(Command::Config(cmd)) => app.config(cmd),
         Some(Command::Doctor) => app.doctor(),
+        Some(Command::Db(_)) => unreachable!("db command handled before bootstrap"),
         Some(Command::Internal(_)) => unreachable!("internal command handled above"),
         Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
         None => app.run_ui(),

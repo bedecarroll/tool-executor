@@ -130,6 +130,75 @@ fn config_default_outputs_bundled_template() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn db_reset_requires_confirmation() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.args(["db", "reset"])
+        .assert()
+        .failure()
+        .stderr(contains("--yes"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn db_reset_removes_database_files() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    let data_dir = temp.child("data-root");
+
+    data_dir.child("tx.sqlite3").write_str("stub")?;
+    data_dir.child("tx.sqlite3-wal").write_str("wal")?;
+    data_dir.child("tx.sqlite3-shm").write_str("shm")?;
+
+    cmd.args(["db", "reset", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("Deleted database"));
+
+    assert!(!data_dir.child("tx.sqlite3").path().exists());
+    assert!(!data_dir.child("tx.sqlite3-wal").path().exists());
+    assert!(!data_dir.child("tx.sqlite3-shm").path().exists());
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn db_reset_reports_missing_database() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+
+    cmd.args(["db", "reset", "--yes"])
+        .assert()
+        .success()
+        .stdout(contains("Database not found"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn db_reset_quiet_suppresses_output() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    let data_dir = temp.child("data-root");
+
+    data_dir.child("tx.sqlite3").write_str("stub")?;
+    data_dir.child("tx.sqlite3-wal").write_str("wal")?;
+    data_dir.child("tx.sqlite3-shm").write_str("shm")?;
+
+    cmd.args(["-q", "db", "reset", "--yes"])
+        .assert()
+        .success()
+        .stdout("");
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn config_default_raw_outputs_template_without_substitution() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let mut cmd = base_command(&temp);
