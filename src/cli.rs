@@ -32,6 +32,9 @@ pub enum Command {
     /// Inspect configuration files.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Manage the local database.
+    #[command(subcommand)]
+    Db(DbCommand),
     /// Run environment diagnostics.
     Doctor,
     /// Update tx to the latest released version.
@@ -105,6 +108,19 @@ pub struct ExportCommand {
 pub enum StatsCommand {
     /// Show Codex usage statistics.
     Codex,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbCommand {
+    /// Delete the indexed session database.
+    Reset(DbResetCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct DbResetCommand {
+    /// Confirm deleting the database files.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Subcommand)]
