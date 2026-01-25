@@ -347,6 +347,10 @@ impl<'a> Indexer<'a> {
 
                 if trimmed_content.starts_with("<user_instructions>")
                     || trimmed_content.starts_with("</user_instructions>")
+                    || trimmed_content.starts_with("<INSTRUCTIONS>")
+                    || trimmed_content.starts_with("</INSTRUCTIONS>")
+                    || trimmed_content.starts_with("<instructions>")
+                    || trimmed_content.starts_with("</instructions>")
                 {
                     state.saw_instruction_block = true;
                 }
@@ -361,13 +365,11 @@ impl<'a> Indexer<'a> {
                         continue;
                     }
 
-                    let is_user = normalized_role == "user";
-                    if is_user
-                        && state.messages.is_empty()
-                        && is_instruction_banner(&clean, state.instructions_raw.as_deref())
-                    {
+                    if is_instruction_banner(&clean, state.instructions_raw.as_deref()) {
+                        state.saw_instruction_block = true;
                         continue;
                     }
+                    let is_user = normalized_role == "user";
                     let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
                     if state.first_prompt.is_none() && is_user {
                         state.first_prompt = Some(clean.clone());
@@ -732,8 +734,28 @@ fn normalize_instruction_text(raw: &str) -> String {
 }
 
 fn is_instruction_banner(message: &str, instructions_raw: Option<&str>) -> bool {
+    let first_line = message.lines().map(str::trim).find(|line| !line.is_empty());
+    if let Some(first_line) = first_line {
+        let lower_first = first_line.to_ascii_lowercase();
+        if lower_first.starts_with("# agents.md instructions for ")
+            || lower_first.starts_with("agents.md instructions for ")
+            || lower_first.starts_with("# agents.md instructions")
+            || lower_first.starts_with("agents.md instructions")
+        {
+            return true;
+        }
+    }
+
     let lower = message.to_ascii_lowercase();
-    if lower.contains("<instructions>") {
+    if lower.contains("<instructions>")
+        || lower.contains("</instructions>")
+        || lower.contains("<user_instructions>")
+        || lower.contains("</user_instructions>")
+        || lower.contains("<project_instructions>")
+        || lower.contains("</project_instructions>")
+        || lower.contains("<system_instructions>")
+        || lower.contains("</system_instructions>")
+    {
         return true;
     }
     if let Some(instructions_raw) = instructions_raw {
@@ -877,6 +899,39 @@ mod tests {
         session_file.write_str(concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"# General guidance\\n\\nKeep things simple.\\n\"}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n<INSTRUCTIONS>\\n# General guidance\\n- Do not pre-optimize.\\n</INSTRUCTIONS>\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Real user question\"}]}}\n",
+        ))?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(
+            ingest.messages.len(),
+            1,
+            "instruction banner should be filtered"
+        );
+        assert_eq!(ingest.messages[0].role, "user");
+        assert_eq!(ingest.messages[0].content, "Real user question");
+        assert!(ingest.messages[0].is_first);
+        assert_eq!(
+            ingest.summary.first_prompt.as_deref(),
+            Some("Real user question")
+        );
+        assert!(ingest.summary.actionable);
+
+        Ok(())
+    }
+
+    #[test]
+    fn instruction_banners_from_system_role_are_excluded() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n# General guidance\\n- Do not pre-optimize.\\n\"}]}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Real user question\"}]}}\n",
         ))?;
 
