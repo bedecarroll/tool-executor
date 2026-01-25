@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.7.0] - 2026-01-25
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Added `tx db reset` to remove the session database (with `--yes` confirmation).
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Fixed Codex instruction banners being indexed when emitted outside the first user message.
+
 ## [0.6.0] - 2026-01-07
 
 <!-- markdownlint-disable-next-line MD024 -->
