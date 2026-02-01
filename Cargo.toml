@@ -53,7 +53,7 @@ tempfile = "3.24"
 assert_cmd = "2.1"
 
 [dependencies.clap]
-version = "4.5.54"
+version = "4.5.56"
 features = [ "derive",]
 
 [dependencies.indexmap]
@@ -99,7 +99,7 @@ default-features = false
 features = [ "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls",]
 
 [dev-dependencies.insta]
-version = "1.46.1"
+version = "1.46.2"
 features = [ "filters",]
 
 [dev-dependencies.criterion]
