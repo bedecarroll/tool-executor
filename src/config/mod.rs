@@ -388,7 +388,7 @@ fn read_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
+    use crate::test_support::{ENV_LOCK, EnvOverride};
     use assert_fs::TempDir;
     use assert_fs::fixture::{FileTouch, FileWriteStr, PathChild, PathCreateDir};
     use color_eyre::Result;
@@ -405,20 +405,6 @@ mod tests {
         })
     }
 
-    fn restore_env(key: &str, value: Option<String>) {
-        if let Some(val) = value {
-            unsafe { std::env::set_var(key, val) };
-        } else {
-            unsafe { std::env::remove_var(key) };
-        }
-    }
-
-    fn restore_env_branches(key: &str, value: Option<String>) {
-        restore_env(key, Some("tx-test-dummy".into()));
-        restore_env(key, None);
-        restore_env(key, value);
-    }
-
     #[test]
     fn resolve_directories_uses_env_overrides() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -430,24 +416,14 @@ mod tests {
         data_dir.create_dir_all()?;
         cache_dir.create_dir_all()?;
 
-        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
-        let orig_data = std::env::var("TX_DATA_DIR").ok();
-        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
-
-        unsafe {
-            std::env::set_var("TX_CONFIG_DIR", config_dir.path());
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _config_override = EnvOverride::set_path("TX_CONFIG_DIR", config_dir.path());
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let dirs = resolve_directories(None)?;
         assert_eq!(dirs.config_dir, config_dir.path());
         assert_eq!(dirs.data_dir, data_dir.path());
         assert_eq!(dirs.cache_dir, cache_dir.path());
-
-        restore_env_branches("TX_CONFIG_DIR", orig_config);
-        restore_env_branches("TX_DATA_DIR", orig_data);
-        restore_env_branches("TX_CACHE_DIR", orig_cache);
 
         Ok(())
     }
@@ -455,24 +431,14 @@ mod tests {
     #[test]
     fn resolve_directories_defaults_without_env() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
-        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
-        let orig_data = std::env::var("TX_DATA_DIR").ok();
-        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
-
-        unsafe {
-            std::env::remove_var("TX_CONFIG_DIR");
-            std::env::remove_var("TX_DATA_DIR");
-            std::env::remove_var("TX_CACHE_DIR");
-        }
+        let _config_override = EnvOverride::remove("TX_CONFIG_DIR");
+        let _data_override = EnvOverride::remove("TX_DATA_DIR");
+        let _cache_override = EnvOverride::remove("TX_CACHE_DIR");
 
         let dirs = resolve_directories(None)?;
         assert!(path_contains_component(&dirs.config_dir, APP_NAME));
         assert!(path_contains_component(&dirs.data_dir, APP_NAME));
         assert!(path_contains_component(&dirs.cache_dir, APP_NAME));
-
-        restore_env_branches("TX_CONFIG_DIR", orig_config);
-        restore_env_branches("TX_DATA_DIR", orig_data);
-        restore_env_branches("TX_CACHE_DIR", orig_cache);
 
         Ok(())
     }
@@ -488,24 +454,14 @@ mod tests {
         let cache_dir = temp.child("cache");
         cache_dir.create_dir_all()?;
 
-        let orig_config = std::env::var("TX_CONFIG_DIR").ok();
-        let orig_data = std::env::var("TX_DATA_DIR").ok();
-        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
-
-        unsafe {
-            std::env::set_var("TX_CONFIG_DIR", temp.child("other").path());
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _config_override = EnvOverride::set_path("TX_CONFIG_DIR", temp.child("other").path());
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let dirs = resolve_directories(Some(override_dir.path()))?;
         assert_eq!(dirs.config_dir, override_dir.path());
         assert_eq!(dirs.data_dir, data_dir.path());
         assert_eq!(dirs.cache_dir, cache_dir.path());
-
-        restore_env_branches("TX_CONFIG_DIR", orig_config);
-        restore_env_branches("TX_DATA_DIR", orig_data);
-        restore_env_branches("TX_CACHE_DIR", orig_cache);
 
         Ok(())
     }
@@ -609,24 +565,14 @@ mod tests {
         data_root.create_dir_all()?;
         cache_root.create_dir_all()?;
 
-        let orig_config = std::env::var("XDG_CONFIG_HOME").ok();
-        let orig_data = std::env::var("XDG_DATA_HOME").ok();
-        let orig_cache = std::env::var("XDG_CACHE_HOME").ok();
-
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", config_root.path());
-            std::env::set_var("XDG_DATA_HOME", data_root.path());
-            std::env::set_var("XDG_CACHE_HOME", cache_root.path());
-        }
+        let _config_override = EnvOverride::set_path("XDG_CONFIG_HOME", config_root.path());
+        let _data_override = EnvOverride::set_path("XDG_DATA_HOME", data_root.path());
+        let _cache_override = EnvOverride::set_path("XDG_CACHE_HOME", cache_root.path());
 
         let (config, data, cache) = resolve_default_directories()?;
         assert_eq!(config, config_root.path().join(APP_NAME));
         assert_eq!(data, data_root.path().join(APP_NAME));
         assert_eq!(cache, cache_root.path().join(APP_NAME));
-
-        restore_env_branches("XDG_CONFIG_HOME", orig_config);
-        restore_env_branches("XDG_DATA_HOME", orig_data);
-        restore_env_branches("XDG_CACHE_HOME", orig_cache);
 
         Ok(())
     }
@@ -645,30 +591,14 @@ mod tests {
     #[test]
     fn resolve_default_directories_errors_without_sources() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let original_local = std::env::var("LOCALAPPDATA").ok();
-        let original_app = std::env::var("APPDATA").ok();
-
-        unsafe {
-            std::env::remove_var("LOCALAPPDATA");
-            std::env::remove_var("APPDATA");
-        }
+        let _local_override = EnvOverride::remove("LOCALAPPDATA");
+        let _app_override = EnvOverride::remove("APPDATA");
 
         let err = resolve_default_directories_with(|| None, || None).expect_err("expected error");
         assert!(
             err.to_string()
                 .contains("unable to resolve platform directories")
         );
-
-        if let Some(value) = original_local {
-            unsafe { std::env::set_var("LOCALAPPDATA", value) };
-        } else {
-            unsafe { std::env::remove_var("LOCALAPPDATA") };
-        }
-        if let Some(value) = original_app {
-            unsafe { std::env::set_var("APPDATA", value) };
-        } else {
-            unsafe { std::env::remove_var("APPDATA") };
-        }
     }
 
     #[test]
@@ -754,24 +684,18 @@ mod tests {
             "[providers.extra]\nbin = \"echo\"\n",
         )?;
 
-        let orig_data = std::env::var("TX_DATA_DIR").ok();
-        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
         let data_override = temp.child("data");
         data_override.create_dir_all()?;
         let cache_override = temp.child("cache");
         cache_override.create_dir_all()?;
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", data_override.path());
-            std::env::set_var("TX_CACHE_DIR", cache_override.path());
-        }
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_override.path());
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", cache_override.path());
 
         let loaded = load(Some(config_dir.path()))?;
         assert!(loaded.config.providers.contains_key("echo"));
         assert!(loaded.config.providers.contains_key("extra"));
         assert!(loaded.sources.len() >= 2);
 
-        restore_env_branches("TX_DATA_DIR", orig_data);
-        restore_env_branches("TX_CACHE_DIR", orig_cache);
         Ok(())
     }
 
@@ -831,12 +755,8 @@ list = \"value\"
         let cache_dir = temp.child("cache");
         cache_dir.create_dir_all()?;
 
-        let orig_data = std::env::var("TX_DATA_DIR").ok();
-        let orig_cache = std::env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let err =
             load(Some(config_dir.path())).expect_err("merge should fail for non-array append");
@@ -845,25 +765,6 @@ list = \"value\"
             message.contains("cannot append to non-array key 'list'"),
             "unexpected error: {message}"
         );
-
-        if let Some(val) = orig_data {
-            unsafe {
-                std::env::set_var("TX_DATA_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_DATA_DIR");
-            }
-        }
-        if let Some(val) = orig_cache {
-            unsafe {
-                std::env::set_var("TX_CACHE_DIR", val);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("TX_CACHE_DIR");
-            }
-        }
 
         Ok(())
     }
@@ -1018,13 +919,12 @@ list = \"value\"
 
     #[test]
     fn resolve_directories_prefers_override_argument() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
         let override_dir = temp.child("override");
         override_dir.create_dir_all()?;
 
-        unsafe {
-            std::env::remove_var("TX_CONFIG_DIR");
-        }
+        let _config_override = EnvOverride::remove("TX_CONFIG_DIR");
 
         let dirs = resolve_directories(Some(override_dir.path()))?;
         assert_eq!(dirs.config_dir, override_dir.path());
@@ -1043,23 +943,12 @@ list = \"value\"
         let codex_home = temp.child("codex-home");
         codex_home.create_dir_all()?;
 
-        let orig_env = [
-            ("TX_CONFIG_DIR", std::env::var("TX_CONFIG_DIR").ok()),
-            ("TX_DATA_DIR", std::env::var("TX_DATA_DIR").ok()),
-            ("TX_CACHE_DIR", std::env::var("TX_CACHE_DIR").ok()),
-            ("HOME", std::env::var("HOME").ok()),
-            ("USERPROFILE", std::env::var("USERPROFILE").ok()),
-            ("CODEX_HOME", std::env::var("CODEX_HOME").ok()),
-        ];
-
-        unsafe {
-            std::env::set_var("TX_CONFIG_DIR", config_dir.path());
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-            std::env::set_var("HOME", home_dir.path());
-            std::env::set_var("USERPROFILE", home_dir.path());
-            std::env::set_var("CODEX_HOME", codex_home.path());
-        }
+        let _config_override = EnvOverride::set_path("TX_CONFIG_DIR", config_dir.path());
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+        let _home_override = EnvOverride::set_path("HOME", home_dir.path());
+        let _profile_override = EnvOverride::set_path("USERPROFILE", home_dir.path());
+        let _codex_home_override = EnvOverride::set_path("CODEX_HOME", codex_home.path());
 
         let loaded = load(None)?;
         assert!(loaded.directories.config_dir.exists());
@@ -1079,14 +968,6 @@ list = \"value\"
         );
 
         drop(loaded);
-
-        for (key, value) in orig_env {
-            if let Some(val) = value {
-                unsafe { std::env::set_var(key, val) };
-            } else {
-                unsafe { std::env::remove_var(key) };
-            }
-        }
 
         Ok(())
     }

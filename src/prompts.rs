@@ -191,7 +191,7 @@ fn extract_profile_lines(detail: &Value) -> Vec<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
+    use crate::test_support::{ENV_LOCK, EnvOverride};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use serde_json::json;
@@ -217,12 +217,17 @@ mod tests {
 
     struct PathGuard {
         original: Option<String>,
+        restored: bool,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl PathGuard {
         fn new(dir: &TempDir) -> Self {
             let lock = ENV_LOCK.lock().unwrap();
+            Self::with_lock(dir, lock)
+        }
+
+        fn with_lock(dir: &TempDir, lock: std::sync::MutexGuard<'static, ()>) -> Self {
             let original = env::var("PATH").ok();
             let mut paths = vec![dir.path().to_path_buf()];
             if let Some(existing) = &original {
@@ -234,37 +239,36 @@ mod tests {
             }
             Self {
                 original,
+                restored: false,
                 _lock: lock,
             }
+        }
+
+        fn restore(&mut self) {
+            if self.restored {
+                return;
+            }
+            if let Some(value) = &self.original {
+                unsafe {
+                    env::set_var("PATH", value);
+                }
+            } else {
+                unsafe {
+                    env::remove_var("PATH");
+                }
+            }
+            self.restored = true;
         }
     }
 
     impl Drop for PathGuard {
         fn drop(&mut self) {
-            if let Some(value) = &self.original {
-                unsafe {
-                    env::set_var("PATH", value);
-                }
-            }
+            self.restore();
         }
     }
 
     fn set_path(dir: &TempDir) -> PathGuard {
         PathGuard::new(dir)
-    }
-
-    fn restore_env(key: &str, value: Option<String>) {
-        if let Some(val) = value {
-            unsafe { env::set_var(key, val) };
-        } else {
-            unsafe { env::remove_var(key) };
-        }
-    }
-
-    fn restore_env_branches(key: &str, value: Option<String>) {
-        restore_env(key, Some("tx-test-dummy".into()));
-        restore_env(key, None);
-        restore_env(key, value);
     }
 
     #[cfg(unix)]
@@ -574,13 +578,22 @@ exit 1
     #[test]
     fn pa_command_prefers_env_override() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let original = env::var("TX_TEST_PA_BIN").ok();
-        unsafe {
-            env::set_var("TX_TEST_PA_BIN", "pa-override");
-        }
+        let _override = EnvOverride::set_var("TX_TEST_PA_BIN", "pa-override");
         let cmd = pa_command();
         assert_eq!(cmd.get_program(), "pa-override");
-        restore_env_branches("TX_TEST_PA_BIN", original);
+    }
+
+    #[test]
+    fn path_guard_restores_unset_path() {
+        let lock = ENV_LOCK.lock().unwrap();
+        let path_override = EnvOverride::remove("PATH");
+
+        let temp = TempDir::new().expect("tempdir");
+        let mut guard = PathGuard::with_lock(&temp, lock);
+        assert!(env::var_os("PATH").is_some());
+        guard.restore();
+        assert!(env::var_os("PATH").is_none());
+        drop(path_override);
     }
 
     #[cfg(unix)]

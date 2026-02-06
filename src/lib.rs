@@ -40,7 +40,7 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
 
     let mut app = app::App::bootstrap(cli)?;
 
-    let outcome = match &cli.command {
+    match &cli.command {
         Some(Command::Search(cmd)) => app.search(cmd),
         Some(Command::Resume(cmd)) => app.resume(cmd),
         Some(Command::Export(cmd)) => app.export(cmd),
@@ -51,26 +51,6 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
         Some(Command::Internal(_)) => unreachable!("internal command handled above"),
         Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
         None => app.run_ui(),
-    };
-
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            if let Some(app_error) = err.downcast_ref::<app::AppError>()
-                && matches!(app_error, app::AppError::ProviderMismatch { .. })
-            {
-                eprintln!("{app_error}");
-                #[cfg(not(any(test, coverage)))]
-                {
-                    std::process::exit(2);
-                }
-                #[cfg(any(test, coverage))]
-                {
-                    return Err(err);
-                }
-            }
-            Err(err)
-        }
     }
 }
 
@@ -111,6 +91,38 @@ pub fn command() -> clap::Command {
 #[must_use]
 pub fn parse_cli() -> Cli {
     Cli::parse()
+}
+
+/// Return a suggested process exit code for a CLI error.
+#[must_use]
+pub fn exit_code_for_error(err: &color_eyre::Report) -> i32 {
+    if let Some(app_error) = err.downcast_ref::<app::AppError>()
+        && matches!(app_error, app::AppError::ProviderMismatch { .. })
+    {
+        return 2;
+    }
+    1
+}
+
+/// Write a CLI error and its cause chain to the provided writer.
+///
+/// The first line is prefixed with `tx:` followed by any chained causes.
+///
+/// # Errors
+///
+/// Returns an error when writing to `writer` fails.
+pub fn write_cli_error(
+    err: &color_eyre::Report,
+    mut writer: impl std::io::Write,
+) -> std::io::Result<()> {
+    let mut chain = err.chain();
+    if let Some(head) = chain.next() {
+        writeln!(writer, "tx: {head}")?;
+    }
+    for cause in chain {
+        writeln!(writer, "    caused by: {cause}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -166,6 +178,31 @@ mod tests {
         let cmd = command();
         assert_eq!(cmd.get_name(), "tx");
         assert!(cmd.get_about().is_some());
+    }
+
+    #[test]
+    fn exit_code_for_error_maps_provider_mismatch() {
+        let mismatch = color_eyre::Report::new(app::AppError::ProviderMismatch {
+            expected: "codex".into(),
+            actual: "alt".into(),
+        });
+        assert_eq!(exit_code_for_error(&mismatch), 2);
+
+        let other = color_eyre::eyre::eyre!("boom");
+        assert_eq!(exit_code_for_error(&other), 1);
+    }
+
+    #[test]
+    fn write_cli_error_renders_error_chain() {
+        let err = color_eyre::eyre::eyre!("root")
+            .wrap_err("middle")
+            .wrap_err("top");
+        let mut output = Vec::new();
+        write_cli_error(&err, &mut output).expect("write should succeed");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("tx: top"));
+        assert!(rendered.contains("caused by: middle"));
+        assert!(rendered.contains("caused by: root"));
     }
 
     #[test]

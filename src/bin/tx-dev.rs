@@ -4,17 +4,9 @@ fn main() -> color_eyre::Result<()> {
     match tool_executor::run(&cli) {
         Ok(()) => Ok(()),
         Err(err) => {
-            use std::io::Write;
-
-            let mut stderr = std::io::stderr();
-            let mut chain = err.chain();
-            if let Some(head) = chain.next() {
-                writeln!(stderr, "tx: {head}")?;
-            }
-            for cause in chain {
-                writeln!(stderr, "    caused by: {cause}")?;
-            }
-            std::process::exit(1);
+            let exit_code = tool_executor::exit_code_for_error(&err);
+            tool_executor::write_cli_error(&err, &mut std::io::stderr())?;
+            std::process::exit(exit_code);
         }
     }
 }
@@ -22,27 +14,12 @@ fn main() -> color_eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use assert_fs::TempDir;
-    use std::env;
     use tool_executor::{
         Cli,
         cli::{Command as TopLevelCommand, ConfigCommand},
         config::AppDirectories,
-        test_support::ENV_LOCK,
+        test_support::{ENV_LOCK, EnvOverride},
     };
-
-    fn restore_env(key: &str, value: Option<String>) {
-        if let Some(val) = value {
-            unsafe { env::set_var(key, val) };
-        } else {
-            unsafe { env::remove_var(key) };
-        }
-    }
-
-    fn restore_env_branches(key: &str, value: Option<String>) {
-        restore_env(key, Some("tx-test-dummy".into()));
-        restore_env(key, None);
-        restore_env(key, value);
-    }
 
     #[test]
     fn main_handles_successful_run() -> color_eyre::Result<()> {
@@ -73,19 +50,10 @@ session_roots = []
         };
 
         // Should complete without invoking process::exit.
-        let original_data = env::var("TX_DATA_DIR").ok();
-        let original_cache = env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            env::set_var("TX_DATA_DIR", &directories.data_dir);
-            env::set_var("TX_CACHE_DIR", &directories.cache_dir);
-        }
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", &directories.data_dir);
+        let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", &directories.cache_dir);
 
-        let result = tool_executor::run(&cli);
-
-        restore_env_branches("TX_DATA_DIR", original_data);
-        restore_env_branches("TX_CACHE_DIR", original_cache);
-
-        result
+        tool_executor::run(&cli)
     }
 
     #[test]
@@ -115,31 +83,16 @@ session_roots = []
             command: Some(TopLevelCommand::Config(ConfigCommand::Where)),
         };
 
-        let actual_data = env::var("TX_DATA_DIR").ok();
-        let actual_cache = env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            env::remove_var("TX_DATA_DIR");
-            env::remove_var("TX_CACHE_DIR");
+        let _actual_data = EnvOverride::remove("TX_DATA_DIR");
+        let _actual_cache = EnvOverride::remove("TX_CACHE_DIR");
+        {
+            let _data_override = EnvOverride::set_path("TX_DATA_DIR", &directories.data_dir);
+            let _cache_override = EnvOverride::set_path("TX_CACHE_DIR", &directories.cache_dir);
+            tool_executor::run(&cli)?;
         }
 
-        let original_data: Option<String> = None;
-        let original_cache: Option<String> = None;
-        unsafe {
-            env::set_var("TX_DATA_DIR", &directories.data_dir);
-            env::set_var("TX_CACHE_DIR", &directories.cache_dir);
-        }
-
-        let result = tool_executor::run(&cli);
-
-        restore_env_branches("TX_DATA_DIR", original_data);
-        restore_env_branches("TX_CACHE_DIR", original_cache);
-
-        assert!(env::var_os("TX_DATA_DIR").is_none());
-        assert!(env::var_os("TX_CACHE_DIR").is_none());
-
-        restore_env_branches("TX_DATA_DIR", actual_data);
-        restore_env_branches("TX_CACHE_DIR", actual_cache);
-
-        result
+        assert!(std::env::var_os("TX_DATA_DIR").is_none());
+        assert!(std::env::var_os("TX_CACHE_DIR").is_none());
+        Ok(())
     }
 }
