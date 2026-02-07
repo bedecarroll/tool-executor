@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use color_eyre::Result;
@@ -51,6 +53,12 @@ struct WindowCosts {
     all: f64,
 }
 
+#[derive(Default, Clone, Copy)]
+struct SessionActivityCounts {
+    turns: i64,
+    compactions: i64,
+}
+
 struct TokenStats {
     totals: WindowedUsage,
     by_day: BTreeMap<String, UsageTotals>,
@@ -68,6 +76,8 @@ struct CodexStats {
     sessions_count: usize,
     first_session: Option<i64>,
     last_session: Option<i64>,
+    top_sessions_by_turns: Vec<(String, i64)>,
+    top_session_by_compactions: Option<(String, i64)>,
     prompt_totals: WindowCounts,
     last_prompt: Option<i64>,
     token_stats: TokenStats,
@@ -87,6 +97,7 @@ pub fn codex(db: &Database, db_path: &Path) -> Result<()> {
 
     let sessions = db.sessions_for_provider("codex")?;
     let (first_session, last_session) = session_window(&sessions);
+    let session_activity = collect_session_activity_counts(&sessions);
 
     let prompt_timestamps = db.user_message_timestamps("codex")?;
     let (prompt_totals, last_prompt) =
@@ -101,6 +112,8 @@ pub fn codex(db: &Database, db_path: &Path) -> Result<()> {
         sessions_count: sessions.len(),
         first_session,
         last_session,
+        top_sessions_by_turns: top_sessions_by_turns(&session_activity, 5),
+        top_session_by_compactions: top_session_by_compactions(&session_activity),
         prompt_totals,
         last_prompt,
         token_stats,
@@ -242,6 +255,7 @@ fn render_codex_stats(stats: &CodexStats, db_path: &Path, offset: UtcOffset) {
     println!("  first seen: {}", fmt_dt(stats.first_session, offset));
     println!("  last seen: {}", fmt_dt(stats.last_session, offset));
     println!();
+    render_session_activity(stats);
 
     println!("Prompts (indexed user messages):");
     println!("  last 24h: {}", human_int(stats.prompt_totals.last_24h));
@@ -282,6 +296,26 @@ fn render_codex_stats(stats: &CodexStats, db_path: &Path, offset: UtcOffset) {
     ) {
         println!("{line}");
     }
+}
+
+fn render_session_activity(stats: &CodexStats) {
+    println!("Top sessions by turns (turn_context events):");
+    if stats.top_sessions_by_turns.is_empty() {
+        println!("  none");
+    } else {
+        for (session_id, turns) in &stats.top_sessions_by_turns {
+            println!("  {session_id}: {}", human_int(*turns));
+        }
+    }
+    println!();
+
+    println!("Session with most compactions (context_compacted events):");
+    if let Some((session_id, compactions)) = &stats.top_session_by_compactions {
+        println!("  {session_id}: {}", human_int(*compactions));
+    } else {
+        println!("  none");
+    }
+    println!();
 }
 
 fn render_costs(stats: &CodexStats) {
@@ -377,6 +411,76 @@ fn session_window(sessions: &[SessionSummary]) -> (Option<i64>, Option<i64>) {
     }
 
     (first, last)
+}
+
+fn collect_session_activity_counts(
+    sessions: &[SessionSummary],
+) -> Vec<(String, SessionActivityCounts)> {
+    sessions
+        .iter()
+        .map(|session| (session.id.clone(), session_activity_counts(&session.path)))
+        .collect()
+}
+
+fn session_activity_counts(path: &Path) -> SessionActivityCounts {
+    let Ok(file) = File::open(path) else {
+        return SessionActivityCounts::default();
+    };
+    let reader = BufReader::new(file);
+    let mut counts = SessionActivityCounts::default();
+
+    for line in reader.lines().map_while(std::result::Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parsed: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if parsed.get("type").and_then(Value::as_str) == Some("turn_context") {
+            counts.turns += 1;
+            continue;
+        }
+
+        if parsed.get("type").and_then(Value::as_str) == Some("event_msg")
+            && parsed
+                .get("payload")
+                .and_then(|payload| payload.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|ty| ty == "context_compacted")
+        {
+            counts.compactions += 1;
+        }
+    }
+
+    counts
+}
+
+fn top_sessions_by_turns(
+    rows: &[(String, SessionActivityCounts)],
+    limit: usize,
+) -> Vec<(String, i64)> {
+    let mut ranked: Vec<_> = rows
+        .iter()
+        .filter(|(_, counts)| counts.turns > 0)
+        .map(|(session_id, counts)| (session_id.clone(), counts.turns))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(limit);
+    ranked
+}
+
+fn top_session_by_compactions(rows: &[(String, SessionActivityCounts)]) -> Option<(String, i64)> {
+    let mut ranked: Vec<_> = rows
+        .iter()
+        .filter(|(_, counts)| counts.compactions > 0)
+        .map(|(session_id, counts)| (session_id.clone(), counts.compactions))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.into_iter().next()
 }
 
 fn prompt_stats(
@@ -795,5 +899,98 @@ mod tests {
         codex(&db, db_path.path())?;
         drop(db);
         Ok(())
+    }
+
+    #[test]
+    fn collect_session_activity_counts_tracks_turns_and_compactions() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null}}\n",
+            "{not-json}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+        ))?;
+
+        let summary = SessionSummary {
+            id: "codex/session.jsonl".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: Some("gpt-5".into()),
+            label: Some("Session".into()),
+            path: session_file.path().to_path_buf(),
+            uuid: Some("session".into()),
+            first_prompt: Some("Hello".into()),
+            actionable: true,
+            created_at: Some(0),
+            started_at: Some(0),
+            last_active: Some(0),
+            size: 1,
+            mtime: 0,
+        };
+
+        let rows = collect_session_activity_counts(&[summary]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "codex/session.jsonl");
+        assert_eq!(rows[0].1.turns, 2);
+        assert_eq!(rows[0].1.compactions, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn session_activity_rankings_are_sorted_and_filtered() {
+        let rows = vec![
+            (
+                "codex/b".to_string(),
+                SessionActivityCounts {
+                    turns: 5,
+                    compactions: 1,
+                },
+            ),
+            (
+                "codex/a".to_string(),
+                SessionActivityCounts {
+                    turns: 5,
+                    compactions: 0,
+                },
+            ),
+            (
+                "codex/c".to_string(),
+                SessionActivityCounts {
+                    turns: 2,
+                    compactions: 3,
+                },
+            ),
+            (
+                "codex/d".to_string(),
+                SessionActivityCounts {
+                    turns: 0,
+                    compactions: 0,
+                },
+            ),
+        ];
+
+        let top_turns = top_sessions_by_turns(&rows, 5);
+        assert_eq!(
+            top_turns,
+            vec![
+                ("codex/a".to_string(), 5),
+                ("codex/b".to_string(), 5),
+                ("codex/c".to_string(), 2),
+            ]
+        );
+
+        let top_compactions = top_session_by_compactions(&rows);
+        assert_eq!(top_compactions, Some(("codex/c".to_string(), 3)));
+
+        let no_compactions = top_session_by_compactions(&[(
+            "codex/none".to_string(),
+            SessionActivityCounts {
+                turns: 1,
+                compactions: 0,
+            },
+        )]);
+        assert_eq!(no_compactions, None);
     }
 }
