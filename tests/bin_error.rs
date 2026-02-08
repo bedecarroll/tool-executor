@@ -4,7 +4,7 @@ use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use predicates::str::contains;
-use tool_executor::test_support::ENV_LOCK;
+use tool_executor::test_support::{ENV_LOCK, toml_path};
 use tool_executor::{
     db::Database,
     session::{MessageRecord, SessionIngest, SessionSummary},
@@ -94,7 +94,7 @@ provider = "demo"
 [profiles.alt]
 provider = "alt"
 "#,
-        sessions_dir.path().display()
+        toml_path(sessions_dir.path())
     ))?;
 
     let data_dir = temp.child("data-root");

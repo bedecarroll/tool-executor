@@ -6,6 +6,7 @@ use std::fs;
 use tool_executor::{
     db::Database,
     session::{MessageRecord, SessionIngest, SessionSummary},
+    test_support::toml_path,
 };
 
 /// Basic smoke test to exercise the thin re-exporting binary in this crate.
@@ -59,7 +60,7 @@ provider = "demo"
 [profiles.alt]
 provider = "alt"
 "#,
-            sessions_dir.path().display()
+            toml_path(sessions_dir.path())
         ),
     )?;
 
