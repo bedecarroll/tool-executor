@@ -2,7 +2,7 @@ min_version = "2025.9.10"
 
 [tools]
 rust = { version = "1.90.0", components = "rustfmt,clippy,llvm-tools-preview" }
-"cargo:cargo-binstall" = "latest"
+"cargo:cargo-binstall" = "1.17.3"
 "cargo:cargo-deny" = "latest"
 "cargo:cargo-insta" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
