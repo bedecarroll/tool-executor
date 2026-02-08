@@ -56,6 +56,7 @@ pub struct PipelinePlan {
     pub post_snippets: Vec<String>,
     pub wrapper: Option<String>,
     pub needs_stdin_prompt: bool,
+    pub uses_capture_arg: bool,
     pub capture_has_pre_commands: bool,
     pub stdin_prompt_label: Option<String>,
     pub cwd: PathBuf,
@@ -165,6 +166,7 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
         post_snippets: post_snippet_names,
         wrapper: wrap_name,
         needs_stdin_prompt: false,
+        uses_capture_arg: capture_prompt,
         capture_has_pre_commands: capture_prompt && !pre_commands.is_empty(),
         stdin_prompt_label: None,
         cwd: request.cwd.clone(),
@@ -848,6 +850,7 @@ mod tests {
             "expected capture helper to be skipped: {}",
             plan.pipeline
         );
+        assert!(!plan.uses_capture_arg);
         assert!(
             plan.pipeline.contains("codex --search"),
             "expected provider invocation in pipeline: {}",
@@ -923,6 +926,7 @@ mod tests {
             "expected capture helper when capture enabled: {}",
             plan.pipeline
         );
+        assert!(plan.uses_capture_arg);
         assert_eq!(
             plan.friendly_display, "codex --search",
             "expected friendly display to omit placeholder when source unknown"
