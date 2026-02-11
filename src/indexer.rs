@@ -853,10 +853,7 @@ mod tests {
 
         assert_eq!(ingest.messages.len(), 1);
         assert_eq!(ingest.messages[0].role, "system");
-        assert!(
-            ingest.messages[0].content.contains("General guidance"),
-            "placeholder should summarize instructions"
-        );
+        assert!(ingest.messages[0].content.contains("General guidance"));
         assert!(ingest.messages[0].is_first);
         assert_eq!(ingest.messages[0].source, None);
         assert_eq!(ingest.summary.uuid.as_deref(), Some("session"));
@@ -909,11 +906,7 @@ mod tests {
 
         let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
 
-        assert_eq!(
-            ingest.messages.len(),
-            1,
-            "instruction banner should be filtered"
-        );
+        assert_eq!(ingest.messages.len(), 1);
         assert_eq!(ingest.messages[0].role, "user");
         assert_eq!(ingest.messages[0].content, "Real user question");
         assert!(ingest.messages[0].is_first);
@@ -942,11 +935,7 @@ mod tests {
 
         let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
 
-        assert_eq!(
-            ingest.messages.len(),
-            1,
-            "instruction banner should be filtered"
-        );
+        assert_eq!(ingest.messages.len(), 1);
         assert_eq!(ingest.messages[0].role, "user");
         assert_eq!(ingest.messages[0].content, "Real user question");
         assert!(ingest.messages[0].is_first);
@@ -1010,11 +999,7 @@ mod tests {
 
         let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
 
-        assert_eq!(
-            ingest.token_usage.len(),
-            1,
-            "expected token usage to dedupe"
-        );
+        assert_eq!(ingest.token_usage.len(), 1);
         let usage = &ingest.token_usage[0];
         let expected_ts = OffsetDateTime::parse("2026-01-21T00:00:00Z", &Rfc3339)?.unix_timestamp();
         assert_eq!(usage.timestamp, expected_ts);
@@ -1028,8 +1013,7 @@ mod tests {
             usage
                 .rate_limits
                 .as_deref()
-                .is_some_and(|text| text.contains("primary")),
-            "expected rate limits to be captured"
+                .is_some_and(|text| text.contains("primary"))
         );
         Ok(())
     }
@@ -1075,13 +1059,10 @@ mod tests {
 
         let mut indexer = Indexer::new(&mut db, &config);
         let report = indexer.run()?;
-        assert_eq!(report.updated, 1, "expected one session to be ingested");
-        assert_eq!(report.errors.len(), 1, "expected one error for bad payload");
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.errors.len(), 1);
         let error_path = &report.errors[0].path;
-        assert!(
-            error_path.ends_with("bad.jsonl"),
-            "unexpected error path: {error_path:?}"
-        );
+        assert!(error_path.ends_with("bad.jsonl"));
         Ok(())
     }
 
@@ -1100,8 +1081,8 @@ mod tests {
 
         let mut indexer = Indexer::new(&mut db, &config);
         let report = indexer.run()?;
-        assert_eq!(report.scanned, 1, "single file root should be scanned once");
-        assert_eq!(report.updated, 1, "session should be ingested");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.updated, 1);
         Ok(())
     }
 
@@ -1204,9 +1185,9 @@ mod tests {
 
         let mut indexer = Indexer::new(&mut db, &config);
         let report = indexer.run()?;
-        assert_eq!(report.removed, 1, "expected missing session to be pruned");
-        assert_eq!(report.updated, 0, "no new sessions expected");
-        assert_eq!(db.count_sessions()?, 0, "database should be empty");
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.updated, 0);
+        assert_eq!(db.count_sessions()?, 0);
         Ok(())
     }
 
@@ -1249,14 +1230,14 @@ mod tests {
         {
             let mut indexer = Indexer::new(&mut db, &config);
             let report = indexer.run()?;
-            assert_eq!(report.updated, 1, "initial run should ingest session");
+            assert_eq!(report.updated, 1);
             assert_eq!(report.skipped, 0);
         }
 
         let mut indexer = Indexer::new(&mut db, &config);
         let report = indexer.run()?;
-        assert_eq!(report.updated, 0, "second run should not rewrite session");
-        assert_eq!(report.skipped, 1, "unchanged session should be skipped");
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.skipped, 1);
         Ok(())
     }
 
@@ -1356,7 +1337,7 @@ mod tests {
 
         let mut indexer = Indexer::new(&mut db, &config);
         let report = indexer.run()?;
-        assert_eq!(report.removed, 1, "stale session should be removed");
+        assert_eq!(report.removed, 1);
         assert_eq!(db.count_sessions()?, 0);
         Ok(())
     }
@@ -1480,5 +1461,211 @@ mod tests {
         results = extract_messages(&direct);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "system");
+    }
+
+    #[test]
+    fn indexer_single_file_root_reports_skipped_on_second_run() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        )?;
+
+        let provider = provider_with_root(session_file.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        {
+            let mut indexer = Indexer::new(&mut db, &config);
+            let report = indexer.run()?;
+            assert_eq!(report.updated, 1);
+            assert_eq!(report.skipped, 0);
+        }
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.errors.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_single_file_root_collects_errors() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("broken.jsonl");
+        session_file.write_str("{not-json}\n")?;
+
+        let provider = provider_with_root(session_file.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].path.ends_with("broken.jsonl"));
+        Ok(())
+    }
+
+    #[test]
+    fn indexer_walkdir_skips_non_jsonl_files() -> Result<()> {
+        let temp = TempDir::new()?;
+        let sessions_dir = temp.child("sessions");
+        sessions_dir.create_dir_all()?;
+        sessions_dir.child("notes.txt").write_str("ignore")?;
+
+        let provider = provider_with_root(sessions_dir.path());
+        let config = config_from_provider(provider);
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.errors.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn collect_ingest_state_reads_wrapper_and_skips_blank_lines() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("wrapper.jsonl");
+        session_file.write_str(concat!(
+            "\n",
+            "  \n",
+            "{\"type\":\"event_msg\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        ))?;
+
+        let state = Indexer::collect_ingest_state("codex/wrapper.jsonl", session_file.path())?;
+        assert_eq!(state.wrapper.as_deref(), Some("shellwrap"));
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "Hello");
+        Ok(())
+    }
+
+    #[test]
+    fn handle_empty_transcript_uses_instruction_only_placeholder() -> Result<()> {
+        let mut messages = Vec::new();
+        let mut first_prompt = None;
+        Indexer::handle_empty_transcript(
+            &mut messages,
+            &mut first_prompt,
+            None,
+            None,
+            true,
+            false,
+            "codex/placeholder",
+        )?;
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .content
+                .contains("Session bootstrapped (instructions only)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn handle_empty_transcript_truncates_long_preview() -> Result<()> {
+        let mut messages = Vec::new();
+        let mut first_prompt = None;
+        Indexer::handle_empty_transcript(
+            &mut messages,
+            &mut first_prompt,
+            Some("x".repeat(300)),
+            None,
+            false,
+            true,
+            "codex/long",
+        )?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.len(), 240);
+        assert_eq!(first_prompt.as_deref().map(str::len), Some(240));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_messages_falls_back_when_primary_path_filters_tooling_warning() {
+        let direct = json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Warning: apply_patch was requested via shell_command. Use the apply_patch tool instead of exec_command."
+                }
+            ]
+        });
+        let messages = extract_messages(&direct);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "user");
+    }
+
+    #[test]
+    fn extract_token_usage_handles_null_rate_limits() {
+        let event = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 10,
+                        "cached_input_tokens": 2,
+                        "output_tokens": 5,
+                        "reasoning_output_tokens": 1,
+                        "total_tokens": 16
+                    }
+                },
+                "rate_limits": null
+            }
+        });
+        let usage = extract_token_usage(&event, "unknown", "sess", Some(1)).expect("usage");
+        assert_eq!(usage.rate_limits, None);
+        assert_eq!(usage.model, None);
+    }
+
+    #[test]
+    fn parse_usage_i64_handles_number_and_string_edges() {
+        let u64_value = Value::Number(serde_json::Number::from((i64::MAX as u64) + 1));
+        assert_eq!(parse_usage_i64(Some(&u64_value)), 0);
+
+        let float_value = Value::Number(serde_json::Number::from_f64(1.5).expect("finite"));
+        assert_eq!(parse_usage_i64(Some(&float_value)), 0);
+
+        let signed_text = Value::String("42".to_string());
+        assert_eq!(parse_usage_i64(Some(&signed_text)), 42);
+
+        let unsigned_text = Value::String(((i64::MAX as u64) + 1).to_string());
+        assert_eq!(parse_usage_i64(Some(&unsigned_text)), 0);
+
+        let invalid_text = Value::String("not-a-number".to_string());
+        assert_eq!(parse_usage_i64(Some(&invalid_text)), 0);
+
+        assert_eq!(parse_usage_i64(None), 0);
+    }
+
+    #[test]
+    fn extract_text_supports_message_and_nested_content_items() {
+        let value = json!({
+            "content": [
+                {"message": "Hello"},
+                {"content": {"content": [{"text": " world"}]}}
+            ]
+        });
+        assert_eq!(extract_text(&value), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn instruction_helpers_cover_non_banner_and_empty_summary_paths() {
+        assert!(!is_instruction_banner("regular user message", None));
+        assert!(is_instruction_banner(
+            "regular user message",
+            Some("regular user message")
+        ));
+        assert_eq!(summarize_instructions("\n<INSTRUCTIONS>\n#\n"), None);
     }
 }

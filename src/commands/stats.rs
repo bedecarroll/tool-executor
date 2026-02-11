@@ -740,6 +740,8 @@ mod tests {
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::path::PathBuf;
     use time::OffsetDateTime;
 
     #[test]
@@ -992,5 +994,194 @@ mod tests {
             },
         )]);
         assert_eq!(no_compactions, None);
+    }
+
+    #[test]
+    fn render_codex_stats_exercises_non_empty_sections() {
+        let mut by_day = BTreeMap::new();
+        by_day.insert(
+            "2026-01-01".to_string(),
+            UsageTotals {
+                total: 42,
+                ..UsageTotals::default()
+            },
+        );
+        let mut model_totals = HashMap::new();
+        model_totals.insert(
+            "gpt-5".to_string(),
+            UsageTotals {
+                total: 42,
+                ..UsageTotals::default()
+            },
+        );
+        let mut cost_by_pricing_model = HashMap::new();
+        cost_by_pricing_model.insert("gpt-5".to_string(), 1.25);
+        let mut unpriced_models = HashSet::new();
+        unpriced_models.insert(String::new());
+
+        let stats = CodexStats {
+            generated_at: 0,
+            sessions_count: 1,
+            first_session: Some(0),
+            last_session: Some(1),
+            top_sessions_by_turns: vec![("codex/demo".to_string(), 3)],
+            top_session_by_compactions: Some(("codex/demo".to_string(), 1)),
+            prompt_totals: WindowCounts {
+                last_24h: 1,
+                last_7d: 2,
+                last_30d: 3,
+                all: 4,
+            },
+            last_prompt: Some(1),
+            token_stats: TokenStats {
+                totals: WindowedUsage {
+                    all: UsageTotals {
+                        input: 10,
+                        cached_input: 1,
+                        output: 5,
+                        reasoning_output: 0,
+                        total: 15,
+                    },
+                    ..WindowedUsage::default()
+                },
+                by_day,
+                model_totals,
+                cost_totals: WindowCosts {
+                    last_24h: 1.0,
+                    last_7d: 1.0,
+                    last_30d: 1.0,
+                    all: 1.0,
+                },
+                cost_by_pricing_model,
+                unpriced_tokens: WindowCounts {
+                    all: 15,
+                    ..WindowCounts::default()
+                },
+                unpriced_models,
+                latest_event: Some(1),
+                latest_rate_limits: Some(
+                    r#"{
+                        "primary":{"used_percent":20,"window_minutes":60,"resets_at":1700000000000},
+                        "secondary":{"used_percent":10,"window_minutes":15,"resets_at":1700000000},
+                        "credits":{"has_credits":true,"unlimited":false,"balance":7},
+                        "plan_type":"pro"
+                    }"#
+                    .into(),
+                ),
+            },
+        };
+
+        render_codex_stats(&stats, Path::new("/tmp/tx.sqlite3"), UtcOffset::UTC);
+    }
+
+    #[test]
+    fn session_window_prefers_earliest_start_and_latest_end() {
+        let sessions = vec![
+            SessionSummary {
+                id: "a".into(),
+                provider: "codex".into(),
+                wrapper: None,
+                model: None,
+                label: None,
+                path: PathBuf::from("a.jsonl"),
+                uuid: None,
+                first_prompt: None,
+                actionable: true,
+                created_at: Some(20),
+                started_at: Some(10),
+                last_active: Some(30),
+                size: 1,
+                mtime: 30,
+            },
+            SessionSummary {
+                id: "b".into(),
+                provider: "codex".into(),
+                wrapper: None,
+                model: None,
+                label: None,
+                path: PathBuf::from("b.jsonl"),
+                uuid: None,
+                first_prompt: None,
+                actionable: true,
+                created_at: Some(5),
+                started_at: None,
+                last_active: Some(40),
+                size: 1,
+                mtime: 40,
+            },
+        ];
+
+        let (first, last) = session_window(&sessions);
+        assert_eq!(first, Some(5));
+        assert_eq!(last, Some(40));
+    }
+
+    #[test]
+    fn session_activity_counts_returns_default_when_file_missing() {
+        let counts = session_activity_counts(Path::new("/tmp/tx-stats-missing-file.jsonl"));
+        assert_eq!(counts.turns, 0);
+        assert_eq!(counts.compactions, 0);
+    }
+
+    #[test]
+    fn session_activity_counts_skips_empty_lines() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str(concat!(
+            "\n",
+            "   \n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+        ))?;
+
+        let counts = session_activity_counts(session_file.path());
+        assert_eq!(counts.turns, 1);
+        assert_eq!(counts.compactions, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pricing_rate_includes_gpt_5_mini_tier() {
+        let rate = pricing_rate("gpt-5-mini");
+        assert!((rate.input - 0.25).abs() < f64::EPSILON);
+        assert!((rate.cached_input - 0.025).abs() < f64::EPSILON);
+        assert!((rate.output - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fmt_dt_returns_unknown_for_invalid_epoch() {
+        let rendered = fmt_dt(Some(i64::MAX), UtcOffset::UTC);
+        assert_eq!(rendered, "unknown");
+    }
+
+    #[test]
+    fn human_int_str_adds_separators() {
+        assert_eq!(human_int_str("123456789"), "123,456,789");
+    }
+
+    #[test]
+    fn render_rate_limits_returns_empty_for_invalid_json() {
+        let lines = render_rate_limits(Some(0), Some("{bad-json}"), UtcOffset::UTC);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn parse_epoch_handles_edge_numeric_and_string_inputs() {
+        assert_eq!(parse_epoch(&Value::Bool(true)), None);
+
+        let unsigned = serde_json::Number::from((i64::MAX as u64) + 1);
+        assert_eq!(parse_epoch_number(&unsigned), None);
+
+        let float = serde_json::Number::from_f64(1.5).expect("finite");
+        assert_eq!(parse_epoch_number(&float), None);
+
+        let large_text = ((i64::MAX as u64) + 1).to_string();
+        assert_eq!(parse_epoch_str(&large_text), None);
+        assert_eq!(parse_epoch_str("not-a-number"), None);
+    }
+
+    #[test]
+    fn display_value_defaults_null_and_missing_to_unknown() {
+        assert_eq!(display_value(None), "unknown");
+        assert_eq!(display_value(Some(&Value::Null)), "unknown");
     }
 }

@@ -562,6 +562,15 @@ fn configure_provider_env() {
     }
 }
 
+#[cfg(unix)]
+fn install_pa_script(temp: &TempDir, script: &str) -> Result<PathBuf> {
+    let pa = temp.child("pa");
+    pa.write_str(script)?;
+    let perms = fs::Permissions::from_mode(0o755);
+    fs::set_permissions(pa.path(), perms)?;
+    Ok(pa.path().to_path_buf())
+}
+
 fn build_app_fixture(
     diagnostics: Vec<ConfigDiagnostic>,
 ) -> Result<(TempDir, App<'static>, SessionSummary)> {
@@ -660,6 +669,84 @@ fn app_resume_accepts_plain_session_id() -> Result<()> {
         dry_run: false,
         provider_args: Vec::new(),
     };
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_resume_profile_builds_prompt_invocation_and_validates_prompt() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"demo/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Demo\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    let profile = app
+        .loaded
+        .config
+        .profiles
+        .get_mut("default")
+        .expect("default profile");
+    profile.prompt_assembler = Some("demo/prompt".into());
+    profile.prompt_assembler_args = vec!["one".into(), "two".into()];
+
+    let (prompt_invocation, has_pre_snippets) =
+        app.resolve_resume_profile(Some("default"), "codex")?;
+
+    assert!(has_pre_snippets);
+    let invocation = prompt_invocation.expect("prompt invocation");
+    assert_eq!(invocation.name, "demo/prompt");
+    assert_eq!(invocation.args, vec!["one".to_string(), "two".to_string()]);
+    assert!(app.prompt.is_some());
+    Ok(())
+}
+
+#[test]
+fn resume_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
+    let (_temp, mut app, mut summary) = build_app_fixture(Vec::new())?;
+    summary.path = PathBuf::from("/");
+    app.db
+        .upsert_session(&SessionIngest::new(summary.clone(), Vec::new()))?;
+
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("default".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_when_not_emitting() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: None,
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: false,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
     app.resume(&cmd)?;
     Ok(())
 }
@@ -766,6 +853,63 @@ fn ensure_prompt_available_errors_when_disabled() -> Result<()> {
         err.to_string().contains("prompt-assembler is disabled"),
         "unexpected error: {err:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn ensure_prompt_available_errors_when_existing_prompt_feature_is_disabled() -> Result<()> {
+    let (_temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    app.prompt = Some(PromptAssembler::new(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    }));
+    app.loaded.config.features.prompt_assembler = None;
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("prompt lookup should fail when assembler disabled");
+    assert!(err.to_string().contains("prompt-assembler is disabled"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_prompt_available_errors_when_prompt_name_missing() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"other/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Other\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("missing prompt should error");
+    assert!(
+        err.to_string()
+            .contains("prompt assembler prompt 'demo/prompt' not found")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_prompt_available_surfaces_unavailable_prompt_assembler() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(&temp, "#!/bin/sh\nexit 1\n")?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("unavailable prompt assembler should fail");
+    assert!(err.to_string().contains("prompt assembler unavailable"));
     Ok(())
 }
 
@@ -1269,6 +1413,36 @@ fn run_doctor_reports_missing_session_root() -> Result<()> {
     run_doctor(&app.loaded, &app.db)?;
     drop(app);
     temp.close()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn run_doctor_reports_error_diag_missing_binary_and_prompt_ready() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"demo/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Demo\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+
+    let diagnostic = ConfigDiagnostic {
+        level: DiagnosticLevel::Error,
+        message: "broken".into(),
+    };
+    let (_fixture_temp, mut app, _summary) = build_app_fixture(vec![diagnostic])?;
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    app.loaded
+        .config
+        .providers
+        .get_mut("codex")
+        .expect("codex provider")
+        .bin = "tx-tests-missing-binary-coverage-branch".into();
+
+    run_doctor(&app.loaded, &app.db)?;
     Ok(())
 }
 

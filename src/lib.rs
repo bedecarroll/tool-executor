@@ -457,10 +457,7 @@ provider = "alt"
 
         let err = run(&cli).expect_err("expected provider mismatch error");
         let message = err.to_string();
-        assert!(
-            message.contains("provider mismatch"),
-            "unexpected error: {message}"
-        );
+        assert!(message.contains("provider mismatch"));
 
         if let Some(value) = original_data {
             unsafe { std::env::set_var("TX_DATA_DIR", value) };

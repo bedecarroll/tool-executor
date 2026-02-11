@@ -221,6 +221,30 @@ pub struct SelfUpdateCommand {
 mod tests {
     use super::*;
 
+    fn into_search(command: Command) -> Option<SearchCommand> {
+        if let Command::Search(cmd) = command {
+            Some(cmd)
+        } else {
+            None
+        }
+    }
+
+    fn into_resume(command: Command) -> Option<ResumeCommand> {
+        if let Command::Resume(cmd) = command {
+            Some(cmd)
+        } else {
+            None
+        }
+    }
+
+    fn into_config_default(command: Command) -> Option<ConfigDefaultCommand> {
+        if let Command::Config(ConfigCommand::Default(cmd)) = command {
+            Some(cmd)
+        } else {
+            None
+        }
+    }
+
     #[test]
     fn parse_search_with_full_text_role_and_since() {
         let cli = Cli::try_parse_from([
@@ -237,9 +261,7 @@ mod tests {
         ])
         .expect("parse search command");
 
-        let Command::Search(cmd) = cli.command.expect("search command") else {
-            panic!("expected search command");
-        };
+        let cmd = cli.command.and_then(into_search).expect("search command");
         assert!(cmd.full_text);
         assert_eq!(cmd.term.as_deref(), Some("context"));
         assert_eq!(cmd.role.as_deref(), Some("user"));
@@ -282,9 +304,7 @@ mod tests {
         ])
         .expect("parse resume");
 
-        let Command::Resume(cmd) = cli.command.expect("resume command") else {
-            panic!("expected resume command");
-        };
+        let cmd = cli.command.and_then(into_resume).expect("resume command");
         assert_eq!(cmd.session_id, "sess-1");
         assert!(cmd.emit_command);
         assert_eq!(cmd.provider_args, vec!["--flag", "value"]);
@@ -294,18 +314,26 @@ mod tests {
     fn parse_config_default_raw_flag() {
         let cli = Cli::try_parse_from(["tx", "config", "default", "--raw"])
             .expect("parse config default");
-        let Command::Config(ConfigCommand::Default(cmd)) = cli.command.expect("config command")
-        else {
-            panic!("expected config default command");
-        };
+        let cmd = cli
+            .command
+            .and_then(into_config_default)
+            .expect("config default command");
         assert!(cmd.raw);
     }
 
     #[test]
     fn parse_stats_codex() {
         let cli = Cli::try_parse_from(["tx", "stats", "codex"]).expect("parse stats");
-        let Command::Stats(StatsCommand::Codex) = cli.command.expect("stats command") else {
-            panic!("expected stats command");
-        };
+        assert!(
+            cli.command
+                .is_some_and(|command| matches!(command, Command::Stats(StatsCommand::Codex)))
+        );
+    }
+
+    #[test]
+    fn command_extractors_return_none_for_mismatch() {
+        assert!(into_search(Command::Stats(StatsCommand::Codex)).is_none());
+        assert!(into_resume(Command::Stats(StatsCommand::Codex)).is_none());
+        assert!(into_config_default(Command::Stats(StatsCommand::Codex)).is_none());
     }
 }

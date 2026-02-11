@@ -859,9 +859,35 @@ mod tests {
     #[test]
     fn raw_stdin_mode_rejects_unknown_value() {
         let err = serde_json::from_str::<RawStdinMode>("\"weird\"").unwrap_err();
-        assert!(
-            err.to_string().contains("unknown variant"),
-            "unexpected error: {err}"
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn raw_stdin_mode_empty_token_defaults_to_pipe() {
+        let mode = RawStdinMode::parse_token("").expect("empty token should parse");
+        assert!(matches!(mode.into_mode(), StdinMode::Pipe));
+    }
+
+    #[test]
+    fn raw_snippets_into_snippets_maps_pre_and_post_entries() {
+        let mut pre = IndexMap::new();
+        pre.insert("setup".to_string(), "echo pre".to_string());
+        let mut post = IndexMap::new();
+        post.insert("teardown".to_string(), "echo post".to_string());
+        let snippets = RawSnippets { pre, post }.into_snippets();
+        assert_eq!(
+            snippets
+                .pre
+                .get("setup")
+                .map(|snippet| snippet.command.as_str()),
+            Some("echo pre")
+        );
+        assert_eq!(
+            snippets
+                .post
+                .get("teardown")
+                .map(|snippet| snippet.command.as_str()),
+            Some("echo post")
         );
     }
 
@@ -889,10 +915,10 @@ mod tests {
             cmd: WrapperCommandSpec::String("echo hello".into()),
         };
         let config = wrapper.into_wrapper("shellwrap".into())?;
-        match config.mode {
-            WrapperMode::Shell { command } => assert_eq!(command, "echo hello"),
-            WrapperMode::Exec { .. } => panic!("expected shell mode"),
-        }
+        assert!(matches!(
+            config.mode,
+            WrapperMode::Shell { ref command } if command == "echo hello"
+        ));
         Ok(())
     }
 
@@ -903,10 +929,11 @@ mod tests {
             cmd: WrapperCommandSpec::List(vec!["ls".into(), "-la".into()]),
         };
         let config = wrapper.into_wrapper("execwrap".into())?;
-        match config.mode {
-            WrapperMode::Exec { argv } => assert_eq!(argv, vec!["ls", "-la"]),
-            WrapperMode::Shell { .. } => panic!("expected exec mode"),
-        }
+        assert!(matches!(
+            config.mode,
+            WrapperMode::Exec { ref argv }
+                if argv.len() == 2 && argv[0] == "ls" && argv[1] == "-la"
+        ));
         Ok(())
     }
 
@@ -920,6 +947,19 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("wrapper 'bad' sets shell=true but cmd is not a string")
+        );
+    }
+
+    #[test]
+    fn raw_wrapper_into_wrapper_reports_exec_type_mismatch() {
+        let wrapper = RawWrapper {
+            shell: Some(false),
+            cmd: WrapperCommandSpec::String("echo hi".into()),
+        };
+        let err = wrapper.into_wrapper("bad-exec".into()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("wrapper 'bad-exec' expects cmd to be an array when shell=false")
         );
     }
 

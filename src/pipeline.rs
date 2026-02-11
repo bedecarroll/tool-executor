@@ -1093,15 +1093,11 @@ mod tests {
             },
         };
         let invocation = render_wrapper(&shell_wrapper, &ctx).expect("shell wrapper");
-        match invocation {
-            Invocation::Shell { command } => {
-                assert_eq!(
-                    command,
-                    "wrapper 'ls | cat' --session sess-1 --provider codex"
-                );
-            }
-            Invocation::Exec { .. } => panic!("expected shell invocation, got exec"),
-        }
+        assert!(matches!(
+            invocation,
+            Invocation::Shell { ref command }
+                if command == "wrapper 'ls | cat' --session sess-1 --provider codex"
+        ));
 
         let exec_wrapper = WrapperConfig {
             name: "exec".into(),
@@ -1116,15 +1112,16 @@ mod tests {
             },
         };
         let invocation = render_wrapper(&exec_wrapper, &ctx).expect("exec wrapper");
-        match invocation {
-            Invocation::Exec { argv } => {
-                assert_eq!(
-                    argv,
-                    vec!["exec", "ls | cat", "abc123", "--cwd", "/tmp/project"]
-                );
-            }
-            Invocation::Shell { .. } => panic!("expected exec invocation, got shell"),
-        }
+        assert!(matches!(
+            invocation,
+            Invocation::Exec { ref argv }
+                if argv.len() == 5
+                    && argv[0] == "exec"
+                    && argv[1] == "ls | cat"
+                    && argv[2] == "abc123"
+                    && argv[3] == "--cwd"
+                    && argv[4] == "/tmp/project"
+        ));
 
         let missing_wrapper = WrapperConfig {
             name: "missing".into(),

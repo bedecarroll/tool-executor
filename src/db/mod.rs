@@ -1419,9 +1419,61 @@ mod tests {
     }
 
     #[test]
+    fn database_open_rejects_newer_schema_versions() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("future.sqlite3");
+        let conn = Connection::open(db_path.path())?;
+        conn.execute_batch("PRAGMA user_version = 999;")?;
+        drop(conn);
+
+        let Err(err) = Database::open(db_path.path()) else {
+            panic!("future schema should fail");
+        };
+        assert!(
+            err.to_string()
+                .contains("is newer than this binary supports")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fetch_transcript_returns_none_for_unknown_identifier() -> Result<()> {
         let db = create_db()?;
         assert!(db.fetch_transcript("missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_transcript_by_id_returns_messages() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "direct-id".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("By ID".into()),
+            path: PathBuf::from("direct-id.jsonl"),
+            uuid: Some("direct-id-uuid".into()),
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "hello", None, Some(now));
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+        let transcript = db
+            .fetch_transcript("direct-id")?
+            .expect("expected transcript by id");
+        assert_eq!(transcript.session.id, "direct-id");
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content, "hello");
         Ok(())
     }
 

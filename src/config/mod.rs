@@ -508,24 +508,9 @@ mod tests {
     #[test]
     fn resolve_default_directories_returns_paths() -> Result<()> {
         let (config, data, cache) = resolve_default_directories()?;
-        assert!(
-            path_contains_component(&config, APP_NAME),
-            "config dir {} should contain '{}'",
-            config.display(),
-            APP_NAME
-        );
-        assert!(
-            path_contains_component(&data, APP_NAME),
-            "data dir {} should contain '{}'",
-            data.display(),
-            APP_NAME
-        );
-        assert!(
-            path_contains_component(&cache, APP_NAME),
-            "cache dir {} should contain '{}'",
-            cache.display(),
-            APP_NAME
-        );
+        assert!(path_contains_component(&config, APP_NAME));
+        assert!(path_contains_component(&data, APP_NAME));
+        assert!(path_contains_component(&cache, APP_NAME));
         Ok(())
     }
 
@@ -761,10 +746,7 @@ list = \"value\"
         let err =
             load(Some(config_dir.path())).expect_err("merge should fail for non-array append");
         let message = format!("{err:?}");
-        assert!(
-            message.contains("cannot append to non-array key 'list'"),
-            "unexpected error: {message}"
-        );
+        assert!(message.contains("cannot append to non-array key 'list'"));
 
         Ok(())
     }
@@ -782,10 +764,7 @@ list = \"value\"
         };
 
         ensure_default_layout(&dirs)?;
-        assert!(
-            !dirs.config_dir.parent().unwrap().join(DROPIN_DIR).exists(),
-            "drop-in directory should not be created when config path is a file"
-        );
+        assert!(!dirs.config_dir.parent().unwrap().join(DROPIN_DIR).exists());
         Ok(())
     }
 
@@ -807,8 +786,7 @@ list = \"value\"
         let err = ensure_default_layout(&dirs).unwrap_err();
         assert!(
             err.to_string()
-                .contains("failed to write default configuration"),
-            "unexpected error: {err:?}"
+                .contains("failed to write default configuration")
         );
         Ok(())
     }
@@ -816,10 +794,7 @@ list = \"value\"
     #[test]
     fn default_template_contains_provider() {
         let template = default_template();
-        assert!(
-            template.contains("provider = \"codex\""),
-            "expected bundled template to include provider stanza"
-        );
+        assert!(template.contains("provider = \"codex\""));
     }
 
     #[test]
@@ -832,10 +807,7 @@ list = \"value\"
         };
 
         let rendered = bundled_default_config(&dirs);
-        assert!(
-            rendered.contains("provider = \"codex\""),
-            "expected rendered template to include provider stanza"
-        );
+        assert!(rendered.contains("provider = \"codex\""));
         Ok(())
     }
 
@@ -848,10 +820,7 @@ list = \"value\"
         std::fs::write(config_dir.child("config.toml").path(), "123")?;
 
         let err = load(Some(config_dir.path())).unwrap_err();
-        assert!(
-            err.to_string().contains("failed to parse"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("failed to parse"));
         Ok(())
     }
 
@@ -955,16 +924,12 @@ list = \"value\"
         assert!(loaded.directories.data_dir.exists());
         assert!(loaded.directories.cache_dir.exists());
         assert!(loaded.directories.config_dir.join(MAIN_CONFIG).is_file());
-        assert!(
-            !loaded.directories.config_dir.join(DROPIN_DIR).exists(),
-            "drop-in directory should be created lazily"
-        );
+        assert!(!loaded.directories.config_dir.join(DROPIN_DIR).exists());
         assert!(
             loaded
                 .sources
                 .iter()
-                .any(|src| matches!(src.kind, ConfigSourceKind::Main)),
-            "expected main config source"
+                .any(|src| matches!(src.kind, ConfigSourceKind::Main))
         );
 
         drop(loaded);
