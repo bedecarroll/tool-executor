@@ -378,10 +378,8 @@ impl SessionEntry {
         if let Some(label) = self.label.as_deref() {
             return format_rollout_label(label).unwrap_or_else(|| label.to_string());
         }
-        if let Some(last) = self.id.rsplit('/').next() {
-            return format_rollout_label(last).unwrap_or_else(|| last.to_string());
-        }
-        self.id.clone()
+        let last = self.id.rsplit('/').next().unwrap_or_default();
+        format_rollout_label(last).unwrap_or_else(|| last.to_string())
     }
 
     fn snippet_line(&self) -> Option<String> {
@@ -400,13 +398,11 @@ impl SessionEntry {
     }
 
     fn short_session_tag(&self) -> String {
-        if let Some(last) = self.id.rsplit('/').next() {
-            if let Some(tag) = rollout_suffix(last) {
-                return format!("#{}", truncate_len(&tag, 12));
-            }
-            return format!("#{}", truncate_len(last, 12));
+        let last = self.id.rsplit('/').next().unwrap_or_default();
+        if let Some(tag) = rollout_suffix(last) {
+            return format!("#{}", truncate_len(&tag, 12));
         }
-        format!("#{}", truncate_len(&self.id, 12))
+        format!("#{}", truncate_len(last, 12))
     }
 }
 
@@ -720,15 +716,13 @@ impl<'ctx> AppState<'ctx> {
         let mut prompt_warning: Option<String> = None;
 
         if let Some(prompt) = self.ctx.prompt.as_mut() {
-            match prompt.refresh(false) {
-                PromptStatus::Ready { profiles, .. } => {
-                    available_prompts.extend(profiles.iter().map(|vp| vp.name.clone()));
-                    prompt_profiles = profiles;
-                }
-                PromptStatus::Unavailable { message } => {
-                    prompt_warning = Some(message);
-                }
-                PromptStatus::Disabled => {}
+            let status = prompt.refresh(false);
+            if let PromptStatus::Ready { profiles } = &status {
+                available_prompts.extend(profiles.iter().map(|vp| vp.name.clone()));
+                prompt_profiles.clone_from(profiles);
+            }
+            if let PromptStatus::Unavailable { message } = status {
+                prompt_warning = Some(message);
             }
         }
 
@@ -744,10 +738,7 @@ impl<'ctx> AppState<'ctx> {
             let profile_name = name.clone();
             let key = profile_name.to_ascii_lowercase();
             if !seen.insert(key) {
-                warn!(
-                    entry = %profile_name,
-                    "duplicate profile name '{profile_name}' detected; keeping first definition"
-                );
+                warn!(entry = %profile_name, "duplicate profile name '{profile_name}' detected; keeping first definition");
                 continue;
             }
             let mut prompt_available = true;
@@ -795,10 +786,7 @@ impl<'ctx> AppState<'ctx> {
             let provider_name = name.clone();
             let key = provider_name.to_ascii_lowercase();
             if !seen.insert(key) {
-                warn!(
-                    entry = %provider_name,
-                    "provider entry '{provider_name}' conflicts with an existing profile; skipping"
-                );
+                warn!(entry = %provider_name, "provider entry '{provider_name}' conflicts with an existing profile; skipping");
                 continue;
             }
             let command = if provider.flags.is_empty() {
@@ -830,10 +818,7 @@ impl<'ctx> AppState<'ctx> {
                     let profile_name = vp.key.clone();
                     let key = profile_name.to_ascii_lowercase();
                     if !seen.insert(key) {
-                        warn!(
-                            entry = %profile_name,
-                            "virtual profile '{profile_name}' conflicts with an existing entry; skipping"
-                        );
+                        warn!(entry = %profile_name, "virtual profile '{profile_name}' conflicts with an existing entry; skipping");
                         continue;
                     }
                     self.profiles.push(ProfileEntry {
@@ -941,13 +926,15 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn load_sessions(&self) -> Result<Vec<SessionEntry>> {
-        let queries = self.ctx.db.list_sessions(
-            self.provider_filter.as_deref(),
-            true,
-            None,
-            Some(SESSION_LIMIT),
-        )?;
-        Ok(queries.into_iter().map(SessionEntry::from_query).collect())
+        self.ctx
+            .db
+            .list_sessions(
+                self.provider_filter.as_deref(),
+                true,
+                None,
+                Some(SESSION_LIMIT),
+            )
+            .map(|queries| queries.into_iter().map(SessionEntry::from_query).collect())
     }
 
     fn search_full_text_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
@@ -964,7 +951,8 @@ impl<'ctx> AppState<'ctx> {
                 continue;
             }
 
-            let mut entry = if let Some(summary) = self.ctx.db.session_summary(&hit.session_id)? {
+            let mut entry = SessionEntry::from_hit(hit.clone());
+            if let Some(summary) = self.ctx.db.session_summary(&hit.session_id)? {
                 let query = SessionQuery {
                     id: summary.id.clone(),
                     provider: summary.provider.clone(),
@@ -974,10 +962,8 @@ impl<'ctx> AppState<'ctx> {
                     actionable: summary.actionable,
                     last_active: summary.last_active,
                 };
-                SessionEntry::from_query(query)
-            } else {
-                SessionEntry::from_hit(hit.clone())
-            };
+                entry = SessionEntry::from_query(query);
+            }
 
             if entry.first_prompt.is_none() {
                 entry.snippet.clone_from(&hit.snippet);
@@ -1030,10 +1016,11 @@ impl<'ctx> AppState<'ctx> {
                 Ok(false)
             }
             (KeyCode::Backspace, mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                if !self.filter.is_empty() {
-                    self.filter.pop();
-                    self.refresh_entries()?;
+                if self.filter.is_empty() {
+                    return Ok(false);
                 }
+                self.filter.pop();
+                self.refresh_entries()?;
                 Ok(false)
             }
             (KeyCode::Char(ch), mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
@@ -1323,7 +1310,7 @@ impl<'ctx> AppState<'ctx> {
                 self.ctx.db.fetch_transcript(&session.id),
             ),
             Entry::Profile(profile) => {
-                let mut lines = match profile.kind {
+                let lines = match profile.kind {
                     ProfileKind::Virtual | ProfileKind::Provider => {
                         build_markdown_profile_preview(&profile)
                     }
@@ -1343,9 +1330,6 @@ impl<'ctx> AppState<'ctx> {
                         lines
                     }
                 };
-                if lines.is_empty() {
-                    lines.push(format!("Provider: {}", profile.provider));
-                }
                 let styled = markdown_lines_to_text(&lines);
                 Preview {
                     lines,

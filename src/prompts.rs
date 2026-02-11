@@ -20,7 +20,6 @@ pub struct VirtualProfile {
 
 #[derive(Debug)]
 pub enum PromptStatus {
-    Disabled,
     Ready { profiles: Vec<VirtualProfile> },
     Unavailable { message: String },
 }
@@ -180,9 +179,10 @@ fn extract_profile_lines(detail: &Value) -> Vec<String> {
                 lines.extend(content.lines().map(str::to_string));
             }
         }
-        if !lines.is_empty() {
-            return lines;
+        if lines.is_empty() {
+            return Vec::new();
         }
+        return lines;
     }
 
     Vec::new()
@@ -387,20 +387,17 @@ exit 1
         let _guard = set_path(&dir);
         let mut assembler = PromptAssembler::new(cfg.clone());
         let status = assembler.refresh(true);
-        match status {
-            PromptStatus::Unavailable { message } => {
-                assert!(message.contains("prompt assembler unavailable"));
-            }
-            other => panic!("unexpected status: {other:?}"),
-        }
+        assert!(matches!(
+            &status,
+            PromptStatus::Unavailable { message }
+                if message.contains("prompt assembler unavailable")
+        ));
     }
 
     #[cfg(unix)]
     #[test]
     fn fetch_prompts_enriches_entries_with_detail_fallbacks() -> Result<()> {
-        let temp = TempDir::new()?;
-        let pa = temp.child("pa");
-        pa.write_str(
+        let (temp, cfg) = with_fake_pa(
             r#"#!/bin/sh
 if [ "$1" = "list" ]; then
   printf '{"prompts":[{"name":"demo"}]}'
@@ -412,18 +409,9 @@ if [ "$1" = "show" ]; then
 fi
 exit 1
 "#,
-        )?;
-        #[cfg(unix)]
-        {
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(pa.path(), perms)?;
-        }
+        );
 
         let _guard = set_path(&temp);
-
-        let cfg = PromptAssemblerConfig {
-            namespace: "tests".into(),
-        };
         let profiles = fetch_prompts(&cfg)?;
         assert_eq!(profiles.len(), 1);
         let profile = &profiles[0];
@@ -499,6 +487,17 @@ exit 1
         assert!(lines.is_empty());
     }
 
+    #[test]
+    fn extract_profile_lines_returns_empty_when_parts_lack_content() {
+        let detail = json!({
+            "profile": {
+                "parts": [{"type": "text"}]
+            }
+        });
+        let lines = extract_profile_lines(&detail);
+        assert!(lines.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn fetch_prompts_skips_entries_without_name() -> Result<()> {
@@ -566,13 +565,12 @@ exit 1
         );
         let _guard = set_path(&dir);
         let mut assembler = PromptAssembler::new(cfg);
-        match assembler.refresh(true) {
-            PromptStatus::Ready { profiles } => {
-                assert_eq!(profiles.len(), 1);
-                assert_eq!(profiles[0].name, "demo");
-            }
-            other => panic!("unexpected status: {other:?}"),
-        }
+        let status = assembler.refresh(true);
+        assert!(matches!(
+            &status,
+            PromptStatus::Ready { profiles }
+                if profiles.len() == 1 && profiles[0].name == "demo"
+        ));
     }
 
     #[test]

@@ -96,19 +96,9 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
     for source in &sources {
         let contents = fs::read_to_string(&source.path)
             .with_context(|| format!("failed to read {}", source.path.display()))?;
-        let value: Value = toml::from_str(&contents)
+        let table: toml::map::Map<String, Value> = toml::from_str(&contents)
             .with_context(|| format!("failed to parse {}", source.path.display()))?;
-        let table = value.as_table().cloned().ok_or_else(|| {
-            eyre!(
-                "{} must contain a TOML table at the top level",
-                source.path.display()
-            )
-        })?;
-        if value
-            .as_table()
-            .and_then(|table| table.get("preview_filter"))
-            .is_some()
-        {
+        if table.get("preview_filter").is_some() {
             saw_preview_filter = true;
         }
         merge::merge_tables(&mut merged_table, table, Some(&source.path))?;
@@ -482,10 +472,7 @@ mod tests {
         assert!(main.exists(), "expected main config file to exist");
         let contents = fs::read_to_string(&main)?;
         assert!(contents.contains("provider = \"codex\""));
-        assert!(
-            !dirs.config_dir.join(DROPIN_DIR).exists(),
-            "drop-in directory should not be created until needed"
-        );
+        assert!(!dirs.config_dir.join(DROPIN_DIR).exists());
         Ok(())
     }
 
@@ -663,11 +650,13 @@ mod tests {
         fs::write(
             config_dir.child("config.toml").path(),
             "provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n",
-        )?;
+        )
+        .expect("write main config");
         fs::write(
             conf_d.child("00-extra.toml").path(),
             "[providers.extra]\nbin = \"echo\"\n",
-        )?;
+        )
+        .expect("write drop-in config");
 
         let data_override = temp.child("data");
         data_override.create_dir_all()?;
@@ -690,14 +679,17 @@ mod tests {
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        config_dir.child("config.toml").write_str(
-            "\
+        config_dir
+            .child("config.toml")
+            .write_str(
+                "\
 preview_filter = \"glow\"
 provider = \"echo\"
 [providers.echo]
 bin = \"echo\"
 ",
-        )?;
+            )
+            .expect("write config");
 
         let loaded = load(Some(config_dir.path()))?;
         let merged_table = loaded
@@ -721,14 +713,17 @@ bin = \"echo\"
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        config_dir.child(MAIN_CONFIG).write_str(
-            "\
+        config_dir
+            .child(MAIN_CONFIG)
+            .write_str(
+                "\
 provider = \"echo\"
 [providers.echo]
 bin = \"echo\"
 list = \"value\"
 ",
-        )?;
+            )
+            .expect("write main config");
         let dropins = config_dir.child(DROPIN_DIR);
         dropins.create_dir_all()?;
         dropins
@@ -817,7 +812,7 @@ list = \"value\"
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        std::fs::write(config_dir.child("config.toml").path(), "123")?;
+        std::fs::write(config_dir.child("config.toml").path(), "\"not-a-table\"")?;
 
         let err = load(Some(config_dir.path())).unwrap_err();
         assert!(err.to_string().contains("failed to parse"));

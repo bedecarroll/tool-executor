@@ -237,25 +237,25 @@ impl<'a> Indexer<'a> {
             };
             state.saw_any_record = true;
 
-            if state.wrapper.is_none() {
-                let wrapper = value
-                    .get("wrapper")
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        value
-                            .get("payload")
-                            .and_then(|payload| payload.get("wrapper"))
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| {
-                        value
-                            .get("metadata")
-                            .and_then(|meta| meta.get("wrapper"))
-                            .and_then(Value::as_str)
-                    });
-                if let Some(name) = wrapper {
-                    state.wrapper = Some(name.to_string());
-                }
+            let wrapper = value
+                .get("wrapper")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    value
+                        .get("payload")
+                        .and_then(|payload| payload.get("wrapper"))
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| {
+                    value
+                        .get("metadata")
+                        .and_then(|meta| meta.get("wrapper"))
+                        .and_then(Value::as_str)
+                });
+            if state.wrapper.is_none()
+                && let Some(name) = wrapper
+            {
+                state.wrapper = Some(name.to_string());
             }
 
             if state.model.is_none() {
@@ -558,40 +558,38 @@ fn extract_messages(value: &Value) -> Vec<(String, String)> {
         )
     };
 
-    if let Some(obj) = value.as_object() {
-        if let Some(typ) = obj.get("type").and_then(Value::as_str) {
-            match typ {
-                "event_msg" => {
-                    if let Some(payload) = obj.get("payload")
-                        && payload
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .is_some_and(|ty| ty == "user_message")
-                        && let Some(text) = extract_text(payload)
-                        && !is_tooling_warning(&text)
-                    {
-                        messages.push(("user".to_string(), text));
-                    }
+    if let Some(typ) = value.get("type").and_then(Value::as_str) {
+        match typ {
+            "event_msg" => {
+                if let Some(payload) = value.get("payload")
+                    && payload
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|ty| ty == "user_message")
+                    && let Some(text) = extract_text(payload)
+                    && !is_tooling_warning(&text)
+                {
+                    messages.push(("user".to_string(), text));
                 }
-                "response_item" | "message" => {
-                    let container = obj.get("payload").unwrap_or(value);
-                    if let Some(role) = container.get("role").and_then(Value::as_str)
-                        && let Some(text) = extract_text(container)
-                        && !is_tooling_warning(&text)
-                    {
-                        messages.push((role.to_string(), text));
-                    }
-                }
-                _ => {}
             }
+            "response_item" | "message" => {
+                let container = value.get("payload").unwrap_or(value);
+                if let Some(role) = container.get("role").and_then(Value::as_str)
+                    && let Some(text) = extract_text(container)
+                    && !is_tooling_warning(&text)
+                {
+                    messages.push((role.to_string(), text));
+                }
+            }
+            _ => {}
         }
+    }
 
-        if let Some(role) = obj.get("role").and_then(Value::as_str)
-            && let Some(text) = extract_text(value)
-            && !is_tooling_warning(&text)
-        {
-            messages.push((role.to_string(), text));
-        }
+    if let Some(role) = value.get("role").and_then(Value::as_str)
+        && let Some(text) = extract_text(value)
+        && !is_tooling_warning(&text)
+    {
+        messages.push((role.to_string(), text));
     }
 
     if messages.is_empty()
@@ -735,15 +733,15 @@ fn normalize_instruction_text(raw: &str) -> String {
 
 fn is_instruction_banner(message: &str, instructions_raw: Option<&str>) -> bool {
     let first_line = message.lines().map(str::trim).find(|line| !line.is_empty());
-    if let Some(first_line) = first_line {
-        let lower_first = first_line.to_ascii_lowercase();
-        if lower_first.starts_with("# agents.md instructions for ")
-            || lower_first.starts_with("agents.md instructions for ")
-            || lower_first.starts_with("# agents.md instructions")
-            || lower_first.starts_with("agents.md instructions")
-        {
-            return true;
-        }
+    let is_agents_header = first_line.is_some_and(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("# agents.md instructions for ")
+            || lower.starts_with("agents.md instructions for ")
+            || lower.starts_with("# agents.md instructions")
+            || lower.starts_with("agents.md instructions")
+    });
+    if is_agents_header {
+        return true;
     }
 
     let lower = message.to_ascii_lowercase();
@@ -842,7 +840,8 @@ mod tests {
         session_file.write_str(concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"# General guidance\\n\\nKeep things simple.\\n\"}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<user_instructions>\\n\\n# General guidance\\n\\nKeep things simple.\\n</user_instructions>\"}]}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -875,7 +874,8 @@ mod tests {
         session_file.write_str(concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"model\":\"o3-mini\"}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -897,7 +897,8 @@ mod tests {
             "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"# General guidance\\n\\nKeep things simple.\\n\"}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n<INSTRUCTIONS>\\n# General guidance\\n- Do not pre-optimize.\\n</INSTRUCTIONS>\"}]}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Real user question\"}]}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -926,7 +927,8 @@ mod tests {
         session_file.write_str(concat!(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/project\\n\\n# General guidance\\n- Do not pre-optimize.\\n\"}]}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Real user question\"}]}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -955,7 +957,8 @@ mod tests {
         session_file.write_str(concat!(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello world\"}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hi there\"}]}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -990,7 +993,8 @@ mod tests {
             "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.1\"}}\n",
             "{\"type\":\"event_msg\",\"timestamp\":\"2026-01-21T00:00:00Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":2,\"output_tokens\":5,\"reasoning_output_tokens\":1,\"total_tokens\":16}},\"rate_limits\":{\"primary\":{\"used_percent\":20,\"window_minutes\":60,\"resets_at\":1700000000}}}}\n",
             "{\"type\":\"event_msg\",\"timestamp\":\"2026-01-21T00:00:00Z\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"cached_input_tokens\":2,\"output_tokens\":5,\"reasoning_output_tokens\":1,\"total_tokens\":16}},\"rate_limits\":{\"primary\":{\"used_percent\":20,\"window_minutes\":60,\"resets_at\":1700000000}}}}\n",
-        ))?;
+        ))
+        .expect("write session log");
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -1027,7 +1031,8 @@ mod tests {
         let good = sessions_dir.child("good.jsonl");
         good.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-        )?;
+        )
+        .expect("write good session");
 
         let bad = sessions_dir.child("bad.jsonl");
         bad.write_str("{not-json}\n")?;
@@ -1072,7 +1077,8 @@ mod tests {
         let session_file = temp.child("session.jsonl");
         session_file.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Inline root\"}}\n",
-        )?;
+        )
+        .expect("write session");
 
         let provider = provider_with_root(session_file.path());
         let config = config_from_provider(provider);
@@ -1200,7 +1206,8 @@ mod tests {
         let session_file = sessions_dir.child("session.jsonl");
         session_file.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ping\"}}\n",
-        )?;
+        )
+        .expect("write session");
 
         let mut providers = IndexMap::new();
         providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
@@ -1248,7 +1255,8 @@ mod tests {
         let single = temp.child("single.jsonl");
         single.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ping\"}}\n",
-        )?;
+        )
+        .expect("write session");
 
         let mut providers = IndexMap::new();
         providers.insert(
@@ -1299,7 +1307,8 @@ mod tests {
         let session_file = sessions_dir.child("obsolete.jsonl");
         session_file.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-        )?;
+        )
+        .expect("write session");
 
         let mut providers = IndexMap::new();
         providers.insert("codex".into(), provider_with_root(sessions_dir.path()));
@@ -1469,7 +1478,8 @@ mod tests {
         let session_file = temp.child("session.jsonl");
         session_file.write_str(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-        )?;
+        )
+        .expect("write session");
 
         let provider = provider_with_root(session_file.path());
         let config = config_from_provider(provider);
@@ -1539,7 +1549,8 @@ mod tests {
             "\n",
             "  \n",
             "{\"type\":\"event_msg\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-        ))?;
+        ))
+        .expect("write session");
 
         let state = Indexer::collect_ingest_state("codex/wrapper.jsonl", session_file.path())?;
         assert_eq!(state.wrapper.as_deref(), Some("shellwrap"));
@@ -1549,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_empty_transcript_uses_instruction_only_placeholder() -> Result<()> {
+    fn handle_empty_transcript_uses_instruction_only_placeholder() {
         let mut messages = Vec::new();
         let mut first_prompt = None;
         Indexer::handle_empty_transcript(
@@ -1560,18 +1571,18 @@ mod tests {
             true,
             false,
             "codex/placeholder",
-        )?;
+        )
+        .expect("build placeholder");
         assert_eq!(messages.len(), 1);
         assert!(
             messages[0]
                 .content
                 .contains("Session bootstrapped (instructions only)")
         );
-        Ok(())
     }
 
     #[test]
-    fn handle_empty_transcript_truncates_long_preview() -> Result<()> {
+    fn handle_empty_transcript_truncates_long_preview() {
         let mut messages = Vec::new();
         let mut first_prompt = None;
         Indexer::handle_empty_transcript(
@@ -1582,11 +1593,11 @@ mod tests {
             false,
             true,
             "codex/long",
-        )?;
+        )
+        .expect("truncate preview");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content.len(), 240);
         assert_eq!(first_prompt.as_deref().map(str::len), Some(240));
-        Ok(())
     }
 
     #[test]
@@ -1603,6 +1614,30 @@ mod tests {
         let messages = extract_messages(&direct);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "user");
+    }
+
+    #[test]
+    fn extract_messages_reads_direct_role_when_type_is_unknown() {
+        let direct = json!({
+            "type": "unknown_type",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Direct path"}]
+        });
+        let messages = extract_messages(&direct);
+        assert_eq!(
+            messages,
+            vec![("assistant".to_string(), "Direct path".to_string())]
+        );
+    }
+
+    #[test]
+    fn extract_messages_returns_empty_for_unhandled_object_without_role() {
+        let value = json!({
+            "type": "unknown_type",
+            "payload": {"ignored": true}
+        });
+        let messages = extract_messages(&value);
+        assert!(messages.is_empty());
     }
 
     #[test]
@@ -1661,6 +1696,10 @@ mod tests {
 
     #[test]
     fn instruction_helpers_cover_non_banner_and_empty_summary_paths() {
+        assert!(is_instruction_banner(
+            "# AGENTS.md instructions for /tmp/project",
+            None
+        ));
         assert!(!is_instruction_banner("regular user message", None));
         assert!(is_instruction_banner(
             "regular user message",

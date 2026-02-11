@@ -1139,6 +1139,45 @@ fn handle_key_normal_covers_backspace_toggle_and_default_branch() -> Result<()> 
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn backspace_with_filter_refreshes_entries_and_clears_preview_cache() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("backspace-refresh.jsonl");
+    fs::File::create(&session_path)?.write_all(b"{\"event\":\"backspace\"}\n")?;
+    insert_session(&mut db, &session_path, "sess-backspace")?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    let _ = state.preview();
+    assert!(!state.preview_cache.is_empty());
+    state.filter = "x".into();
+    state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    assert!(state.filter.is_empty());
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?);
+    assert!(state.preview_cache.is_empty());
+    Ok(())
+}
+
 #[test]
 fn refresh_entries_clamps_selection_index() -> Result<()> {
     let temp = TempDir::new()?;
@@ -2630,6 +2669,38 @@ fn plan_for_session_builds_resume_plan() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn plan_for_session_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    insert_session(&mut db, Path::new("/"), "sess-root-path")?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let session_entry = state
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::Session(session) if session.id == "sess-root-path" => Some(session.clone()),
+            _ => None,
+        })
+        .expect("session entry");
+    let plan = state
+        .plan_for_session(&session_entry)?
+        .expect("resume plan");
+    assert!(plan.pipeline.contains("resume"));
+    Ok(())
+}
+
 #[test]
 fn plan_for_profile_marks_stdin_prompt() -> Result<()> {
     let temp = TempDir::new()?;
@@ -2655,6 +2726,61 @@ fn plan_for_profile_marks_stdin_prompt() -> Result<()> {
         let plan = state.plan_for_profile(&profile_entry)?.expect("plan");
         assert!(plan.needs_stdin_prompt);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_for_virtual_profile_uses_virtual_request_fields() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.snippets.pre.insert(
+        "prepare".into(),
+        Snippet {
+            name: "prepare".into(),
+            command: "printf PRE".into(),
+        },
+    );
+    config.snippets.post.insert(
+        "finish".into(),
+        Snippet {
+            name: "finish".into(),
+            command: "cat".into(),
+        },
+    );
+
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let profile = ProfileEntry {
+        display: "virtual/demo".into(),
+        provider: "codex".into(),
+        pre: vec!["prepare".into()],
+        post: vec!["finish".into()],
+        wrap: None,
+        description: Some("Virtual profile".into()),
+        tags: vec!["demo".into()],
+        inline_pre: Vec::new(),
+        stdin_supported: false,
+        prompt_assembler: None,
+        prompt_assembler_args: Vec::new(),
+        prompt_available: true,
+        kind: ProfileKind::Virtual,
+        preview_lines: vec!["Use this prompt".into()],
+    };
+
+    let plan = state.plan_for_profile(&profile)?.expect("plan");
+    assert!(plan.pipeline.contains("printf PRE"));
+    assert!(plan.pipeline.contains("echo hello"));
+    assert!(plan.pipeline.contains("cat"));
     Ok(())
 }
 

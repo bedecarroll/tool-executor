@@ -13,6 +13,9 @@ fn main() -> color_eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    const MINIMAL_CONFIG: &str =
+        "provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\nsession_roots = []\n";
+
     use assert_fs::TempDir;
     use tool_executor::{
         Cli,
@@ -33,14 +36,7 @@ mod tests {
         directories.ensure_all()?;
 
         // Provide the minimal config needed for a no-op run.
-        std::fs::write(
-            directories.config_dir.join("config.toml"),
-            r#"provider = "echo"
-[providers.echo]
-bin = "echo"
-session_roots = []
-"#,
-        )?;
+        std::fs::write(directories.config_dir.join("config.toml"), MINIMAL_CONFIG)?;
 
         let cli = Cli {
             config_dir: Some(directories.config_dir.clone()),
@@ -67,14 +63,7 @@ session_roots = []
         };
         directories.ensure_all()?;
 
-        std::fs::write(
-            directories.config_dir.join("config.toml"),
-            r#"provider = "echo"
-[providers.echo]
-bin = "echo"
-session_roots = []
-"#,
-        )?;
+        std::fs::write(directories.config_dir.join("config.toml"), MINIMAL_CONFIG)?;
 
         let cli = Cli {
             config_dir: Some(directories.config_dir.clone()),

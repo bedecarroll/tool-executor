@@ -1,6 +1,7 @@
 use super::*;
 use crate::cli::{
     ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
+    SelfUpdateCommand,
 };
 use crate::config::model::{
     Config, ConfigDiagnostic, Defaults, DiagnosticLevel, EnvVar, FeatureConfig, ProfileConfig,
@@ -113,6 +114,18 @@ fn prompt_for_stdin_with_reader_normalizes_crlf() -> Result<()> {
     let mut reader = Cursor::new("value\r\n");
     let captured = prompt_for_stdin_with_reader(Some("Label"), &mut reader)?;
     assert_eq!(captured, "value\n");
+    Ok(())
+}
+
+#[test]
+fn emit_terminal_title_with_writer_respects_terminal_mode() -> Result<()> {
+    let mut interactive = Vec::new();
+    emit_terminal_title_with_writer("demo", true, &mut interactive)?;
+    assert_eq!(interactive, b"\x1b]0;demo\x07");
+
+    let mut non_interactive = Vec::new();
+    emit_terminal_title_with_writer("demo", false, &mut non_interactive)?;
+    assert!(non_interactive.is_empty());
     Ok(())
 }
 
@@ -235,6 +248,23 @@ fn log_index_report_emits_warnings_for_errors() {
     };
     log_index_report(&report);
     report.errors.clear();
+    log_index_report(&report);
+}
+
+#[test]
+fn log_index_report_emits_debug_when_enabled() {
+    let report = IndexReport {
+        scanned: 3,
+        updated: 2,
+        skipped: 1,
+        removed: 0,
+        errors: Vec::new(),
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     log_index_report(&report);
 }
 
@@ -1090,6 +1120,54 @@ fn execute_plan_shell_captures_prompt_input() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn execute_plan_with_stdin_prompt_reads_input_for_terminal_stdin() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let output = temp.child("captured-from-helper.txt");
+    let script = temp.child(if cfg!(windows) {
+        "capture-helper.cmd"
+    } else {
+        "capture-helper.sh"
+    });
+    if cfg!(windows) {
+        script.write_str(
+            "@echo off\r\nsetlocal EnableExtensions EnableDelayedExpansion\r\n<nul set /p=\"%TX_CAPTURE_STDIN_DATA%\" > \"%~1\"\r\nexit /B 0\r\n",
+        )?;
+    } else {
+        script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms)?;
+        }
+    }
+
+    let command = format!("{} {}", script.path().display(), output.path().display());
+    let plan = PipelinePlan {
+        pipeline: command.clone(),
+        display: "capture-helper".into(),
+        friendly_display: "capture-helper".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell { command },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: true,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: Some("Prompt".into()),
+        cwd: temp.path().to_path_buf(),
+        prompt_assembler: None,
+    };
+
+    execute_plan_with_stdin_prompt(&plan, true, |_| Ok("payload-helper".into()))?;
+    assert_eq!(std::fs::read_to_string(output.path())?, "payload-helper");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn execute_plan_uses_prompt_assembler_output() -> Result<()> {
@@ -1638,5 +1716,85 @@ namespace = "pa"
 
     let mut app = App::bootstrap(&cli)?;
     app.ensure_prompt_available("demo/prompt")?;
+    Ok(())
+}
+
+#[test]
+fn normalize_target_version_tag_normalizes_input() {
+    assert_eq!(
+        normalize_target_version_tag(Some("1.2.3")).as_deref(),
+        Some("v1.2.3")
+    );
+    assert_eq!(
+        normalize_target_version_tag(Some("v1.2.3")).as_deref(),
+        Some("v1.2.3")
+    );
+    assert_eq!(normalize_target_version_tag(None), None);
+}
+
+#[test]
+fn self_update_message_formats_states() {
+    assert_eq!(self_update_message(true, "v1.0.0"), "Updated tx to v1.0.0");
+    assert_eq!(
+        self_update_message(false, "v1.0.0"),
+        "tx is already up to date (v1.0.0)"
+    );
+}
+
+#[test]
+fn run_self_update_with_passes_quiet_and_target_tag() -> Result<()> {
+    let cmd = SelfUpdateCommand {
+        version: Some("1.2.3".into()),
+    };
+    let mut seen_quiet = None;
+    let mut seen_tag = None;
+
+    let message = run_self_update_with(&cmd, true, |quiet, target_tag| {
+        seen_quiet = Some(quiet);
+        seen_tag = target_tag.map(ToString::to_string);
+        Ok((true, "v1.2.3".into()))
+    })?;
+
+    assert_eq!(seen_quiet, Some(true));
+    assert_eq!(seen_tag.as_deref(), Some("v1.2.3"));
+    assert_eq!(message, "Updated tx to v1.2.3");
+    Ok(())
+}
+
+#[test]
+fn run_self_update_with_propagates_updater_error() {
+    let cmd = SelfUpdateCommand {
+        version: Some("v2.0.0".into()),
+    };
+    let err = run_self_update_with(&cmd, false, |_quiet, _target_tag| Err(eyre!("boom")))
+        .expect_err("updater error should bubble up");
+    assert!(err.to_string().contains("boom"));
+}
+
+#[test]
+fn app_self_update_uses_test_backend() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let cmd = SelfUpdateCommand {
+        version: Some("v1.2.3".into()),
+    };
+    app.self_update(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_self_update_surfaces_test_backend_failure() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let _guard = EnvOverride::set_var("TX_SELF_UPDATE_TEST_FAIL", "1");
+    let cmd = SelfUpdateCommand {
+        version: Some("v1.2.3".into()),
+    };
+
+    let err = app
+        .self_update(&cmd)
+        .expect_err("test backend failure should bubble up");
+    assert!(
+        err.to_string()
+            .contains("self-update backend intentionally failed for tests")
+    );
     Ok(())
 }

@@ -95,9 +95,10 @@ mod tests {
             Value::Array(vec![Value::Integer(2)]),
         )]);
         merge_tables(&mut target, addition, None)?;
-        let Value::Array(values) = target.get("list").unwrap() else {
-            panic!("expected array");
-        };
+        let values = target
+            .get("list")
+            .and_then(Value::as_array)
+            .expect("expected array");
         assert_eq!(values, &vec![Value::Integer(1), Value::Integer(2)]);
         Ok(())
     }
@@ -122,9 +123,10 @@ mod tests {
             Value::Table(table(vec![("extra", Value::Integer(2))])),
         )]);
         merge_tables(&mut target, addition, None)?;
-        let Value::Table(inner) = target.get("outer").unwrap() else {
-            panic!("expected table");
-        };
+        let inner = target
+            .get("outer")
+            .and_then(Value::as_table)
+            .expect("expected table");
         assert_eq!(inner.get("inner"), Some(&Value::Integer(1)));
         assert_eq!(inner.get("extra"), Some(&Value::Integer(2)));
         Ok(())
@@ -140,9 +142,10 @@ mod tests {
 
         merge_tables(&mut target, addition, None)?;
 
-        let Value::Table(updated) = target.get("outer").unwrap() else {
-            panic!("expected table");
-        };
+        let updated = target
+            .get("outer")
+            .and_then(Value::as_table)
+            .expect("expected table");
         assert_eq!(updated.get("inner"), Some(&Value::Integer(1)));
         Ok(())
     }
@@ -155,9 +158,10 @@ mod tests {
             Value::Array(vec![Value::Integer(5)]),
         )]);
         merge_tables(&mut target, addition, None)?;
-        let Value::Array(values) = target.get("items").expect("array present") else {
-            panic!("expected array");
-        };
+        let values = target
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("expected array");
         assert_eq!(values, &vec![Value::Integer(5)]);
         Ok(())
     }
@@ -168,14 +172,8 @@ mod tests {
         let addition = table(vec![("items+".to_string(), Value::Integer(2))]);
         let err = merge_tables(&mut target, addition, Some(Path::new("extra.toml"))).unwrap_err();
         let message = format!("{err:?}");
-        assert!(
-            message.contains("value for 'items+' must be an array"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains("extra.toml"),
-            "expected path context in error message: {message}"
-        );
+        assert!(message.contains("value for 'items+' must be an array"));
+        assert!(message.contains("extra.toml"));
     }
 
     #[test]
@@ -187,10 +185,7 @@ mod tests {
         )]);
         let err = merge_tables(&mut target, addition, None).unwrap_err();
         let message = format!("{err:?}");
-        assert!(
-            message.contains("cannot append to non-array key 'items'"),
-            "unexpected error: {message}"
-        );
+        assert!(message.contains("cannot append to non-array key 'items'"));
     }
 
     #[test]

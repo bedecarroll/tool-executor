@@ -758,10 +758,7 @@ mod tests {
         let err = defaults
             .into_defaults()
             .expect_err("unknown search mode should fail");
-        assert!(
-            err.to_string().contains("unknown search_mode 'invalid'"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("unknown search_mode 'invalid'"));
     }
 
     #[test]
@@ -835,9 +832,13 @@ mod tests {
         assert!(
             messages
                 .iter()
-                .any(|msg| msg.contains("references unknown provider")),
-            "missing provider diagnostic not found: {messages:?}"
+                .any(|msg| msg.contains("references unknown provider"))
         );
+    }
+
+    #[test]
+    fn expand_optional_path_returns_none_for_blank_input() {
+        assert_eq!(expand_optional_path("   "), None);
     }
 
     #[test]

@@ -330,25 +330,29 @@ fn render_costs(stats: &CodexStats) {
     println!("  last 30d: {}", fmt_usd(token_stats.cost_totals.last_30d));
     println!("  all time: {}", fmt_usd(token_stats.cost_totals.all));
     if !token_stats.unpriced_models.is_empty() {
-        let mut models: Vec<_> = token_stats
-            .unpriced_models
-            .iter()
-            .filter(|model| !model.is_empty())
-            .cloned()
-            .collect();
-        models.sort();
-        let list = if models.is_empty() {
-            "unknown".to_string()
-        } else {
-            models.join(", ")
-        };
-        println!("  unpriced models: {list}");
-        println!(
-            "  unpriced tokens (all time): {}",
-            human_int(token_stats.unpriced_tokens.all)
-        );
+        render_unpriced_models(token_stats);
     }
     println!();
+}
+
+fn render_unpriced_models(token_stats: &TokenStats) {
+    let mut models: Vec<_> = token_stats
+        .unpriced_models
+        .iter()
+        .filter(|model| !model.is_empty())
+        .cloned()
+        .collect();
+    models.sort();
+    let list = if models.is_empty() {
+        "unknown".to_string()
+    } else {
+        models.join(", ")
+    };
+    println!("  unpriced models: {list}");
+    println!(
+        "  unpriced tokens (all time): {}",
+        human_int(token_stats.unpriced_tokens.all)
+    );
 }
 
 fn render_daily_totals(stats: &CodexStats) {
@@ -397,17 +401,17 @@ fn session_window(sessions: &[SessionSummary]) -> (Option<i64>, Option<i64>) {
             .started_at
             .or(session.created_at)
             .or(session.last_active);
-        if let Some(ts) = start {
-            first = Some(first.map_or(ts, |current| current.min(ts)));
-        }
+        first = start
+            .map(|ts| first.map_or(ts, |current| current.min(ts)))
+            .or(first);
 
         let end = session
             .last_active
             .or(session.started_at)
             .or(session.created_at);
-        if let Some(ts) = end {
-            last = Some(last.map_or(ts, |current| current.max(ts)));
-        }
+        last = end
+            .map(|ts| last.map_or(ts, |current| current.max(ts)))
+            .or(last);
     }
 
     (first, last)
@@ -644,30 +648,12 @@ fn render_rate_limits(
         fmt_dt(Some(latest_ts), offset)
     ));
 
-    let primary = parsed.get("primary");
-    if let Some(primary) = primary.and_then(Value::as_object) {
-        let used = display_value(primary.get("used_percent"));
-        let window = display_value(primary.get("window_minutes"));
-        let reset_dt = primary
-            .get("resets_at")
-            .and_then(parse_epoch)
-            .map_or_else(|| "unknown".to_string(), |ts| fmt_dt(Some(ts), offset));
-        lines.push(format!(
-            "  primary: used {used}% window {window}m resets {reset_dt}"
-        ));
+    if let Some(primary) = parsed.get("primary").and_then(Value::as_object) {
+        lines.push(format_rate_limit_line("primary", primary, offset));
     }
 
-    let secondary = parsed.get("secondary");
-    if let Some(secondary) = secondary.and_then(Value::as_object) {
-        let used = display_value(secondary.get("used_percent"));
-        let window = display_value(secondary.get("window_minutes"));
-        let reset_dt = secondary
-            .get("resets_at")
-            .and_then(parse_epoch)
-            .map_or_else(|| "unknown".to_string(), |ts| fmt_dt(Some(ts), offset));
-        lines.push(format!(
-            "  secondary: used {used}% window {window}m resets {reset_dt}"
-        ));
+    if let Some(secondary) = parsed.get("secondary").and_then(Value::as_object) {
+        lines.push(format_rate_limit_line("secondary", secondary, offset));
     }
 
     let credits = parsed.get("credits");
@@ -685,6 +671,20 @@ fn render_rate_limits(
     }
 
     lines
+}
+
+fn format_rate_limit_line(
+    label: &str,
+    section: &serde_json::Map<String, Value>,
+    offset: UtcOffset,
+) -> String {
+    let used = display_value(section.get("used_percent"));
+    let window = display_value(section.get("window_minutes"));
+    let reset_dt = section
+        .get("resets_at")
+        .and_then(parse_epoch)
+        .map_or_else(|| "unknown".to_string(), |ts| fmt_dt(Some(ts), offset));
+    format!("  {label}: used {used}% window {window}m resets {reset_dt}")
 }
 
 fn parse_epoch(value: &Value) -> Option<i64> {
@@ -907,13 +907,15 @@ mod tests {
     fn collect_session_activity_counts_tracks_turns_and_compactions() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("session.jsonl");
-        session_file.write_str(concat!(
-            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null}}\n",
-            "{not-json}\n",
-            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
-        ))?;
+        session_file
+            .write_str(concat!(
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null}}\n",
+                "{not-json}\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+            ))
+            .expect("write session");
 
         let summary = SessionSummary {
             id: "codex/session.jsonl".into(),
@@ -1127,11 +1129,13 @@ mod tests {
     fn session_activity_counts_skips_empty_lines() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("session.jsonl");
-        session_file.write_str(concat!(
-            "\n",
-            "   \n",
-            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
-        ))?;
+        session_file
+            .write_str(concat!(
+                "\n",
+                "   \n",
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5\"}}\n",
+            ))
+            .expect("write session");
 
         let counts = session_activity_counts(session_file.path());
         assert_eq!(counts.turns, 1);
@@ -1183,5 +1187,47 @@ mod tests {
     fn display_value_defaults_null_and_missing_to_unknown() {
         assert_eq!(display_value(None), "unknown");
         assert_eq!(display_value(Some(&Value::Null)), "unknown");
+    }
+
+    #[test]
+    fn display_value_formats_non_scalar_values() {
+        assert_eq!(
+            display_value(Some(&serde_json::json!([1, 2, 3]))),
+            "[1,2,3]"
+        );
+    }
+
+    #[test]
+    fn session_window_updates_first_and_last_when_timestamps_present() {
+        let sessions = vec![SessionSummary {
+            id: "x".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: None,
+            path: PathBuf::from("x.jsonl"),
+            uuid: None,
+            first_prompt: None,
+            actionable: true,
+            created_at: Some(10),
+            started_at: Some(20),
+            last_active: Some(30),
+            size: 1,
+            mtime: 30,
+        }];
+        let (first, last) = session_window(&sessions);
+        assert_eq!(first, Some(20));
+        assert_eq!(last, Some(30));
+    }
+
+    #[test]
+    fn render_rate_limits_includes_primary_and_secondary_sections() {
+        let payload = r#"{
+            "primary": {"used_percent": 10, "window_minutes": 60, "resets_at": 1700000000},
+            "secondary": {"used_percent": 5, "window_minutes": 15, "resets_at": 1700000100}
+        }"#;
+        let lines = render_rate_limits(Some(1), Some(payload), UtcOffset::UTC);
+        assert!(lines.iter().any(|line| line.contains("primary:")));
+        assert!(lines.iter().any(|line| line.contains("secondary:")));
     }
 }

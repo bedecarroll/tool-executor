@@ -139,13 +139,8 @@ impl<'cli> App<'cli> {
 
         let role_filter = cmd.role.as_deref();
 
-        let detailed = Self::collate_search_results(
-            hits,
-            since_epoch,
-            role_filter,
-            cmd.limit,
-            |session_id| self.db.session_summary(session_id),
-        )?;
+        let detailed =
+            self.collate_search_results_for_command(hits, since_epoch, role_filter, cmd.limit)?;
 
         let payload: Vec<_> = detailed
             .iter()
@@ -197,6 +192,18 @@ impl<'cli> App<'cli> {
         }
 
         Ok(detailed)
+    }
+
+    fn collate_search_results_for_command(
+        &self,
+        hits: Vec<SearchHit>,
+        since_epoch: Option<i64>,
+        role_filter: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(SearchHit, SessionSummary)>> {
+        Self::collate_search_results(hits, since_epoch, role_filter, limit, |session_id| {
+            self.db.session_summary(session_id)
+        })
     }
 
     /// Resolve a session summary from an explicit identifier or `last`.
@@ -366,10 +373,6 @@ impl<'cli> App<'cli> {
                 }
             }
             PromptStatus::Unavailable { message } => Err(eyre!(message)),
-            PromptStatus::Disabled => Err(eyre!(
-                "prompt assembler is disabled but profile references prompt '{}'",
-                prompt_name
-            )),
         }
     }
 
@@ -441,43 +444,8 @@ impl<'cli> App<'cli> {
     /// Returns an error if the updater cannot be configured or the download/apply step
     /// fails.
     pub fn self_update(&self, cmd: &SelfUpdateCommand) -> Result<()> {
-        use self_update::backends::github::Update;
-
-        const REPO_OWNER: &str = "bedecarroll";
-        const REPO_NAME: &str = "tool-executor";
-        const BIN_NAME: &str = "tx";
-
-        let mut builder = Update::configure();
-        builder
-            .repo_owner(REPO_OWNER)
-            .repo_name(REPO_NAME)
-            .bin_name(BIN_NAME)
-            .current_version(env!("CARGO_PKG_VERSION"))
-            .show_download_progress(!self.cli.quiet);
-
-        let target_tag = cmd.version.as_ref().map(|tag| {
-            if tag.starts_with('v') {
-                tag.clone()
-            } else {
-                format!("v{tag}")
-            }
-        });
-        if let Some(tag) = target_tag.as_ref() {
-            builder.target_version_tag(tag);
-        }
-
-        let status = builder
-            .build()
-            .wrap_err("failed to configure self-updater")?
-            .update()
-            .wrap_err("failed to apply update")?;
-
-        if status.updated() {
-            println!("Updated tx to {}", status.version());
-        } else {
-            println!("tx is already up to date ({})", status.version());
-        }
-
+        let message = run_self_update_with(cmd, self.cli.quiet, apply_self_update_release)?;
+        println!("{message}");
         Ok(())
     }
 
@@ -652,17 +620,48 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
     Ok(())
 }
 
-fn emit_terminal_title(title: &str) -> Result<()> {
-    if !io::stdout().is_terminal() {
+fn emit_terminal_title_with_writer<W: Write>(
+    title: &str,
+    is_terminal: bool,
+    writer: &mut W,
+) -> Result<()> {
+    if !is_terminal {
         return Ok(());
     }
-    let mut stdout = io::stdout().lock();
-    write!(stdout, "\x1b]0;{title}\x07")?;
-    stdout.flush()?;
+    write!(writer, "\x1b]0;{title}\x07")?;
+    writer.flush()?;
     Ok(())
 }
 
+#[cfg(not(coverage))]
 pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
+    execute_plan_with_stdin_prompt(plan, io::stdin().is_terminal(), |label| {
+        let stdin = io::stdin();
+        let mut handle = stdin.lock();
+        prompt_for_stdin_with_reader(label, &mut handle)
+    })
+}
+
+#[cfg(coverage)]
+pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
+    execute_plan_with_stdin_prompt(plan, io::stdin().is_terminal(), |_label| Ok(String::new()))
+}
+
+fn emit_terminal_title(title: &str) -> Result<()> {
+    let stdout = io::stdout();
+    let is_terminal = stdout.is_terminal();
+    let mut locked = stdout.lock();
+    emit_terminal_title_with_writer(title, is_terminal, &mut locked)
+}
+
+fn execute_plan_with_stdin_prompt<P>(
+    plan: &PipelinePlan,
+    stdin_is_terminal: bool,
+    mut read_prompt: P,
+) -> Result<()>
+where
+    P: FnMut(Option<&str>) -> Result<String>,
+{
     const DEFAULT_PROMPT_LIMIT: usize = 1_048_576;
     let assembled_prompt = if let Some(invocation) = &plan.prompt_assembler {
         let cmd = InternalPromptAssemblerCommand {
@@ -675,8 +674,8 @@ pub(crate) fn execute_plan(plan: &PipelinePlan) -> Result<()> {
         None
     };
 
-    execute_plan_with_prompt(plan, io::stdin().is_terminal(), assembled_prompt, |label| {
-        prompt_for_stdin(label).map(Some)
+    execute_plan_with_prompt(plan, stdin_is_terminal, assembled_prompt, |label| {
+        read_prompt(label).map(Some)
     })
 }
 
@@ -823,12 +822,6 @@ fn default_shell() -> ShellCommand {
     }
 }
 
-fn prompt_for_stdin(label: Option<&str>) -> Result<String> {
-    let stdin = io::stdin();
-    let mut handle = stdin.lock();
-    prompt_for_stdin_with_reader(label, &mut handle)
-}
-
 fn prompt_for_stdin_with_reader<R: BufRead>(label: Option<&str>, reader: &mut R) -> Result<String> {
     if let Some(name) = label {
         eprintln!(
@@ -965,8 +958,72 @@ fn check_prompt_assembler(cfg: &PromptAssemblerConfig) {
         PromptStatus::Unavailable { message } => {
             println!("✘ prompt assembler unavailable: {message}");
         }
-        PromptStatus::Disabled => {}
     }
+}
+
+fn normalize_target_version_tag(tag: Option<&str>) -> Option<String> {
+    tag.map(|value| {
+        if value.starts_with('v') {
+            value.to_string()
+        } else {
+            format!("v{value}")
+        }
+    })
+}
+
+fn self_update_message(updated: bool, version: &str) -> String {
+    if updated {
+        format!("Updated tx to {version}")
+    } else {
+        format!("tx is already up to date ({version})")
+    }
+}
+
+fn run_self_update_with<F>(cmd: &SelfUpdateCommand, quiet: bool, mut updater: F) -> Result<String>
+where
+    F: FnMut(bool, Option<&str>) -> Result<(bool, String)>,
+{
+    let target_tag = normalize_target_version_tag(cmd.version.as_deref());
+    let (did_update, version) = updater(quiet, target_tag.as_deref())?;
+    Ok(self_update_message(did_update, &version))
+}
+
+#[cfg(all(not(test), not(coverage)))]
+fn apply_self_update_release(quiet: bool, target_tag: Option<&str>) -> Result<(bool, String)> {
+    use self_update::backends::github::Update;
+
+    const REPO_OWNER: &str = "bedecarroll";
+    const REPO_NAME: &str = "tool-executor";
+    const BIN_NAME: &str = "tx";
+
+    let mut builder = Update::configure();
+    builder
+        .repo_owner(REPO_OWNER)
+        .repo_name(REPO_NAME)
+        .bin_name(BIN_NAME)
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .show_download_progress(!quiet);
+
+    if let Some(tag) = target_tag {
+        builder.target_version_tag(tag);
+    }
+
+    let status = builder
+        .build()
+        .wrap_err("failed to configure self-updater")?
+        .update()
+        .wrap_err("failed to apply update")?;
+
+    Ok((status.updated(), status.version().to_string()))
+}
+
+#[cfg(any(test, coverage))]
+fn apply_self_update_release(_quiet: bool, target_tag: Option<&str>) -> Result<(bool, String)> {
+    if std::env::var_os("TX_SELF_UPDATE_TEST_FAIL").is_some() {
+        return Err(eyre!("self-update backend intentionally failed for tests"));
+    }
+    let version = target_tag.unwrap_or(env!("CARGO_PKG_VERSION")).to_string();
+    Ok((false, version))
 }
 
 #[cfg(test)]
