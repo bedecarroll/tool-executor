@@ -544,12 +544,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn capture_arg_wraps_provider_launch_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _capture = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "prompt");
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: "/definitely/missing/provider-bin".into(),
+            pre_commands: Vec::new(),
+            provider_args: Vec::new(),
+            prompt_limit: 64,
+        };
+
+        let err = capture_arg(&cmd).expect_err("missing provider binary should fail");
+        assert!(err.to_string().contains("failed to launch provider 'demo'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_pre_pipeline_errors_when_input_exceeds_limit() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _capture = EnvOverride::remove("TX_CAPTURE_STDIN_DATA");
 
         let err = run_pre_pipeline(&["cat".into()], Some("toolong"), 3).unwrap_err();
         assert!(err.to_string().contains("exceeds configured limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_uses_default_shell_when_shell_env_missing() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _unset_shell = EnvOverride::remove("SHELL");
+        let output = run_pre_pipeline(&["cat".into()], Some("hello"), 64)?;
+        assert_eq!(output, "hello");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_wraps_spawn_failure_for_invalid_shell() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _bad_shell = EnvOverride::set_var("SHELL", "/definitely/missing/shell");
+        let err = run_pre_pipeline(&["cat".into()], Some("hello"), 64)
+            .expect_err("invalid shell should fail");
+        assert!(err.to_string().contains("failed to spawn pre pipeline"));
     }
 
     #[cfg(unix)]
@@ -619,10 +657,8 @@ fi
         let perms = fs::Permissions::from_mode(0o755);
         fs::set_permissions(pa.path(), perms)?;
 
-        let original_path = std::env::var("PATH").unwrap_or_default();
         let pa_dir = pa.path().parent().unwrap().display().to_string();
-        let new_path = format!("{pa_dir}:{original_path}");
-        let _path = EnvOverride::set_var("PATH", &new_path);
+        let _path = EnvOverride::set_var("PATH", &pa_dir);
         let _args_log = EnvOverride::set_path("PA_ARGS_LOG", args_log.path());
         let _output_log = EnvOverride::set_path("PA_OUTPUT_LOG", output_log.path());
 
@@ -697,6 +733,45 @@ exit 3
 
         let err = fetch_prompt_detail("demo").expect_err("show command should fail");
         assert!(err.to_string().contains("pa exited with status"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_wraps_spawn_errors_for_show() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa_dir = temp.path().display().to_string();
+        let _path = EnvOverride::set_var("PATH", &pa_dir);
+
+        let err = fetch_prompt_detail("demo").expect_err("missing pa should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to execute 'pa show --json demo'")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_wraps_invalid_json_from_show() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa = temp.child("pa");
+        pa.write_str(
+            "#!/bin/sh\nif [ \"$1\" = \"show\" ] && [ \"${2:-}\" = \"--json\" ]; then\n  printf '%s' '{bad-json}'\n  exit 0\nfi\nexit 1\n",
+        )
+        .expect("write script");
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa.path(), perms)?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = format!("{pa_dir}:{original_path}");
+        let _path = EnvOverride::set_var("PATH", &new_path);
+
+        let err = fetch_prompt_detail("demo").expect_err("invalid json should fail");
+        assert!(err.to_string().contains("failed to parse JSON output"));
         Ok(())
     }
 

@@ -304,6 +304,25 @@ fn collate_search_results_skips_missing_summary() -> Result<()> {
 }
 
 #[test]
+fn collate_search_results_propagates_lookup_errors() {
+    let hits = vec![SearchHit {
+        session_id: "missing".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        label: None,
+        role: Some("user".into()),
+        snippet: None,
+        last_active: Some(50),
+        actionable: true,
+    }];
+
+    let mut lookup = |_id: &str| -> Result<Option<SessionSummary>> { Err(eyre!("lookup failed")) };
+    let err = App::collate_search_results(hits, None, None, None, &mut lookup)
+        .expect_err("lookup errors should bubble up");
+    assert!(err.to_string().contains("lookup failed"));
+}
+
+#[test]
 fn log_index_report_emits_warnings_for_errors() {
     let mut report = IndexReport {
         scanned: 1,
@@ -416,7 +435,9 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
     let temp = TempDir::new()?;
     let log_path = temp.child("capture.log");
     let script = temp.child("capture.sh");
-    script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+    script.write_str(
+        "#!/bin/sh\nprintf '%s|%s' \"$TX_CAPTURE_STDIN_DATA\" \"$PLAN_ENV_TEST\" > \"$1\"\n",
+    )?;
     let perms = std::fs::Permissions::from_mode(0o755);
     std::fs::set_permissions(script.path(), perms)?;
 
@@ -424,7 +445,7 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
         pipeline: "internal capture-arg".into(),
         display: "log".into(),
         friendly_display: "log".into(),
-        env: Vec::new(),
+        env: vec![("PLAN_ENV_TEST".into(), "expected".into())],
         invocation: Invocation::Exec {
             argv: vec![
                 script.path().display().to_string(),
@@ -447,7 +468,36 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
     execute_plan_with_prompt(&plan, true, Some("payload".into()), |_| Ok(None))?;
 
     let captured = std::fs::read_to_string(log_path.path())?;
-    assert_eq!(captured, "payload");
+    assert_eq!(captured, "payload|expected");
+    Ok(())
+}
+
+#[cfg(all(unix, coverage))]
+#[test]
+fn execute_plan_coverage_wrapper_executes_without_prompt() -> Result<()> {
+    let temp = TempDir::new()?;
+    let plan = PipelinePlan {
+        pipeline: "echo ok".into(),
+        display: "echo ok".into(),
+        friendly_display: "echo ok".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell {
+            command: "true".into(),
+        },
+        provider: "demo".into(),
+        terminal_title: "demo".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd: temp.path().to_path_buf(),
+        prompt_assembler: None,
+    };
+
+    execute_plan(&plan)?;
     Ok(())
 }
 
@@ -455,13 +505,17 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
 #[test]
 fn default_shell_prefers_environment_or_falls_back() {
     let _guard = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("SHELL", "/bin/sh");
-    }
+    let set_shell = EnvOverride::set_var("SHELL", "/bin/sh");
 
     let shell = default_shell();
     assert_eq!(shell.flag, "-c");
-    assert!(!shell.path.is_empty());
+    assert_eq!(shell.path, "/bin/sh");
+
+    drop(set_shell);
+    let _unset = EnvOverride::remove("SHELL");
+    let fallback = default_shell();
+    assert_eq!(fallback.flag, "-c");
+    assert_eq!(fallback.path, "/bin/sh");
 }
 
 fn setup_directories(temp: &TempDir) -> Result<AppDirectories> {
@@ -755,6 +809,60 @@ fn app_search_surfaces_db_error_when_sessions_table_missing() -> Result<()> {
     let err = app
         .search(&cmd)
         .expect_err("search should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_search_surfaces_db_error_when_first_prompt_query_fails() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let cmd = SearchCommand {
+        term: Some("hello".into()),
+        full_text: false,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("first-prompt search should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_search_surfaces_db_error_when_full_text_query_fails() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE messages_fts", [])?;
+
+    let cmd = SearchCommand {
+        term: Some("hello".into()),
+        full_text: true,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("full-text search should fail when FTS table is missing");
     assert!(
         err.to_string().contains("no such table")
             || err.to_string().contains("failed to")

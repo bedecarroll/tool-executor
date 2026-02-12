@@ -1157,6 +1157,12 @@ mod tests {
     }
 
     #[test]
+    fn human_int_and_fmt_usd_support_negative_values() {
+        assert_eq!(human_int(-1_234_567), "-1,234,567");
+        assert_eq!(fmt_usd(-1234.5), "-$1,234.50");
+    }
+
+    #[test]
     fn render_rate_limits_returns_empty_for_invalid_json() {
         let lines = render_rate_limits(Some(0), Some("{bad-json}"), UtcOffset::UTC);
         assert!(lines.is_empty());

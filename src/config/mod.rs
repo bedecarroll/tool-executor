@@ -616,6 +616,17 @@ mod tests {
     }
 
     #[test]
+    fn read_toml_files_reports_error_for_non_directory_input() -> Result<()> {
+        let temp = TempDir::new()?;
+        let file = temp.child("conf.d");
+        file.write_str("not a directory")?;
+
+        let err = read_toml_files(file.path()).expect_err("non-directory input should fail");
+        assert!(err.to_string().contains("failed to read directory"));
+        Ok(())
+    }
+
+    #[test]
     fn load_merges_dropins_in_lexical_order() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
@@ -743,6 +754,27 @@ list = \"value\"
         let message = format!("{err:?}");
         assert!(message.contains("cannot append to non-array key 'list'"));
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_surfaces_read_errors_for_unreadable_main_config() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let config_file = config_dir.child(MAIN_CONFIG);
+        config_file.write_str("provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n")?;
+
+        let perms = fs::Permissions::from_mode(0o000);
+        fs::set_permissions(config_file.path(), perms)?;
+
+        let err = load(Some(config_dir.path())).expect_err("unreadable config should fail");
+        assert!(err.to_string().contains("failed to read"));
+
+        let reset = fs::Permissions::from_mode(0o644);
+        fs::set_permissions(config_file.path(), reset)?;
         Ok(())
     }
 

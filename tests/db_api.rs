@@ -140,6 +140,7 @@ fn database_public_api_roundtrip() -> color_eyre::Result<()> {
     db.delete_session("sess-1")?;
     assert_eq!(db.count_sessions()?, 1);
 
+    drop(db);
     temp.close()?;
     Ok(())
 }
@@ -177,6 +178,49 @@ fn database_methods_surface_query_errors_when_schema_is_missing() -> color_eyre:
     assert!(db.latest_actionable_session().is_err());
     assert!(db.provider_for("sess-1").is_err());
 
+    drop(db);
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn database_summary_queries_surface_row_mapping_errors() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let db_path = temp.child("corrupt.sqlite3");
+    let db_path_buf = db_path.path().to_path_buf();
+
+    let db = Database::open(&db_path_buf)?;
+    drop(db);
+
+    let conn = Connection::open(&db_path_buf)?;
+    conn.execute(
+        "INSERT INTO sessions (id, provider, wrapper, model, label, path, uuid, first_prompt, actionable, created_at, started_at, last_active, size, mtime)
+         VALUES (?1, ?2, NULL, NULL, NULL, ?3, ?4, NULL, ?5, NULL, NULL, NULL, ?6, ?7)",
+        ("broken1", "codex", "/tmp/broken1.jsonl", "broken-uuid", "bad", 1_i64, 1_i64),
+    )?;
+    conn.execute(
+        "INSERT INTO sessions (id, provider, wrapper, model, label, path, uuid, first_prompt, actionable, created_at, started_at, last_active, size, mtime)
+         VALUES (?1, ?2, NULL, NULL, NULL, ?3, ?4, NULL, ?5, NULL, NULL, ?6, ?7, ?8)",
+        (
+            "broken2",
+            "codex",
+            "/tmp/broken2.jsonl",
+            "broken-uuid-2",
+            1_i64,
+            1_i64,
+            "bad",
+            1_i64,
+        ),
+    )?;
+    drop(conn);
+
+    let db = Database::open(&db_path_buf)?;
+    assert!(db.existing_by_path("/tmp/broken1.jsonl").is_err());
+    assert!(db.session_summary("broken1").is_err());
+    assert!(db.session_summary_for_identifier("broken-uuid").is_err());
+    assert!(db.latest_actionable_session().is_err());
+
+    drop(db);
     temp.close()?;
     Ok(())
 }

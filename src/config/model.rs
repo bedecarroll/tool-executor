@@ -676,6 +676,19 @@ mod tests {
     }
 
     #[test]
+    fn config_from_value_wraps_decode_errors() {
+        let value: Value = toml::from_str(
+            r#"
+            providers = "bad-shape"
+        "#,
+        )
+        .expect("parse toml");
+
+        let error = Config::from_value(&value).expect_err("invalid shape should fail");
+        assert!(error.to_string().contains("failed to decode configuration"));
+    }
+
+    #[test]
     fn config_lint_reports_missing_defaults_and_profile_references() {
         let defaults = Defaults {
             provider: Some("codex".into()),
@@ -838,6 +851,16 @@ mod tests {
     #[test]
     fn expand_optional_path_returns_none_for_blank_input() {
         assert_eq!(expand_optional_path("   "), None);
+    }
+
+    #[test]
+    fn expand_path_reports_missing_environment_variable() {
+        const MISSING: &str = "__TX_COVERAGE_EXPAND_PATH_MISSING__";
+        unsafe {
+            std::env::remove_var(MISSING);
+        }
+        let err = expand_path(&format!("${MISSING}")).expect_err("missing env should fail");
+        assert!(err.to_string().contains("failed to expand path"));
     }
 
     #[test]
