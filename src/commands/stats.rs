@@ -14,8 +14,6 @@ use crate::session::{SessionSummary, TokenUsageRecord};
 
 const PRICING_AS_OF: &str = "2026-01-21";
 
-static UTC_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
-    format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
 static LOCAL_TIMESTAMP_FORMAT: &[FormatItem<'static>] = format_description!(
     "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory]:[offset_minute]"
 );
@@ -585,7 +583,6 @@ fn fmt_dt(ts: Option<i64>, offset: UtcOffset) -> String {
     let local = dt.to_offset(offset);
     local
         .format(LOCAL_TIMESTAMP_FORMAT)
-        .or_else(|_| dt.format(UTC_TIMESTAMP_FORMAT))
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
@@ -840,10 +837,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_stats_smoke_test() -> Result<()> {
-        let temp = TempDir::new()?;
+    fn codex_stats_smoke_test() {
+        let temp = TempDir::new().expect("temp dir");
         let db_path = temp.child("tx.sqlite3");
-        let mut db = Database::open(db_path.path())?;
+        let mut db = Database::open(db_path.path()).expect("open database");
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let summary = SessionSummary {
             id: "codex/demo".into(),
@@ -896,16 +893,15 @@ mod tests {
         };
         let ingest = SessionIngest::new(summary, vec![message])
             .with_token_usage(vec![usage_priced, usage_unpriced]);
-        db.upsert_session(&ingest)?;
+        db.upsert_session(&ingest).expect("insert session");
 
-        codex(&db, db_path.path())?;
+        codex(&db, db_path.path()).expect("render codex stats");
         drop(db);
-        Ok(())
     }
 
     #[test]
-    fn collect_session_activity_counts_tracks_turns_and_compactions() -> Result<()> {
-        let temp = TempDir::new()?;
+    fn collect_session_activity_counts_tracks_turns_and_compactions() {
+        let temp = TempDir::new().expect("temp dir");
         let session_file = temp.child("session.jsonl");
         session_file
             .write_str(concat!(
@@ -939,7 +935,6 @@ mod tests {
         assert_eq!(rows[0].0, "codex/session.jsonl");
         assert_eq!(rows[0].1.turns, 2);
         assert_eq!(rows[0].1.compactions, 1);
-        Ok(())
     }
 
     #[test]
@@ -1126,8 +1121,8 @@ mod tests {
     }
 
     #[test]
-    fn session_activity_counts_skips_empty_lines() -> Result<()> {
-        let temp = TempDir::new()?;
+    fn session_activity_counts_skips_empty_lines() {
+        let temp = TempDir::new().expect("temp dir");
         let session_file = temp.child("session.jsonl");
         session_file
             .write_str(concat!(
@@ -1140,7 +1135,6 @@ mod tests {
         let counts = session_activity_counts(session_file.path());
         assert_eq!(counts.turns, 1);
         assert_eq!(counts.compactions, 0);
-        Ok(())
     }
 
     #[test]

@@ -68,9 +68,10 @@ fn init_tracing(cli: &Cli) {
     let mut filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(level.into())
         .from_env_lossy();
-    if let Ok(directive) = "tui_markdown=off".parse::<tracing_subscriber::filter::Directive>() {
-        filter = filter.add_directive(directive);
-    }
+    let directive = "tui_markdown=off"
+        .parse::<tracing_subscriber::filter::Directive>()
+        .expect("valid tracing directive literal");
+    filter = filter.add_directive(directive);
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -224,13 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn run_executes_config_where_command() -> color_eyre::Result<()> {
+    fn run_executes_config_where_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "codex"
@@ -238,15 +239,18 @@ provider = "codex"
 [providers.codex]
 bin = "echo"
 session_roots = ["{root}"]
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
         let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
         let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
@@ -258,19 +262,17 @@ session_roots = ["{root}"]
             command: Some(Command::Config(crate::cli::ConfigCommand::Where)),
         };
 
-        run(&cli)?;
-
-        Ok(())
+        run(&cli).expect("run config where");
     }
 
     #[test]
-    fn run_invokes_ui_when_no_command() -> color_eyre::Result<()> {
+    fn run_invokes_ui_when_no_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "codex"
@@ -278,15 +280,18 @@ provider = "codex"
 [providers.codex]
 bin = "echo"
 session_roots = ["{root}"]
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
         let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
         let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
@@ -298,18 +303,17 @@ session_roots = ["{root}"]
             command: None,
         };
 
-        run(&cli)?;
-        Ok(())
+        run(&cli).expect("run ui");
     }
 
     #[test]
-    fn run_executes_self_update_command() -> color_eyre::Result<()> {
+    fn run_executes_self_update_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "codex"
@@ -317,15 +321,18 @@ provider = "codex"
 [providers.codex]
 bin = "echo"
 session_roots = ["{root}"]
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
         let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
         let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
@@ -339,20 +346,21 @@ session_roots = ["{root}"]
             })),
         };
 
-        run(&cli)?;
-        Ok(())
+        run(&cli).expect("run self-update");
     }
 
     #[cfg(unix)]
     #[test]
-    fn run_executes_internal_capture_arg_command() -> color_eyre::Result<()> {
+    fn run_executes_internal_capture_arg_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let output = temp.child("prompt.txt");
         let script = temp.child("provider.sh");
-        script.write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")?;
+        script
+            .write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")
+            .expect("write script");
         let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(script.path(), perms)?;
+        fs::set_permissions(script.path(), perms).expect("set executable");
 
         let _capture_guard = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "payload");
 
@@ -371,21 +379,20 @@ session_roots = ["{root}"]
             ))),
         };
 
-        run(&cli)?;
+        run(&cli).expect("run internal capture-arg");
 
-        let contents = std::fs::read_to_string(output.path())?;
+        let contents = std::fs::read_to_string(output.path()).expect("read output");
         assert_eq!(contents, "payload");
-        Ok(())
     }
 
     #[test]
-    fn run_returns_error_for_provider_mismatch() -> color_eyre::Result<()> {
+    fn run_returns_error_for_provider_mismatch() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "demo"
@@ -399,23 +406,28 @@ provider = "demo"
 
 [profiles.alt]
 provider = "alt"
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
         let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
         let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let db_path = data_dir.child("tx.sqlite3");
-        let mut db = Database::open(db_path.path())?;
+        let mut db = Database::open(db_path.path()).expect("open db");
         let session_path = sessions_dir.child("sess-1.jsonl");
-        session_path.write_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n")?;
+        session_path
+            .write_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n")
+            .expect("write session");
 
         let summary = SessionSummary {
             id: "sess-1".into(),
@@ -435,7 +447,8 @@ provider = "alt"
         };
         let mut message = MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(0));
         message.is_first = true;
-        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))
+            .expect("upsert session");
 
         let session_id = summary.id.clone();
         let cli = Cli {
@@ -459,7 +472,5 @@ provider = "alt"
         let err = run(&cli).expect_err("expected provider mismatch error");
         let message = err.to_string();
         assert!(message.contains("provider mismatch"));
-
-        Ok(())
     }
 }

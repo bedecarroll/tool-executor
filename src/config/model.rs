@@ -657,7 +657,6 @@ fn expand_path(raw: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use color_eyre::Result;
     use indexmap::IndexMap;
     use toml::Value;
 
@@ -842,10 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_stdin_returns_empty_for_blank_input() -> Result<()> {
-        let args = parse_stdin("   ", "codex")?;
+    fn parse_stdin_returns_empty_for_blank_input() {
+        let args = parse_stdin("   ", "codex").expect("parse stdin");
         assert!(args.is_empty());
-        Ok(())
     }
 
     #[test]
@@ -893,11 +891,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_env_var_parses_key_and_template() -> Result<()> {
-        let var = parse_env_var("API_KEY=${env:API_KEY}")?;
+    fn parse_env_var_parses_key_and_template() {
+        let var = parse_env_var("API_KEY=${env:API_KEY}").expect("parse env var");
         assert_eq!(var.key, "API_KEY");
         assert_eq!(var.value_template, "${env:API_KEY}");
-        Ok(())
     }
 
     #[test]
@@ -910,32 +907,34 @@ mod tests {
     }
 
     #[test]
-    fn raw_wrapper_into_shell_mode() -> Result<()> {
+    fn raw_wrapper_into_shell_mode() {
         let wrapper = RawWrapper {
             shell: Some(true),
             cmd: WrapperCommandSpec::String("echo hello".into()),
         };
-        let config = wrapper.into_wrapper("shellwrap".into())?;
+        let config = wrapper
+            .into_wrapper("shellwrap".into())
+            .expect("shell wrapper");
         assert!(matches!(
             config.mode,
             WrapperMode::Shell { ref command } if command == "echo hello"
         ));
-        Ok(())
     }
 
     #[test]
-    fn raw_wrapper_into_exec_mode() -> Result<()> {
+    fn raw_wrapper_into_exec_mode() {
         let wrapper = RawWrapper {
             shell: Some(false),
             cmd: WrapperCommandSpec::List(vec!["ls".into(), "-la".into()]),
         };
-        let config = wrapper.into_wrapper("execwrap".into())?;
+        let config = wrapper
+            .into_wrapper("execwrap".into())
+            .expect("exec wrapper");
         assert!(matches!(
             config.mode,
             WrapperMode::Exec { ref argv }
                 if argv.len() == 2 && argv[0] == "ls" && argv[1] == "-la"
         ));
-        Ok(())
     }
 
     #[test]

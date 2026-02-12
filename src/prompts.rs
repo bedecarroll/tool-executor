@@ -582,6 +582,14 @@ exit 1
     }
 
     #[test]
+    fn pa_command_defaults_to_pa_when_env_not_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _override = EnvOverride::remove("TX_TEST_PA_BIN");
+        let cmd = pa_command();
+        assert_eq!(cmd.get_program(), "pa");
+    }
+
+    #[test]
     fn path_guard_restores_unset_path() {
         let lock = ENV_LOCK.lock().unwrap();
         let path_override = EnvOverride::remove("PATH");

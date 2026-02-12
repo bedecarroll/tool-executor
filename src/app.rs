@@ -508,29 +508,17 @@ impl<'cli> App<'cli> {
     /// Returns an error if writing to stdout fails.
     fn config_default(&self, cmd: &ConfigDefaultCommand) -> Result<()> {
         let mut stdout = io::stdout().lock();
-        if cmd.raw {
-            stdout.write_all(crate::config::default_template().as_bytes())?;
-        } else {
-            let config = crate::config::bundled_default_config(&self.loaded.directories);
-            stdout.write_all(config.as_bytes())?;
-        }
-        stdout.flush()?;
-        Ok(())
+        write_config_default(&mut stdout, cmd, &self.loaded)
     }
 
     fn config_schema(cmd: &ConfigSchemaCommand) -> Result<()> {
-        let schema = crate::config::schema(cmd.pretty)?;
         let mut stdout = io::stdout().lock();
-        stdout.write_all(schema.as_bytes())?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
-        Ok(())
+        write_config_schema(&mut stdout, cmd)
     }
 
     fn config_dump(&self) -> Result<()> {
-        let toml_text = toml::to_string_pretty(&self.loaded.merged)?;
-        println!("{toml_text}");
-        Ok(())
+        let mut stdout = io::stdout().lock();
+        write_config_dump(&mut stdout, &self.loaded.merged)
     }
 
     fn config_where(&self) {
@@ -598,10 +586,21 @@ pub enum EmitMode {
 }
 
 pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    emit_command_with_writer(&mut stdout, plan, mode)
+}
+
+fn emit_command_with_writer<W: Write>(
+    writer: &mut W,
+    plan: &PipelinePlan,
+    mode: EmitMode,
+) -> Result<()> {
     match mode {
         EmitMode::Json => {
             let payload = json!({ "command": plan.display, "env": plan.env });
-            println!("{}", serde_json::to_string_pretty(&payload)?);
+            let rendered = serde_json::to_string_pretty(&payload)?;
+            writer.write_all(rendered.as_bytes())?;
+            writer.write_all(b"\n")?;
         }
         EmitMode::Plain { newline, friendly } => {
             let command = if friendly {
@@ -610,13 +609,45 @@ pub(crate) fn emit_command(plan: &PipelinePlan, mode: EmitMode) -> Result<()> {
                 &plan.display
             };
             if newline {
-                println!("{command}");
+                writer.write_all(command.as_bytes())?;
+                writer.write_all(b"\n")?;
             } else {
-                print!("{command}");
-                io::stdout().flush()?;
+                writer.write_all(command.as_bytes())?;
+                writer.flush()?;
             }
         }
     }
+    Ok(())
+}
+
+fn write_config_default<W: Write>(
+    writer: &mut W,
+    cmd: &ConfigDefaultCommand,
+    loaded: &LoadedConfig,
+) -> Result<()> {
+    let rendered = if cmd.raw {
+        crate::config::default_template().to_string()
+    } else {
+        crate::config::bundled_default_config(&loaded.directories)
+    };
+    writer.write_all(rendered.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_config_schema<W: Write>(writer: &mut W, cmd: &ConfigSchemaCommand) -> Result<()> {
+    let schema = crate::config::schema(cmd.pretty)?;
+    writer.write_all(schema.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_config_dump<W: Write>(writer: &mut W, merged: &toml::Value) -> Result<()> {
+    let toml_text = toml::to_string_pretty(merged)?;
+    writer.write_all(toml_text.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     Ok(())
 }
 

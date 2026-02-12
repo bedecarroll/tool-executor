@@ -38,6 +38,25 @@ fn base_command(temp: &TempDir) -> Command {
     cmd
 }
 
+fn write_codex_session_with_uuid(
+    temp: &TempDir,
+    file_name: &str,
+    uuid: &str,
+) -> color_eyre::Result<()> {
+    let codex_home = temp.child("codex-home");
+    codex_home.create_dir_all()?;
+    let session_dir = codex_home.child("session");
+    session_dir.create_dir_all()?;
+    let payload = format!(
+        "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"id\":\"{uuid}\",\
+         \"text\":\"Ping\"}}}}\n\
+         {{\"type\":\"message\",\"payload\":{{\"role\":\"assistant\",\"content\":[{{\"text\":\
+         \"Pong\"}}]}}}}\n"
+    );
+    session_dir.child(file_name).write_str(&payload)?;
+    Ok(())
+}
+
 #[test]
 fn search_lists_empty_when_no_data() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
@@ -427,6 +446,144 @@ fn search_returns_results_with_role_filter() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn search_without_term_honors_since_filter() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all()?;
+    let db_path = data_dir.child("tx.sqlite3");
+    let mut db = Database::open(db_path.path())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let path = temp.child("old.jsonl").path().to_path_buf();
+    let summary = SessionSummary {
+        id: "sess-old".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some("Old".into()),
+        path,
+        uuid: Some("uuid-old".into()),
+        first_prompt: Some("old prompt".into()),
+        actionable: true,
+        created_at: Some(now - 10_000),
+        started_at: Some(now - 10_000),
+        last_active: Some(now - 10_000),
+        size: 1,
+        mtime: now - 10_000,
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "old prompt",
+        None,
+        Some(now - 10_000),
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+    drop(db);
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .env("TX_SKIP_INDEX", "1")
+        .args(["search", "--since", "1s"])
+        .output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed, json!([]));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn search_without_term_lists_sessions() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all()?;
+    let db_path = data_dir.child("tx.sqlite3");
+    let mut db = Database::open(db_path.path())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let path = temp.child("recent.jsonl").path().to_path_buf();
+    let summary = SessionSummary {
+        id: "sess-recent".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some("Recent".into()),
+        path,
+        uuid: Some("uuid-recent".into()),
+        first_prompt: Some("recent prompt".into()),
+        actionable: true,
+        created_at: Some(now - 10),
+        started_at: Some(now - 10),
+        last_active: Some(now - 5),
+        size: 1,
+        mtime: now - 5,
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "recent prompt",
+        None,
+        Some(now - 10),
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+    drop(db);
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .env("TX_SKIP_INDEX", "1")
+        .args(["search", "--limit", "5"])
+        .output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    let list = parsed.as_array().expect("json array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list[0].get("id").and_then(Value::as_str),
+        Some("sess-recent")
+    );
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn db_reset_fails_with_invalid_config() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    config_dir.child("config.toml").write_str("provider =")?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .args(["db", "reset", "--yes"])
+        .assert()
+        .failure()
+        .stderr(contains("parse").or(contains("expected")));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn db_reset_surfaces_remove_errors() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all()?;
+    data_dir.child("tx.sqlite3").create_dir_all()?;
+
+    let mut cmd = base_command(&temp);
+    cmd.args(["db", "reset", "--yes"])
+        .assert()
+        .failure()
+        .stderr(contains("failed to remove"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn config_where_reports_directories() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let config_dir = temp.child("config-root");
@@ -486,18 +643,7 @@ fn search_role_requires_full_text() -> color_eyre::Result<()> {
 fn resume_accepts_uuid_identifier() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
-
-    let codex_home = temp.child("codex-home");
-    codex_home.create_dir_all()?;
-    let session_dir = codex_home.child("session");
-    session_dir.create_dir_all()?;
-    let payload = format!(
-        "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"id\":\"{uuid}\",\
-         \"text\":\"Ping\"}}}}\n\
-         {{\"type\":\"message\",\"payload\":{{\"role\":\"assistant\",\"content\":[{{\"text\":\
-         \"Pong\"}}]}}}}\n"
-    );
-    session_dir.child("resume.jsonl").write_str(&payload)?;
+    write_codex_session_with_uuid(&temp, "resume.jsonl", uuid)?;
 
     let mut cmd = base_command(&temp);
     cmd.arg("resume")
@@ -506,6 +652,46 @@ fn resume_accepts_uuid_identifier() -> color_eyre::Result<()> {
         .assert()
         .success()
         .stdout(contains(uuid));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_emit_json_requires_dry_run_or_emit_command() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-emit-json-error.jsonl", uuid)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.arg("resume")
+        .arg(uuid)
+        .arg("--emit-json")
+        .assert()
+        .failure()
+        .stderr(contains("--emit-json requires --dry-run or --emit-command"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_dry_run_emit_json_outputs_payload() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-emit-json-ok.jsonl", uuid)?;
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .arg("resume")
+        .arg(uuid)
+        .arg("--dry-run")
+        .arg("--emit-json")
+        .output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(parsed.get("command").is_some());
+    assert!(parsed.get("env").is_some());
 
     temp.close()?;
     Ok(())
@@ -562,6 +748,194 @@ cmd = "echo {{session.id}}"
         stdout.contains("codex/latest.jsonl"),
         "expected latest actionable session id in stdout, got: {stdout}"
     );
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_shell_wrapper_success() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-run-success.jsonl", uuid)?;
+
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+flags = []
+
+[wrappers.ok]
+shell = true
+cmd = "true"
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg(uuid)
+        .arg("--wrap")
+        .arg("ok")
+        .assert()
+        .success();
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_shell_wrapper_failure() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-run-fail.jsonl", uuid)?;
+
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+flags = []
+
+[wrappers.fail]
+shell = true
+cmd = "false"
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg(uuid)
+        .arg("--wrap")
+        .arg("fail")
+        .assert()
+        .failure()
+        .stderr(contains("command exited with status"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_rejects_unknown_profile() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-unknown-profile.jsonl", uuid)?;
+
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+flags = []
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg(uuid)
+        .arg("--profile")
+        .arg("missing")
+        .assert()
+        .failure()
+        .stderr(contains("profile 'missing' not found"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_last_errors_when_no_actionable_sessions_exist() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let codex_home = temp.child("codex-home");
+    codex_home.create_dir_all()?;
+    let sessions_dir = codex_home.child("session");
+    sessions_dir.create_dir_all()?;
+    std::fs::write(
+        config_dir.child("config.toml").path(),
+        "provider = \"codex\"\n[providers.codex]\nbin = \"echo\"\n",
+    )?;
+
+    sessions_dir.child("assistant-only.jsonl").write_str(
+        r#"{"timestamp":"2025-12-18T06:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"assistant only"}]}}"#,
+    )?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("CODEX_HOME", codex_home.path())
+        .env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg("last")
+        .assert()
+        .failure()
+        .stderr(contains("no previous sessions available to resume"));
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_exec_invocation_success() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-run-exec-success.jsonl", uuid)?;
+
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+flags = []
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg(uuid)
+        .assert()
+        .success();
+
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_exec_invocation_failure() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";
+    write_codex_session_with_uuid(&temp, "resume-run-exec-fail.jsonl", uuid)?;
+
+    let config_dir = temp.child("config-root");
+    config_dir.create_dir_all()?;
+    let config_toml = r#"
+provider = "codex"
+
+[providers.codex]
+bin = "false"
+flags = []
+"#;
+    std::fs::write(config_dir.child("config.toml").path(), config_toml)?;
+
+    let mut cmd = base_command(&temp);
+    cmd.env("TX_CONFIG_DIR", config_dir.path())
+        .arg("resume")
+        .arg(uuid)
+        .assert()
+        .failure()
+        .stderr(contains("command exited with status"));
 
     temp.close()?;
     Ok(())

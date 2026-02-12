@@ -471,11 +471,14 @@ fn build_capture_command(
         internal_args.push(arg.clone());
     }
 
-    let tx_path = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "tx".to_string());
+    let tx_path = resolve_tx_path(std::env::current_exe().ok());
     command_string(&tx_path, &internal_args)
+}
+
+fn resolve_tx_path(current_exe: Option<PathBuf>) -> String {
+    current_exe
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "tx".to_string())
 }
 
 fn expand_env_template(template: &str) -> Result<String> {
@@ -1249,6 +1252,11 @@ mod tests {
         assert!(command.contains("--pre"));
         assert!(command.contains("'cat prompt.txt'"));
         assert!(command.contains("--arg --json"));
+    }
+
+    #[test]
+    fn resolve_tx_path_falls_back_to_tx_when_current_exe_missing() {
+        assert_eq!(resolve_tx_path(None), "tx");
     }
 
     fn test_provider_config() -> ProviderConfig {

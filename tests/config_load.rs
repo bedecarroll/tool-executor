@@ -256,3 +256,55 @@ fn load_creates_default_layout_with_default_directories() -> Result<()> {
 
     run_result
 }
+
+#[test]
+fn load_trims_profile_description_and_prompt_assembler() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config");
+    config_dir.create_dir_all()?;
+    config_dir.child("config.toml").write_str(
+        r#"
+provider = "codex"
+
+[providers.codex]
+bin = "codex"
+
+[profiles.trimmed]
+provider = "codex"
+description = "  useful summary  "
+prompt_assembler = "  prompts/demo  "
+
+[profiles.empty]
+provider = "codex"
+description = "   "
+prompt_assembler = "   "
+"#,
+    )?;
+
+    let data_dir = temp.child("data");
+    let cache_dir = temp.child("cache");
+    data_dir.create_dir_all()?;
+    cache_dir.create_dir_all()?;
+
+    let orig_data = std::env::var("TX_DATA_DIR").ok();
+    let orig_cache = std::env::var("TX_CACHE_DIR").ok();
+    set_env("TX_DATA_DIR", data_dir.path());
+    set_env("TX_CACHE_DIR", cache_dir.path());
+
+    let loaded = config::load(Some(config_dir.path()))?;
+    let trimmed = loaded
+        .config
+        .profiles
+        .get("trimmed")
+        .expect("trimmed profile");
+    assert_eq!(trimmed.description.as_deref(), Some("useful summary"));
+    assert_eq!(trimmed.prompt_assembler.as_deref(), Some("prompts/demo"));
+    let empty = loaded.config.profiles.get("empty").expect("empty profile");
+    assert_eq!(empty.description, None);
+    assert_eq!(empty.prompt_assembler, None);
+
+    clear_env("TX_DATA_DIR", orig_data);
+    clear_env("TX_CACHE_DIR", orig_cache);
+    Ok(())
+}

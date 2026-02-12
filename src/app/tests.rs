@@ -22,7 +22,7 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::env;
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{self, BufRead, Cursor, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -46,6 +46,45 @@ fn sample_summary() -> SessionSummary {
         size: 4,
         mtime: 5,
     }
+}
+
+struct FailingWriter {
+    fail_on_write: bool,
+    fail_on_flush: bool,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.fail_on_write {
+            Err(io::Error::other("write failed"))
+        } else {
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.fail_on_flush {
+            Err(io::Error::other("flush failed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct FailingBufRead;
+
+impl io::Read for FailingBufRead {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("read failed"))
+    }
+}
+
+impl BufRead for FailingBufRead {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        Err(io::Error::other("read failed"))
+    }
+
+    fn consume(&mut self, _amt: usize) {}
 }
 
 #[test]
@@ -127,6 +166,36 @@ fn emit_terminal_title_with_writer_respects_terminal_mode() -> Result<()> {
     emit_terminal_title_with_writer("demo", false, &mut non_interactive)?;
     assert!(non_interactive.is_empty());
     Ok(())
+}
+
+#[test]
+fn emit_terminal_title_with_writer_propagates_write_error() {
+    let mut writer = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err =
+        emit_terminal_title_with_writer("demo", true, &mut writer).expect_err("write should fail");
+    assert!(err.to_string().contains("write failed"));
+}
+
+#[test]
+fn emit_terminal_title_with_writer_propagates_flush_error() {
+    let mut writer = FailingWriter {
+        fail_on_write: false,
+        fail_on_flush: true,
+    };
+    let err =
+        emit_terminal_title_with_writer("demo", true, &mut writer).expect_err("flush should fail");
+    assert!(err.to_string().contains("flush failed"));
+}
+
+#[test]
+fn prompt_for_stdin_with_reader_surfaces_read_errors() {
+    let mut reader = FailingBufRead;
+    let err =
+        prompt_for_stdin_with_reader(Some("Label"), &mut reader).expect_err("reader should fail");
+    assert!(err.to_string().contains("read failed"));
 }
 
 #[test]
@@ -669,6 +738,55 @@ fn app_search_and_export_paths() -> Result<()> {
 }
 
 #[test]
+fn app_search_surfaces_db_error_when_sessions_table_missing() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let cmd = SearchCommand {
+        term: None,
+        full_text: false,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("search should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_export_surfaces_db_error_when_messages_table_missing() -> Result<()> {
+    let (_temp, app, summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE messages", [])?;
+
+    let cmd = ExportCommand {
+        session_id: summary.id,
+    };
+    let err = app
+        .export(&cmd)
+        .expect_err("export should fail when messages table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn app_search_rejects_role_without_full_text() -> Result<()> {
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     let cmd = SearchCommand {
@@ -700,6 +818,29 @@ fn app_resume_accepts_plain_session_id() -> Result<()> {
         provider_args: Vec::new(),
     };
     app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_resume_rejects_invalid_vars() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("default".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: vec!["INVALID".into()],
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
+    let err = app
+        .resume(&cmd)
+        .expect_err("invalid vars should be rejected");
+    assert!(err.to_string().contains("expected KEY=VALUE"));
     Ok(())
 }
 
@@ -1365,6 +1506,67 @@ fn execute_plan_exec_succeeds_and_failures() -> Result<()> {
 }
 
 #[test]
+fn execute_plan_exec_rejects_empty_argv() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "exec empty".into(),
+        display: "exec empty".into(),
+        friendly_display: "exec empty".into(),
+        env: Vec::new(),
+        invocation: Invocation::Exec { argv: Vec::new() },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let err = execute_plan(&plan).expect_err("empty argv should error");
+    assert!(err.to_string().contains("empty argv"));
+    Ok(())
+}
+
+#[test]
+fn execute_plan_with_prompt_surfaces_prompt_callback_error() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "shell true".into(),
+        display: "shell true".into(),
+        friendly_display: "shell true".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell {
+            command: if cfg!(windows) {
+                "exit 0".into()
+            } else {
+                "true".into()
+            },
+        },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: true,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: Some("Prompt".into()),
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let err = execute_plan_with_prompt(&plan, true, None, |_label| Err(eyre!("prompt failed")))
+        .expect_err("prompt callback error should surface");
+    assert!(err.to_string().contains("prompt failed"));
+    Ok(())
+}
+
+#[test]
 fn app_doctor_and_config_lint() -> Result<()> {
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     app.doctor()?;
@@ -1419,6 +1621,82 @@ fn emit_command_covers_all_modes() -> Result<()> {
             friendly: true,
         },
     )?;
+    Ok(())
+}
+
+#[test]
+fn config_output_helpers_propagate_writer_errors() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err = write_config_default(
+        &mut failing_write,
+        &ConfigDefaultCommand { raw: false },
+        &app.loaded,
+    )
+    .expect_err("default writer error should surface");
+    assert!(err.to_string().contains("write failed"));
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err = write_config_schema(&mut failing_write, &ConfigSchemaCommand { pretty: true })
+        .expect_err("schema writer error should surface");
+    assert!(err.to_string().contains("write failed"));
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err =
+        write_config_dump(&mut failing_write, &app.loaded.merged).expect_err("dump should fail");
+    assert!(err.to_string().contains("write failed"));
+
+    Ok(())
+}
+
+#[test]
+fn emit_command_with_writer_propagates_flush_errors() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "echo hi".into(),
+        display: "echo hi".into(),
+        friendly_display: "friendly hi".into(),
+        env: vec![("KEY".into(), "VALUE".into())],
+        invocation: Invocation::Shell {
+            command: "true".into(),
+        },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let mut failing_flush = FailingWriter {
+        fail_on_write: false,
+        fail_on_flush: true,
+    };
+    let err = emit_command_with_writer(
+        &mut failing_flush,
+        &plan,
+        EmitMode::Plain {
+            newline: false,
+            friendly: false,
+        },
+    )
+    .expect_err("flush failure should surface");
+    assert!(err.to_string().contains("flush failed"));
     Ok(())
 }
 
@@ -1600,6 +1878,71 @@ namespace = "tests"
     assert_eq!(app.loaded.directories.data_dir, data_dir.path());
     assert_eq!(app.loaded.directories.cache_dir, cache_dir.path());
     assert_eq!(app.db.count_sessions()?, 0);
+    Ok(())
+}
+
+#[test]
+fn bootstrap_errors_when_tx_data_dir_is_not_a_directory() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+session_roots = ["{root}"]
+"#,
+        root = toml_path(sessions_dir.path()),
+    );
+    config_dir.child("config.toml").write_str(&config_toml)?;
+
+    let bad_data_dir = temp.child("data-file");
+    bad_data_dir.write_str("not-a-dir")?;
+    let cache_dir = temp.child("cache");
+    cache_dir.create_dir_all()?;
+    let _data_guard = EnvOverride::set_path("TX_DATA_DIR", bad_data_dir.path());
+    let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+
+    let cli = Cli {
+        config_dir: Some(config_dir.path().to_path_buf()),
+        verbose: 0,
+        quiet: false,
+        command: None,
+    };
+
+    let Err(err) = App::bootstrap(&cli) else {
+        panic!("bootstrap should fail when data dir is a file");
+    };
+    assert!(
+        err.to_string().contains("database")
+            || err.to_string().contains("Not a directory")
+            || err.to_string().contains("not a directory"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_doctor_surfaces_db_errors_when_sessions_table_missing() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let err = app
+        .doctor()
+        .expect_err("doctor should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("database")
+            || err.to_string().contains("failed to"),
+        "unexpected error: {err:?}"
+    );
     Ok(())
 }
 
