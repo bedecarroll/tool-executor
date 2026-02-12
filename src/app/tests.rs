@@ -930,6 +930,48 @@ fn app_resume_accepts_plain_session_id() -> Result<()> {
 }
 
 #[test]
+fn app_resume_handles_provider_without_resume_metadata() -> Result<()> {
+    let (_temp, mut app, mut summary) = build_app_fixture(Vec::new())?;
+    app.loaded
+        .config
+        .providers
+        .get_mut("alt")
+        .expect("alt provider configured")
+        .env
+        .clear();
+    summary.id = "sess-alt".into();
+    summary.uuid = Some("uuid-alt".into());
+    summary.provider = "alt".into();
+    summary.path = PathBuf::from("sess-alt.jsonl");
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "hello from alt",
+        None,
+        summary.last_active,
+    );
+    message.is_first = true;
+    app.db
+        .upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("mismatch".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
 fn app_resume_rejects_invalid_vars() -> Result<()> {
     let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
     let cmd = ResumeCommand {

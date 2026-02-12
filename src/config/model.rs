@@ -657,6 +657,7 @@ fn expand_path(raw: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{ENV_LOCK, EnvOverride};
     use indexmap::IndexMap;
     use toml::Value;
 
@@ -851,6 +852,24 @@ mod tests {
     #[test]
     fn expand_optional_path_returns_none_for_blank_input() {
         assert_eq!(expand_optional_path("   "), None);
+    }
+
+    #[test]
+    fn push_unique_path_avoids_duplicates() {
+        let mut paths = Vec::new();
+        let candidate = PathBuf::from("/tmp/codex");
+        push_unique_path(&mut paths, candidate.clone());
+        push_unique_path(&mut paths, candidate);
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn resolve_codex_session_roots_expands_codex_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _override = EnvOverride::set_var("CODEX_HOME", "/tmp/tx-codex-home");
+        let roots = resolve_codex_session_roots();
+        assert!(roots.iter().any(|path| path.ends_with("session")));
+        assert!(roots.iter().any(|path| path.ends_with("sessions")));
     }
 
     #[test]

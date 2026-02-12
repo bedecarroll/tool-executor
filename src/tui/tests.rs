@@ -2671,6 +2671,79 @@ fn plan_for_session_builds_resume_plan() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn plan_for_session_handles_provider_without_resume_metadata() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.providers.insert(
+        "alt".into(),
+        ProviderConfig {
+            name: "alt".into(),
+            bin: "echo".into(),
+            flags: vec!["hello".into()],
+            env: Vec::new(),
+            session_roots: vec![temp.path().join("alt-sessions")],
+            stdin: None,
+        },
+    );
+
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = temp.path().join("alt-sessions");
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("alt.jsonl");
+    fs::File::create(&session_path)?.write_all(b"{\"event\":\"resume\"}\n")?;
+
+    let summary = SessionSummary {
+        id: "sess-alt-resume".into(),
+        provider: "alt".into(),
+        wrapper: None,
+        model: None,
+        label: Some("Alt Session".into()),
+        path: session_path,
+        uuid: Some("uuid-sess-alt-resume".into()),
+        first_prompt: Some("hello".into()),
+        actionable: true,
+        created_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        started_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        last_active: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        size: 1,
+        mtime: OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "hello",
+        Some("event_msg_alt".into()),
+        summary.last_active,
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let session_entry = state
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::Session(session) if session.id == "sess-alt-resume" => Some(session.clone()),
+            _ => None,
+        })
+        .expect("session entry");
+
+    let plan = state.plan_for_session(&session_entry)?;
+    assert!(plan.is_some());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn plan_for_session_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
     let temp = TempDir::new()?;
     let config = build_config(temp.path());

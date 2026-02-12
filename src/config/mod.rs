@@ -583,6 +583,21 @@ mod tests {
     }
 
     #[test]
+    fn gather_sources_includes_main_when_dropins_are_absent() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.child("config");
+        root.create_dir_all()?;
+        root.child(MAIN_CONFIG)
+            .write_str("provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n")?;
+
+        let sources = gather_sources(root.path())?;
+        assert_eq!(sources.len(), 1);
+        assert!(matches!(sources[0].kind, ConfigSourceKind::Main));
+        assert_eq!(sources[0].path, root.child(MAIN_CONFIG).path());
+        Ok(())
+    }
+
+    #[test]
     fn read_toml_files_filters_non_toml_entries() -> Result<()> {
         let temp = TempDir::new()?;
         let dir = temp.child("conf.d");

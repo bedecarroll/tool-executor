@@ -800,6 +800,27 @@ mod tests {
     }
 
     #[test]
+    fn render_rate_limits_handles_partial_sections() {
+        let primary_only = r#"{
+            "primary": {"used_percent": 20, "window_minutes": 60, "resets_at": 1700000000000}
+        }"#;
+        let primary_lines = render_rate_limits(Some(0), Some(primary_only), UtcOffset::UTC);
+        assert!(primary_lines.iter().any(|line| line.contains("primary:")));
+        assert!(!primary_lines.iter().any(|line| line.contains("secondary:")));
+
+        let secondary_only = r#"{
+            "secondary": {"used_percent": 5, "window_minutes": 15, "resets_at": 1700000000}
+        }"#;
+        let secondary_lines = render_rate_limits(Some(0), Some(secondary_only), UtcOffset::UTC);
+        assert!(
+            secondary_lines
+                .iter()
+                .any(|line| line.contains("secondary:"))
+        );
+        assert!(!secondary_lines.iter().any(|line| line.contains("primary:")));
+    }
+
+    #[test]
     fn collect_token_stats_tracks_windows_and_costs() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let usage_priced = TokenUsageRecord {
@@ -834,6 +855,56 @@ mod tests {
         assert!(stats.cost_totals.all > 0.0);
         assert!(stats.unpriced_tokens.all > 0);
         assert!(!stats.by_day.is_empty());
+    }
+
+    #[test]
+    fn collect_token_stats_tracks_priced_usage_outside_recent_windows() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let usage_old_priced = TokenUsageRecord {
+            session_id: "sess".into(),
+            timestamp: now - 45 * 24 * 60 * 60,
+            input_tokens: 200,
+            cached_input_tokens: 0,
+            output_tokens: 100,
+            reasoning_output_tokens: 0,
+            total_tokens: 300,
+            model: Some("gpt-5.2".into()),
+            rate_limits: None,
+        };
+        let stats = collect_token_stats(
+            &[usage_old_priced],
+            now - 24 * 60 * 60,
+            now - 7 * 24 * 60 * 60,
+            now - 30 * 24 * 60 * 60,
+            UtcOffset::UTC,
+        );
+        assert!(stats.cost_totals.all > 0.0);
+        assert!(stats.cost_totals.last_24h.abs() < f64::EPSILON);
+        assert!(stats.cost_totals.last_7d.abs() < f64::EPSILON);
+        assert!(stats.cost_totals.last_30d.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prompt_stats_tracks_window_cutoffs_and_last_prompt() {
+        let now = 1_700_000_000;
+        let timestamps = vec![
+            now - 40 * 24 * 60 * 60,
+            now - 8 * 24 * 60 * 60,
+            now - 2 * 24 * 60 * 60,
+            now - 60,
+        ];
+        let (totals, last_prompt) = prompt_stats(
+            &timestamps,
+            now - 24 * 60 * 60,
+            now - 7 * 24 * 60 * 60,
+            now - 30 * 24 * 60 * 60,
+        );
+
+        assert_eq!(totals.all, 4);
+        assert_eq!(totals.last_24h, 1);
+        assert_eq!(totals.last_7d, 2);
+        assert_eq!(totals.last_30d, 3);
+        assert_eq!(last_prompt, Some(now - 60));
     }
 
     #[test]

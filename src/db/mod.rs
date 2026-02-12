@@ -1351,6 +1351,95 @@ mod tests {
     }
 
     #[test]
+    fn upsert_session_replaces_existing_messages_and_usage_rows() {
+        let mut db = create_db().expect("create db");
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+
+        let summary = SessionSummary {
+            id: "sess-replace".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("replace".into()),
+            path: PathBuf::from("sess-replace.jsonl"),
+            uuid: None,
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+
+        let mut first_message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "first", None, Some(now));
+        first_message.is_first = true;
+        let first_usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now,
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 15,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        db.upsert_session(
+            &SessionIngest::new(summary.clone(), vec![first_message.clone()])
+                .with_token_usage(vec![first_usage]),
+        )
+        .expect("insert first snapshot");
+
+        let mut second_message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "second", None, Some(now + 1));
+        second_message.is_first = true;
+        let assistant_message = MessageRecord::new(
+            summary.id.clone(),
+            1,
+            "assistant",
+            "response",
+            None,
+            Some(now + 2),
+        );
+        let second_usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now + 1,
+            input_tokens: 20,
+            cached_input_tokens: 0,
+            output_tokens: 10,
+            reasoning_output_tokens: 0,
+            total_tokens: 30,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        db.upsert_session(
+            &SessionIngest::new(summary, vec![second_message, assistant_message])
+                .with_token_usage(vec![second_usage]),
+        )
+        .expect("replace snapshot");
+
+        let transcript = db
+            .fetch_transcript("sess-replace")
+            .expect("fetch transcript")
+            .expect("transcript exists");
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[0].content, "second");
+        assert_eq!(transcript.messages[1].content, "response");
+
+        let usage_rows = db
+            .token_usage_for_provider("codex")
+            .expect("query token usage");
+        let matching: Vec<_> = usage_rows
+            .into_iter()
+            .filter(|usage| usage.session_id == "sess-replace")
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].timestamp, now + 1);
+    }
+
+    #[test]
     fn upsert_session_persists_model() -> Result<()> {
         let mut db = create_db()?;
         let now = OffsetDateTime::now_utc().unix_timestamp();
