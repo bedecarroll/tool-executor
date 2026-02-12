@@ -56,6 +56,7 @@ run = [
   "cargo llvm-cov nextest --workspace --all-targets --ignore-filename-regex 'src/(app|tui)/tests\\.rs$' --fail-under-lines 90 --html --output-dir coverage/html --profile ci",
   "cargo llvm-cov report --summary-only --ignore-filename-regex 'src/(app|tui)/tests\\.rs$'",
   "cargo llvm-cov report --lcov --output-path coverage/lcov.info --ignore-filename-regex 'src/(app|tui)/tests\\.rs$'",
+  "bash scripts/check_lcov_lines.sh coverage/lcov.info",
 ]
 
 [tasks.bench]
