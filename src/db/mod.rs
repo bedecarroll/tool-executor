@@ -10,16 +10,28 @@ use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, TokenUsageRecord,
     Transcript,
 };
+use crate::sqlite_ext;
 
-const SCHEMA_VERSION: i32 = 7;
+mod rag;
+
+pub use rag::*;
+
+const SCHEMA_VERSION: i32 = 8;
 const SCHEMA_VERSION_V5: i32 = 5;
 const SCHEMA_VERSION_V6: i32 = 6;
+const SCHEMA_VERSION_V7: i32 = 7;
 const V5_INDEXES_SQL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
     CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
     CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
     CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
 ";
+
+/// Encode an `f32` vector into `SQLite` BLOB form expected by sqlite-vec.
+#[must_use]
+pub fn f32s_to_blob(values: &[f32]) -> Vec<u8> {
+    bytemuck::cast_slice(values).to_vec()
+}
 
 pub struct Database {
     conn: Connection,
@@ -32,6 +44,7 @@ impl Database {
     ///
     /// Returns an error if the database file cannot be opened or initialized.
     pub fn open(path: &Path) -> Result<Self> {
+        sqlite_ext::init_sqlite_extensions()?;
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         let db = Self { conn };
@@ -56,6 +69,7 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
+        sqlite_ext::init_sqlite_extensions()?;
         let current: i32 = self
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -84,8 +98,12 @@ impl Database {
             self.migrate_to_v6()?;
         }
 
-        (current < SCHEMA_VERSION)
+        (current < SCHEMA_VERSION_V7)
             .then(|| self.migrate_to_v7())
+            .transpose()?;
+
+        (current < SCHEMA_VERSION)
+            .then(|| self.migrate_to_v8())
             .transpose()?;
 
         Ok(())
@@ -150,6 +168,27 @@ impl Database {
             ",
         )?;
 
+        self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V7}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v8(&self) -> Result<()> {
+        let sql = r"
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_chunks USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding FLOAT[1536],
+                session_id TEXT PARTITION KEY,
+                ts_ms INTEGER,
+                tool_name TEXT,
+                kind TEXT,
+                model TEXT,
+                content_hash TEXT,
+                +text TEXT,
+                +source_event_id INTEGER
+            );
+            ";
+        self.conn.execute_batch(sql)?;
         self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
         Ok(())
@@ -234,6 +273,19 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
             CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_chunks USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding FLOAT[1536],
+                session_id TEXT PARTITION KEY,
+                ts_ms INTEGER,
+                tool_name TEXT,
+                kind TEXT,
+                model TEXT,
+                content_hash TEXT,
+                +text TEXT,
+                +source_event_id INTEGER
+            );
             ",
         )?;
 
@@ -1010,6 +1062,7 @@ mod tests {
         ";
 
     fn create_db() -> Result<Database> {
+        sqlite_ext::init_sqlite_extensions()?;
         let conn = Connection::open_in_memory()?;
         let db = Database { conn };
         db.configure()?;
@@ -1514,6 +1567,7 @@ mod tests {
 
     #[test]
     fn migrate_v4_schema_executes_v5_index_and_v7_paths() -> Result<()> {
+        sqlite_ext::init_sqlite_extensions()?;
         let conn = Connection::open_in_memory()?;
         let db = Database { conn };
         db.configure()?;
@@ -1783,6 +1837,109 @@ mod tests {
             .expect("expected transcript via uuid fallback");
         assert_eq!(transcript.session.id, "uuid-session");
         assert_eq!(transcript.messages.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_initialization_creates_vec_table() -> Result<()> {
+        let db = create_db()?;
+
+        let vec_table_exists: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vec_session_chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        assert_eq!(vec_table_exists.as_deref(), Some("vec_session_chunks"));
+        Ok(())
+    }
+
+    #[test]
+    fn vec_table_knn_query_returns_closest_chunk() -> Result<()> {
+        let mut db = create_db()?;
+        let mut exact = vec![0.0_f32; 1536];
+        exact[0] = 1.0;
+        let mut nearby = vec![0.0_f32; 1536];
+        nearby[0] = 0.75;
+        nearby[1] = 0.25;
+
+        db.upsert_rag_chunks(&[
+            RagChunkRecord {
+                chunk_id: 1,
+                embedding: exact.clone(),
+                session_id: "sess-a".to_string(),
+                ts_ms: 1,
+                tool_name: Some("event_msg".to_string()),
+                kind: "user".to_string(),
+                model: "text-embedding-3-small".to_string(),
+                content_hash: "hash-a".to_string(),
+                text: "exact".to_string(),
+                source_event_id: 1,
+            },
+            RagChunkRecord {
+                chunk_id: 2,
+                embedding: nearby,
+                session_id: "sess-a".to_string(),
+                ts_ms: 2,
+                tool_name: Some("event_msg".to_string()),
+                kind: "assistant".to_string(),
+                model: "text-embedding-3-small".to_string(),
+                content_hash: "hash-b".to_string(),
+                text: "nearby".to_string(),
+                source_event_id: 2,
+            },
+        ])?;
+
+        let nearest = db.search_similar_chunks(&exact, &RagSearchFilters::default(), 1)?;
+        assert_eq!(nearest.len(), 1);
+        assert_eq!(nearest[0].chunk_id, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn search_similar_chunks_applies_session_filter() -> Result<()> {
+        let mut db = create_db()?;
+        let mut exact = vec![0.0_f32; 1536];
+        exact[0] = 1.0;
+
+        db.upsert_rag_chunks(&[
+            RagChunkRecord {
+                chunk_id: 11,
+                embedding: exact.clone(),
+                session_id: "sess-a".to_string(),
+                ts_ms: 1,
+                tool_name: Some("event_msg".to_string()),
+                kind: "user".to_string(),
+                model: "text-embedding-3-small".to_string(),
+                content_hash: "hash-a".to_string(),
+                text: "alpha".to_string(),
+                source_event_id: 1,
+            },
+            RagChunkRecord {
+                chunk_id: 22,
+                embedding: exact.clone(),
+                session_id: "sess-b".to_string(),
+                ts_ms: 2,
+                tool_name: Some("event_msg".to_string()),
+                kind: "assistant".to_string(),
+                model: "text-embedding-3-small".to_string(),
+                content_hash: "hash-b".to_string(),
+                text: "beta".to_string(),
+                source_event_id: 2,
+            },
+        ])?;
+
+        let filters = RagSearchFilters {
+            session_id: Some("sess-b".to_string()),
+            tool_name: None,
+            since_ts_ms: None,
+            until_ts_ms: None,
+        };
+        let hits = db.search_similar_chunks(&exact, &filters, 10)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "sess-b");
         Ok(())
     }
 }

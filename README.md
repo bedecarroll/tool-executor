@@ -20,6 +20,7 @@ Stay oriented across many conversations with the terminal UI. Browse recent sess
 
 - Recent-session browser with transcript previews.
 - Search by prompt, role, or full-text transcript content.
+- Experimental semantic (vector) search over indexed transcript chunks.
 - Quick resume actions that reuse the exact recorded pipeline.
 
 ### Pipeline composition
@@ -90,6 +91,42 @@ tx resume a1b2c3 --emit-command
 
 Search narrows results to relevant prompts, and resume replays the captured pipeline. Use `--emit-command` to print the shell command tx would run, which helps with debugging or scripting.
 
+### Semantic search (pseudo-RAG, experimental)
+
+`tx` can index transcript chunks into sqlite-vec and run semantic nearest-neighbor search.
+
+This feature is experimental and may change in schema, CLI flags, or ranking behavior.
+
+1. Configure embeddings:
+
+   ```bash
+   export OPENAI_API_KEY=...
+   ```
+
+2. Backfill vectors:
+
+   ```bash
+   tx rag index --batch-size 64
+   ```
+
+3. Query semantically:
+
+   ```bash
+   tx rag search --query "where did I discuss retry backoff?" --k 10
+   tx rag search --query "sqlite error details" --session codex/latest.jsonl --json
+   ```
+
+Useful options:
+
+- `tx rag index --reindex` rebuilds scoped vectors.
+- `tx rag index --session <id>` and `--since <unix-ms>` narrow indexing scope.
+- `tx rag search --tool <name> --since <unix-ms> --until <unix-ms>` apply metadata filters.
+
+Optional environment variables:
+
+- `TX_RAG_EMBED_MODEL` (default `text-embedding-3-small`)
+- `TX_RAG_OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
+
 ## Command cheatsheet
 
 ```text
@@ -99,6 +136,10 @@ tx
 # Search (prompt mode by default)
 tx search refactor
 tx search refactor --full-text --role assistant
+
+# Semantic history indexing + retrieval
+tx rag index --batch-size 64
+tx rag search --query "where did I fix the timeout bug?" --k 20
 
 # Resume and inspect pipelines
 tx resume <session-id>

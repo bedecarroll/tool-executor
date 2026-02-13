@@ -1,7 +1,9 @@
 use super::*;
+#[cfg(coverage)]
+use crate::cli::RagIndexCommand;
 use crate::cli::{
-    ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
-    SelfUpdateCommand,
+    ConfigCommand, ConfigDefaultCommand, ExportCommand, RagCommand, RagSearchCommand,
+    ResumeCommand, SearchCommand, SelfUpdateCommand,
 };
 use crate::config::model::{
     Config, ConfigDiagnostic, Defaults, DiagnosticLevel, EnvVar, FeatureConfig, ProfileConfig,
@@ -964,6 +966,104 @@ fn app_search_rejects_role_without_full_text() -> Result<()> {
     };
     let err = app.search(&cmd).expect_err("role requires full-text");
     assert!(err.to_string().contains("--role requires --full-text"));
+    Ok(())
+}
+
+#[test]
+fn app_rag_search_rejects_inverted_time_window() -> Result<()> {
+    let (_temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let cmd = RagSearchCommand {
+        query: "hello".to_string(),
+        k: 5,
+        session: None,
+        tool: None,
+        since: Some(20),
+        until: Some(10),
+        json: false,
+    };
+    let err = app
+        .rag(&RagCommand::Search(cmd))
+        .expect_err("search should reject inverted time windows");
+    assert!(err.to_string().contains("--since must be <= --until"));
+    Ok(())
+}
+
+#[cfg(coverage)]
+#[test]
+fn app_rag_index_and_search_paths() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let _api_key = EnvOverride::set_var("OPENAI_API_KEY", "coverage-key");
+
+    app.rag(&RagCommand::Index(RagIndexCommand {
+        since: None,
+        session: None,
+        reindex: false,
+        batch_size: 8,
+    }))?;
+    app.rag(&RagCommand::Index(RagIndexCommand {
+        since: None,
+        session: Some(summary.id.clone()),
+        reindex: false,
+        batch_size: 8,
+    }))?;
+    app.rag(&RagCommand::Index(RagIndexCommand {
+        since: None,
+        session: Some(summary.id.clone()),
+        reindex: true,
+        batch_size: 8,
+    }))?;
+
+    app.rag(&RagCommand::Search(RagSearchCommand {
+        query: "hello world".to_string(),
+        k: 5,
+        session: Some(summary.id.clone()),
+        tool: Some("event_msg".to_string()),
+        since: None,
+        until: None,
+        json: true,
+    }))?;
+
+    app.rag(&RagCommand::Search(RagSearchCommand {
+        query: "hello world".to_string(),
+        k: 5,
+        session: Some("missing-session".to_string()),
+        tool: None,
+        since: None,
+        until: None,
+        json: false,
+    }))?;
+    Ok(())
+}
+
+#[cfg(coverage)]
+#[test]
+fn app_rag_search_plain_output_and_preview_trimming() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let _api_key = EnvOverride::set_var("OPENAI_API_KEY", "coverage-key");
+
+    app.rag(&RagCommand::Index(RagIndexCommand {
+        since: None,
+        session: Some(summary.id.clone()),
+        reindex: true,
+        batch_size: 8,
+    }))?;
+
+    app.rag(&RagCommand::Search(RagSearchCommand {
+        query: "hello world".to_string(),
+        k: 5,
+        session: Some(summary.id.clone()),
+        tool: Some("event_msg".to_string()),
+        since: None,
+        until: None,
+        json: false,
+    }))?;
+
+    assert_eq!(trim_preview("alpha   beta", 20), "alpha beta");
+    let long = "word ".repeat(80);
+    assert!(trim_preview(&long, 16).ends_with("..."));
+
     Ok(())
 }
 

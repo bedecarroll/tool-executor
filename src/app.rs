@@ -9,12 +9,15 @@ use color_eyre::eyre::{WrapErr, eyre};
 use regex::Regex;
 use serde_json::json;
 use std::sync::LazyLock;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::debug;
 use which::which;
 
 use crate::cli::{
     Cli, ConfigCommand, ConfigDefaultCommand, ConfigSchemaCommand, ExportCommand,
-    InternalPromptAssemblerCommand, ResumeCommand, SearchCommand, SelfUpdateCommand, StatsCommand,
+    InternalPromptAssemblerCommand, RagCommand, RagIndexCommand, RagSearchCommand, ResumeCommand,
+    SearchCommand, SelfUpdateCommand, StatsCommand,
 };
 use crate::commands::stats;
 use crate::config::model::{DiagnosticLevel, PromptAssemblerConfig};
@@ -27,6 +30,7 @@ use crate::pipeline::{
 };
 use crate::prompts::{PromptAssembler, PromptStatus};
 use crate::providers;
+use crate::rag::{OpenAIEmbeddingProvider, RagIndexOptions, index_history, search_history};
 use crate::session::{SearchHit, SessionSummary, Transcript};
 use crate::tui;
 use crate::util;
@@ -151,6 +155,94 @@ impl<'cli> App<'cli> {
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&payload)?);
+        Ok(())
+    }
+
+    /// Execute semantic-index commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embeddings cannot be generated or vector database
+    /// operations fail.
+    pub fn rag(&mut self, cmd: &RagCommand) -> Result<()> {
+        match cmd {
+            RagCommand::Index(cmd) => self.rag_index(cmd),
+            RagCommand::Search(cmd) => self.rag_search(cmd),
+        }
+    }
+
+    fn rag_index(&mut self, cmd: &RagIndexCommand) -> Result<()> {
+        let provider = OpenAIEmbeddingProvider::from_env()?;
+        let options = RagIndexOptions {
+            session_id: cmd.session.clone(),
+            since_ts_ms: cmd.since,
+            reindex: cmd.reindex,
+            batch_size: cmd.batch_size,
+        };
+        let report = index_history(&mut self.db, &provider, &options)?;
+        println!(
+            "rag index complete: scanned={}, embedded={}, skipped={}, deleted={}",
+            report.scanned, report.embedded, report.skipped, report.deleted
+        );
+        Ok(())
+    }
+
+    fn rag_search(&self, cmd: &RagSearchCommand) -> Result<()> {
+        if let (Some(since), Some(until)) = (cmd.since, cmd.until)
+            && since > until
+        {
+            return Err(eyre!("--since must be <= --until"));
+        }
+
+        let provider = OpenAIEmbeddingProvider::from_env()?;
+        let filters = crate::db::RagSearchFilters {
+            session_id: cmd.session.clone(),
+            tool_name: cmd.tool.clone(),
+            since_ts_ms: cmd.since,
+            until_ts_ms: cmd.until,
+        };
+        let hits = search_history(&self.db, &provider, &cmd.query, &filters, cmd.k)?;
+
+        if cmd.json {
+            let payload = hits
+                .iter()
+                .enumerate()
+                .map(|(index, hit)| {
+                    json!({
+                        "rank": index + 1,
+                        "distance": hit.distance,
+                        "timestamp_ms": hit.ts_ms,
+                        "timestamp": format_ts_ms(hit.ts_ms),
+                        "session_id": hit.session_id,
+                        "tool_name": hit.tool_name,
+                        "kind": hit.kind,
+                        "chunk_id": hit.chunk_id,
+                        "source_event_id": hit.source_event_id,
+                        "text": hit.text,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok(());
+        }
+
+        if hits.is_empty() {
+            println!("No semantic matches found.");
+            return Ok(());
+        }
+
+        for (index, hit) in hits.iter().enumerate() {
+            println!(
+                "#{rank:>2} dist={distance:.6} ts={timestamp} session={session} tool={tool} kind={kind}",
+                rank = index + 1,
+                distance = hit.distance,
+                timestamp = format_ts_ms(hit.ts_ms),
+                session = hit.session_id,
+                tool = hit.tool_name.as_deref().unwrap_or("-"),
+                kind = hit.kind,
+            );
+            println!("    {}", trim_preview(&hit.text, 200));
+        }
         Ok(())
     }
 
@@ -877,6 +969,22 @@ fn prompt_for_stdin_with_reader<R: BufRead>(label: Option<&str>, reader: &mut R)
     }
 
     Ok(buffer)
+}
+
+fn format_ts_ms(ts_ms: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(ts_ms / 1000)
+        .ok()
+        .and_then(|dt| dt.format(&Rfc3339).ok())
+        .unwrap_or_else(|| ts_ms.to_string())
+}
+
+fn trim_preview(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let trimmed: String = normalized.chars().take(max_chars).collect();
+    format!("{trimmed}...")
 }
 
 fn summary_to_json(
