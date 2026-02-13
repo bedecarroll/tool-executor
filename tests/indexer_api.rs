@@ -48,12 +48,10 @@ fn indexer_deduplicates_messages_and_prefers_response_item_source() -> Result<()
     let sessions_dir = temp.child("sessions");
     sessions_dir.create_dir_all()?;
     let session_file = sessions_dir.child("duplicate.jsonl");
-    session_file.write_str(
-        "{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
-    )?;
-    session_file.write_str(
-        "{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n",
-    )?;
+    session_file.write_str(concat!(
+        "{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n",
+        "{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n"
+    ))?;
 
     let config = config_from_provider(provider_with_root(sessions_dir.path()));
     let db_path = temp.child("tx.sqlite3");
@@ -64,6 +62,7 @@ fn indexer_deduplicates_messages_and_prefers_response_item_source() -> Result<()
 
     let sessions = db.list_sessions(Some("codex"), false, None, Some(10))?;
     assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].wrapper.as_deref(), Some("shellwrap"));
     let transcript = db
         .fetch_transcript(&sessions[0].id)?
         .expect("transcript should exist");
