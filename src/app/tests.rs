@@ -1111,6 +1111,7 @@ fn resume_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
 
 #[test]
 fn resume_executes_pipeline_when_not_emitting() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
     let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
     let cmd = ResumeCommand {
         session_id: summary.id,
