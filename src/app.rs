@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
+#[cfg(any(test, not(coverage)))]
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -945,6 +947,7 @@ fn default_shell() -> ShellCommand {
     }
 }
 
+#[cfg(any(test, not(coverage)))]
 fn prompt_for_stdin_with_reader<R: BufRead>(label: Option<&str>, reader: &mut R) -> Result<String> {
     if let Some(name) = label {
         eprintln!(

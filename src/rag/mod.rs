@@ -183,6 +183,7 @@ impl OpenAIEmbeddingProvider {
 
     #[cfg(coverage)]
     fn embed_batch_with_retry(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let _ = (&self.api_key, &self.base_url, &self.client, MAX_RETRIES);
         let vectors = texts
             .iter()
             .map(|text| deterministic_embedding(text))
