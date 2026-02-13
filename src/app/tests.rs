@@ -1,6 +1,7 @@
 use super::*;
 use crate::cli::{
     ConfigCommand, ConfigDefaultCommand, ExportCommand, ResumeCommand, SearchCommand,
+    SelfUpdateCommand,
 };
 use crate::config::model::{
     Config, ConfigDiagnostic, Defaults, DiagnosticLevel, EnvVar, FeatureConfig, ProfileConfig,
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::env;
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{self, BufRead, Cursor, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -45,6 +46,45 @@ fn sample_summary() -> SessionSummary {
         size: 4,
         mtime: 5,
     }
+}
+
+struct FailingWriter {
+    fail_on_write: bool,
+    fail_on_flush: bool,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.fail_on_write {
+            Err(io::Error::other("write failed"))
+        } else {
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.fail_on_flush {
+            Err(io::Error::other("flush failed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct FailingBufRead;
+
+impl io::Read for FailingBufRead {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("read failed"))
+    }
+}
+
+impl BufRead for FailingBufRead {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        Err(io::Error::other("read failed"))
+    }
+
+    fn consume(&mut self, _amt: usize) {}
 }
 
 #[test]
@@ -114,6 +154,48 @@ fn prompt_for_stdin_with_reader_normalizes_crlf() -> Result<()> {
     let captured = prompt_for_stdin_with_reader(Some("Label"), &mut reader)?;
     assert_eq!(captured, "value\n");
     Ok(())
+}
+
+#[test]
+fn emit_terminal_title_with_writer_respects_terminal_mode() -> Result<()> {
+    let mut interactive = Vec::new();
+    emit_terminal_title_with_writer("demo", true, &mut interactive)?;
+    assert_eq!(interactive, b"\x1b]0;demo\x07");
+
+    let mut non_interactive = Vec::new();
+    emit_terminal_title_with_writer("demo", false, &mut non_interactive)?;
+    assert!(non_interactive.is_empty());
+    Ok(())
+}
+
+#[test]
+fn emit_terminal_title_with_writer_propagates_write_error() {
+    let mut writer = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err =
+        emit_terminal_title_with_writer("demo", true, &mut writer).expect_err("write should fail");
+    assert!(err.to_string().contains("write failed"));
+}
+
+#[test]
+fn emit_terminal_title_with_writer_propagates_flush_error() {
+    let mut writer = FailingWriter {
+        fail_on_write: false,
+        fail_on_flush: true,
+    };
+    let err =
+        emit_terminal_title_with_writer("demo", true, &mut writer).expect_err("flush should fail");
+    assert!(err.to_string().contains("flush failed"));
+}
+
+#[test]
+fn prompt_for_stdin_with_reader_surfaces_read_errors() {
+    let mut reader = FailingBufRead;
+    let err =
+        prompt_for_stdin_with_reader(Some("Label"), &mut reader).expect_err("reader should fail");
+    assert!(err.to_string().contains("read failed"));
 }
 
 #[test]
@@ -222,6 +304,25 @@ fn collate_search_results_skips_missing_summary() -> Result<()> {
 }
 
 #[test]
+fn collate_search_results_propagates_lookup_errors() {
+    let hits = vec![SearchHit {
+        session_id: "missing".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        label: None,
+        role: Some("user".into()),
+        snippet: None,
+        last_active: Some(50),
+        actionable: true,
+    }];
+
+    let mut lookup = |_id: &str| -> Result<Option<SessionSummary>> { Err(eyre!("lookup failed")) };
+    let err = App::collate_search_results(hits, None, None, None, &mut lookup)
+        .expect_err("lookup errors should bubble up");
+    assert!(err.to_string().contains("lookup failed"));
+}
+
+#[test]
 fn log_index_report_emits_warnings_for_errors() {
     let mut report = IndexReport {
         scanned: 1,
@@ -235,6 +336,23 @@ fn log_index_report_emits_warnings_for_errors() {
     };
     log_index_report(&report);
     report.errors.clear();
+    log_index_report(&report);
+}
+
+#[test]
+fn log_index_report_emits_debug_when_enabled() {
+    let report = IndexReport {
+        scanned: 3,
+        updated: 2,
+        skipped: 1,
+        removed: 0,
+        errors: Vec::new(),
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     log_index_report(&report);
 }
 
@@ -317,7 +435,9 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
     let temp = TempDir::new()?;
     let log_path = temp.child("capture.log");
     let script = temp.child("capture.sh");
-    script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+    script.write_str(
+        "#!/bin/sh\nprintf '%s|%s' \"$TX_CAPTURE_STDIN_DATA\" \"$PLAN_ENV_TEST\" > \"$1\"\n",
+    )?;
     let perms = std::fs::Permissions::from_mode(0o755);
     std::fs::set_permissions(script.path(), perms)?;
 
@@ -325,7 +445,7 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
         pipeline: "internal capture-arg".into(),
         display: "log".into(),
         friendly_display: "log".into(),
-        env: Vec::new(),
+        env: vec![("PLAN_ENV_TEST".into(), "expected".into())],
         invocation: Invocation::Exec {
             argv: vec![
                 script.path().display().to_string(),
@@ -348,7 +468,36 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
     execute_plan_with_prompt(&plan, true, Some("payload".into()), |_| Ok(None))?;
 
     let captured = std::fs::read_to_string(log_path.path())?;
-    assert_eq!(captured, "payload");
+    assert_eq!(captured, "payload|expected");
+    Ok(())
+}
+
+#[cfg(all(unix, coverage))]
+#[test]
+fn execute_plan_coverage_wrapper_executes_without_prompt() -> Result<()> {
+    let temp = TempDir::new()?;
+    let plan = PipelinePlan {
+        pipeline: "echo ok".into(),
+        display: "echo ok".into(),
+        friendly_display: "echo ok".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell {
+            command: "true".into(),
+        },
+        provider: "demo".into(),
+        terminal_title: "demo".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd: temp.path().to_path_buf(),
+        prompt_assembler: None,
+    };
+
+    execute_plan(&plan)?;
     Ok(())
 }
 
@@ -356,13 +505,17 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
 #[test]
 fn default_shell_prefers_environment_or_falls_back() {
     let _guard = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("SHELL", "/bin/sh");
-    }
+    let set_shell = EnvOverride::set_var("SHELL", "/bin/sh");
 
     let shell = default_shell();
     assert_eq!(shell.flag, "-c");
-    assert!(!shell.path.is_empty());
+    assert_eq!(shell.path, "/bin/sh");
+
+    drop(set_shell);
+    let _unset = EnvOverride::remove("SHELL");
+    let fallback = default_shell();
+    assert_eq!(fallback.flag, "-c");
+    assert_eq!(fallback.path, "/bin/sh");
 }
 
 fn setup_directories(temp: &TempDir) -> Result<AppDirectories> {
@@ -562,6 +715,15 @@ fn configure_provider_env() {
     }
 }
 
+#[cfg(unix)]
+fn install_pa_script(temp: &TempDir, script: &str) -> Result<PathBuf> {
+    let pa = temp.child("pa");
+    pa.write_str(script)?;
+    let perms = fs::Permissions::from_mode(0o755);
+    fs::set_permissions(pa.path(), perms)?;
+    Ok(pa.path().to_path_buf())
+}
+
 fn build_app_fixture(
     diagnostics: Vec<ConfigDiagnostic>,
 ) -> Result<(TempDir, App<'static>, SessionSummary)> {
@@ -630,6 +792,109 @@ fn app_search_and_export_paths() -> Result<()> {
 }
 
 #[test]
+fn app_search_surfaces_db_error_when_sessions_table_missing() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let cmd = SearchCommand {
+        term: None,
+        full_text: false,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("search should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_search_surfaces_db_error_when_first_prompt_query_fails() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let cmd = SearchCommand {
+        term: Some("hello".into()),
+        full_text: false,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("first-prompt search should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_search_surfaces_db_error_when_full_text_query_fails() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE messages_fts", [])?;
+
+    let cmd = SearchCommand {
+        term: Some("hello".into()),
+        full_text: true,
+        provider: None,
+        since: None,
+        role: None,
+        limit: None,
+    };
+    let err = app
+        .search(&cmd)
+        .expect_err("full-text search should fail when FTS table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_export_surfaces_db_error_when_messages_table_missing() -> Result<()> {
+    let (_temp, app, summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE messages", [])?;
+
+    let cmd = ExportCommand {
+        session_id: summary.id,
+    };
+    let err = app
+        .export(&cmd)
+        .expect_err("export should fail when messages table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("failed to")
+            || err.to_string().contains("database"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn app_search_rejects_role_without_full_text() -> Result<()> {
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     let cmd = SearchCommand {
@@ -660,6 +925,149 @@ fn app_resume_accepts_plain_session_id() -> Result<()> {
         dry_run: false,
         provider_args: Vec::new(),
     };
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_resume_handles_provider_without_resume_metadata() -> Result<()> {
+    let (_temp, mut app, mut summary) = build_app_fixture(Vec::new())?;
+    app.loaded
+        .config
+        .providers
+        .get_mut("alt")
+        .expect("alt provider configured")
+        .env
+        .clear();
+    summary.id = "sess-alt".into();
+    summary.uuid = Some("uuid-alt".into());
+    summary.provider = "alt".into();
+    summary.path = PathBuf::from("sess-alt.jsonl");
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "hello from alt",
+        None,
+        summary.last_active,
+    );
+    message.is_first = true;
+    app.db
+        .upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("mismatch".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_resume_rejects_invalid_vars() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("default".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: vec!["INVALID".into()],
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
+    let err = app
+        .resume(&cmd)
+        .expect_err("invalid vars should be rejected");
+    assert!(err.to_string().contains("expected KEY=VALUE"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_resume_profile_builds_prompt_invocation_and_validates_prompt() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"demo/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Demo\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    let profile = app
+        .loaded
+        .config
+        .profiles
+        .get_mut("default")
+        .expect("default profile");
+    profile.prompt_assembler = Some("demo/prompt".into());
+    profile.prompt_assembler_args = vec!["one".into(), "two".into()];
+
+    let (prompt_invocation, has_pre_snippets) =
+        app.resolve_resume_profile(Some("default"), "codex")?;
+
+    assert!(has_pre_snippets);
+    let invocation = prompt_invocation.expect("prompt invocation");
+    assert_eq!(invocation.name, "demo/prompt");
+    assert_eq!(invocation.args, vec!["one".to_string(), "two".to_string()]);
+    assert!(app.prompt.is_some());
+    Ok(())
+}
+
+#[test]
+fn resume_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
+    let (_temp, mut app, mut summary) = build_app_fixture(Vec::new())?;
+    summary.path = PathBuf::from("/");
+    app.db
+        .upsert_session(&SessionIngest::new(summary.clone(), Vec::new()))?;
+
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: Some("default".into()),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: true,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
+    app.resume(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn resume_executes_pipeline_when_not_emitting() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let cmd = ResumeCommand {
+        session_id: summary.id,
+        profile: None,
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrap: None,
+        emit_command: false,
+        emit_json: false,
+        vars: Vec::new(),
+        dry_run: false,
+        provider_args: Vec::new(),
+    };
+
     app.resume(&cmd)?;
     Ok(())
 }
@@ -766,6 +1174,63 @@ fn ensure_prompt_available_errors_when_disabled() -> Result<()> {
         err.to_string().contains("prompt-assembler is disabled"),
         "unexpected error: {err:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn ensure_prompt_available_errors_when_existing_prompt_feature_is_disabled() -> Result<()> {
+    let (_temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    app.prompt = Some(PromptAssembler::new(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    }));
+    app.loaded.config.features.prompt_assembler = None;
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("prompt lookup should fail when assembler disabled");
+    assert!(err.to_string().contains("prompt-assembler is disabled"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_prompt_available_errors_when_prompt_name_missing() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"other/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Other\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("missing prompt should error");
+    assert!(
+        err.to_string()
+            .contains("prompt assembler prompt 'demo/prompt' not found")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_prompt_available_surfaces_unavailable_prompt_assembler() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (temp, mut app, _summary) = build_app_fixture(Vec::new())?;
+    let pa_path = install_pa_script(&temp, "#!/bin/sh\nexit 1\n")?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+
+    let err = app
+        .ensure_prompt_available("demo/prompt")
+        .expect_err("unavailable prompt assembler should fail");
+    assert!(err.to_string().contains("prompt assembler unavailable"));
     Ok(())
 }
 
@@ -943,6 +1408,54 @@ fn execute_plan_shell_captures_prompt_input() -> Result<()> {
 
     execute_plan_with_prompt(&plan, true, None, |_| Ok(Some("payload".into())))?;
     assert_eq!(std::fs::read_to_string(output.path())?, "payload");
+    Ok(())
+}
+
+#[test]
+fn execute_plan_with_stdin_prompt_reads_input_for_terminal_stdin() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let output = temp.child("captured-from-helper.txt");
+    let script = temp.child(if cfg!(windows) {
+        "capture-helper.cmd"
+    } else {
+        "capture-helper.sh"
+    });
+    if cfg!(windows) {
+        script.write_str(
+            "@echo off\r\nsetlocal EnableExtensions EnableDelayedExpansion\r\n<nul set /p=\"%TX_CAPTURE_STDIN_DATA%\" > \"%~1\"\r\nexit /B 0\r\n",
+        )?;
+    } else {
+        script.write_str("#!/bin/sh\nprintf '%s' \"$TX_CAPTURE_STDIN_DATA\" > \"$1\"\n")?;
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(script.path(), perms)?;
+        }
+    }
+
+    let command = format!("{} {}", script.path().display(), output.path().display());
+    let plan = PipelinePlan {
+        pipeline: command.clone(),
+        display: "capture-helper".into(),
+        friendly_display: "capture-helper".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell { command },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: true,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: Some("Prompt".into()),
+        cwd: temp.path().to_path_buf(),
+        prompt_assembler: None,
+    };
+
+    execute_plan_with_stdin_prompt(&plan, true, |_| Ok("payload-helper".into()))?;
+    assert_eq!(std::fs::read_to_string(output.path())?, "payload-helper");
     Ok(())
 }
 
@@ -1143,6 +1656,67 @@ fn execute_plan_exec_succeeds_and_failures() -> Result<()> {
 }
 
 #[test]
+fn execute_plan_exec_rejects_empty_argv() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "exec empty".into(),
+        display: "exec empty".into(),
+        friendly_display: "exec empty".into(),
+        env: Vec::new(),
+        invocation: Invocation::Exec { argv: Vec::new() },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let err = execute_plan(&plan).expect_err("empty argv should error");
+    assert!(err.to_string().contains("empty argv"));
+    Ok(())
+}
+
+#[test]
+fn execute_plan_with_prompt_surfaces_prompt_callback_error() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "shell true".into(),
+        display: "shell true".into(),
+        friendly_display: "shell true".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell {
+            command: if cfg!(windows) {
+                "exit 0".into()
+            } else {
+                "true".into()
+            },
+        },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: true,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: Some("Prompt".into()),
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let err = execute_plan_with_prompt(&plan, true, None, |_label| Err(eyre!("prompt failed")))
+        .expect_err("prompt callback error should surface");
+    assert!(err.to_string().contains("prompt failed"));
+    Ok(())
+}
+
+#[test]
 fn app_doctor_and_config_lint() -> Result<()> {
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     app.doctor()?;
@@ -1197,6 +1771,82 @@ fn emit_command_covers_all_modes() -> Result<()> {
             friendly: true,
         },
     )?;
+    Ok(())
+}
+
+#[test]
+fn config_output_helpers_propagate_writer_errors() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err = write_config_default(
+        &mut failing_write,
+        &ConfigDefaultCommand { raw: false },
+        &app.loaded,
+    )
+    .expect_err("default writer error should surface");
+    assert!(err.to_string().contains("write failed"));
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err = write_config_schema(&mut failing_write, &ConfigSchemaCommand { pretty: true })
+        .expect_err("schema writer error should surface");
+    assert!(err.to_string().contains("write failed"));
+
+    let mut failing_write = FailingWriter {
+        fail_on_write: true,
+        fail_on_flush: false,
+    };
+    let err =
+        write_config_dump(&mut failing_write, &app.loaded.merged).expect_err("dump should fail");
+    assert!(err.to_string().contains("write failed"));
+
+    Ok(())
+}
+
+#[test]
+fn emit_command_with_writer_propagates_flush_errors() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let plan = PipelinePlan {
+        pipeline: "echo hi".into(),
+        display: "echo hi".into(),
+        friendly_display: "friendly hi".into(),
+        env: vec![("KEY".into(), "VALUE".into())],
+        invocation: Invocation::Shell {
+            command: "true".into(),
+        },
+        provider: "codex".into(),
+        terminal_title: "codex".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd,
+        prompt_assembler: None,
+    };
+
+    let mut failing_flush = FailingWriter {
+        fail_on_write: false,
+        fail_on_flush: true,
+    };
+    let err = emit_command_with_writer(
+        &mut failing_flush,
+        &plan,
+        EmitMode::Plain {
+            newline: false,
+            friendly: false,
+        },
+    )
+    .expect_err("flush failure should surface");
+    assert!(err.to_string().contains("flush failed"));
     Ok(())
 }
 
@@ -1269,6 +1919,36 @@ fn run_doctor_reports_missing_session_root() -> Result<()> {
     run_doctor(&app.loaded, &app.db)?;
     drop(app);
     temp.close()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn run_doctor_reports_error_diag_missing_binary_and_prompt_ready() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let pa_path = install_pa_script(
+        &temp,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '[{\"name\":\"demo/prompt\",\"stdin_supported\":true}]'\n  exit 0\nfi\nif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ]; then\n  printf '%s' '{\"profile\":{\"content\":\"Demo\"}}'\n  exit 0\nfi\nexit 1\n",
+    )?;
+    let _pa_guard = EnvOverride::set_path("TX_TEST_PA_BIN", &pa_path);
+
+    let diagnostic = ConfigDiagnostic {
+        level: DiagnosticLevel::Error,
+        message: "broken".into(),
+    };
+    let (_fixture_temp, mut app, _summary) = build_app_fixture(vec![diagnostic])?;
+    app.loaded.config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    app.loaded
+        .config
+        .providers
+        .get_mut("codex")
+        .expect("codex provider")
+        .bin = "tx-tests-missing-binary-coverage-branch".into();
+
+    run_doctor(&app.loaded, &app.db)?;
     Ok(())
 }
 
@@ -1348,6 +2028,71 @@ namespace = "tests"
     assert_eq!(app.loaded.directories.data_dir, data_dir.path());
     assert_eq!(app.loaded.directories.cache_dir, cache_dir.path());
     assert_eq!(app.db.count_sessions()?, 0);
+    Ok(())
+}
+
+#[test]
+fn bootstrap_errors_when_tx_data_dir_is_not_a_directory() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new()?;
+    let config_dir = temp.child("config");
+    config_dir.create_dir_all()?;
+    let sessions_dir = config_dir.child("sessions");
+    sessions_dir.create_dir_all()?;
+    let config_toml = format!(
+        r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+session_roots = ["{root}"]
+"#,
+        root = toml_path(sessions_dir.path()),
+    );
+    config_dir.child("config.toml").write_str(&config_toml)?;
+
+    let bad_data_dir = temp.child("data-file");
+    bad_data_dir.write_str("not-a-dir")?;
+    let cache_dir = temp.child("cache");
+    cache_dir.create_dir_all()?;
+    let _data_guard = EnvOverride::set_path("TX_DATA_DIR", bad_data_dir.path());
+    let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+
+    let cli = Cli {
+        config_dir: Some(config_dir.path().to_path_buf()),
+        verbose: 0,
+        quiet: false,
+        command: None,
+    };
+
+    let Err(err) = App::bootstrap(&cli) else {
+        panic!("bootstrap should fail when data dir is a file");
+    };
+    assert!(
+        err.to_string().contains("database")
+            || err.to_string().contains("Not a directory")
+            || err.to_string().contains("not a directory"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn app_doctor_surfaces_db_errors_when_sessions_table_missing() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let db_path = app.loaded.directories.data_dir.join("tx.sqlite3");
+    let conn = rusqlite::Connection::open(db_path)?;
+    conn.execute("DROP TABLE sessions", [])?;
+
+    let err = app
+        .doctor()
+        .expect_err("doctor should fail when sessions table is missing");
+    assert!(
+        err.to_string().contains("no such table")
+            || err.to_string().contains("database")
+            || err.to_string().contains("failed to"),
+        "unexpected error: {err:?}"
+    );
     Ok(())
 }
 
@@ -1464,5 +2209,85 @@ namespace = "pa"
 
     let mut app = App::bootstrap(&cli)?;
     app.ensure_prompt_available("demo/prompt")?;
+    Ok(())
+}
+
+#[test]
+fn normalize_target_version_tag_normalizes_input() {
+    assert_eq!(
+        normalize_target_version_tag(Some("1.2.3")).as_deref(),
+        Some("v1.2.3")
+    );
+    assert_eq!(
+        normalize_target_version_tag(Some("v1.2.3")).as_deref(),
+        Some("v1.2.3")
+    );
+    assert_eq!(normalize_target_version_tag(None), None);
+}
+
+#[test]
+fn self_update_message_formats_states() {
+    assert_eq!(self_update_message(true, "v1.0.0"), "Updated tx to v1.0.0");
+    assert_eq!(
+        self_update_message(false, "v1.0.0"),
+        "tx is already up to date (v1.0.0)"
+    );
+}
+
+#[test]
+fn run_self_update_with_passes_quiet_and_target_tag() -> Result<()> {
+    let cmd = SelfUpdateCommand {
+        version: Some("1.2.3".into()),
+    };
+    let mut seen_quiet = None;
+    let mut seen_tag = None;
+
+    let message = run_self_update_with(&cmd, true, |quiet, target_tag| {
+        seen_quiet = Some(quiet);
+        seen_tag = target_tag.map(ToString::to_string);
+        Ok((true, "v1.2.3".into()))
+    })?;
+
+    assert_eq!(seen_quiet, Some(true));
+    assert_eq!(seen_tag.as_deref(), Some("v1.2.3"));
+    assert_eq!(message, "Updated tx to v1.2.3");
+    Ok(())
+}
+
+#[test]
+fn run_self_update_with_propagates_updater_error() {
+    let cmd = SelfUpdateCommand {
+        version: Some("v2.0.0".into()),
+    };
+    let err = run_self_update_with(&cmd, false, |_quiet, _target_tag| Err(eyre!("boom")))
+        .expect_err("updater error should bubble up");
+    assert!(err.to_string().contains("boom"));
+}
+
+#[test]
+fn app_self_update_uses_test_backend() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let cmd = SelfUpdateCommand {
+        version: Some("v1.2.3".into()),
+    };
+    app.self_update(&cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_self_update_surfaces_test_backend_failure() -> Result<()> {
+    let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
+    let _guard = EnvOverride::set_var("TX_SELF_UPDATE_TEST_FAIL", "1");
+    let cmd = SelfUpdateCommand {
+        version: Some("v1.2.3".into()),
+    };
+
+    let err = app
+        .self_update(&cmd)
+        .expect_err("test backend failure should bubble up");
+    assert!(
+        err.to_string()
+            .contains("self-update backend intentionally failed for tests")
+    );
     Ok(())
 }

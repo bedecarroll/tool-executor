@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
@@ -33,25 +33,9 @@ pub fn run(command: &InternalCommand) -> Result<()> {
 
 fn capture_arg(cmd: &InternalCaptureArgCommand) -> Result<()> {
     let capture_input = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
-    let prompt = if cmd.pre_commands.is_empty() {
-        if let Some(input) = capture_input.clone() {
-            if input.len() > cmd.prompt_limit {
-                return Err(eyre!(
-                    "captured prompt exceeds configured limit of {} bytes",
-                    cmd.prompt_limit
-                ));
-            }
-            input
-        } else {
-            read_stdin(cmd.prompt_limit).wrap_err("failed to read prompt from stdin")?
-        }
-    } else {
-        run_pre_pipeline(
-            &cmd.pre_commands,
-            capture_input.as_deref(),
-            cmd.prompt_limit,
-        )?
-    };
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let prompt = capture_prompt(cmd, capture_input.as_deref(), &mut handle)?;
 
     let resolved_args = resolve_provider_args(&cmd.provider_args, &prompt);
 
@@ -72,6 +56,28 @@ fn capture_arg(cmd: &InternalCaptureArgCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn capture_prompt(
+    cmd: &InternalCaptureArgCommand,
+    capture_input: Option<&str>,
+    stdin: &mut dyn Read,
+) -> Result<String> {
+    if cmd.pre_commands.is_empty() {
+        if let Some(input) = capture_input {
+            if input.len() > cmd.prompt_limit {
+                return Err(eyre!(
+                    "captured prompt exceeds configured limit of {} bytes",
+                    cmd.prompt_limit
+                ));
+            }
+            Ok(input.to_string())
+        } else {
+            read_reader(stdin, cmd.prompt_limit).wrap_err("failed to read prompt from stdin")
+        }
+    } else {
+        run_pre_pipeline(&cmd.pre_commands, capture_input, cmd.prompt_limit)
+    }
 }
 
 /// Assemble a prompt via the `pa` CLI, prompting for any missing positional arguments.
@@ -156,16 +162,25 @@ fn fetch_prompt_detail(name: &str) -> Result<Value> {
 }
 
 fn prompt_for_argument(prompt: &str, index: usize) -> Result<String> {
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
     let mut stderr = io::stderr();
-    writeln!(
-        stderr,
-        "tx: prompt '{prompt}' requires a value for placeholder {{{index}}}"
-    )?;
+    prompt_for_argument_with_io(prompt, index, &mut stdin, &mut stderr)
+}
+
+fn prompt_for_argument_with_io(
+    prompt: &str,
+    index: usize,
+    stdin: &mut dyn BufRead,
+    stderr: &mut dyn Write,
+) -> Result<String> {
+    let prompt_text = format!("tx: prompt '{prompt}' requires a value for placeholder {{{index}}}");
+    writeln!(stderr, "{prompt_text}")?;
     write!(stderr, "> ")?;
     stderr.flush()?;
 
     let mut line = String::new();
-    io::stdin()
+    stdin
         .read_line(&mut line)
         .wrap_err("failed to read prompt argument")?;
     while line.ends_with(['\n', '\r']) {
@@ -224,12 +239,6 @@ fn run_pre_pipeline(commands: &[String], input: Option<&str>, limit: usize) -> R
     buffer_to_string(buffer)
 }
 
-fn read_stdin(limit: usize) -> Result<String> {
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    read_reader(&mut handle, limit)
-}
-
 fn read_reader(reader: &mut dyn Read, limit: usize) -> Result<String> {
     let mut buffer = Vec::new();
     read_with_limit(reader, limit, &mut buffer)?;
@@ -282,7 +291,7 @@ mod tests {
     #[cfg(unix)]
     use crate::cli::{InternalCaptureArgCommand, InternalCommand, InternalPromptAssemblerCommand};
     #[cfg(unix)]
-    use crate::test_support::ENV_LOCK;
+    use crate::test_support::{ENV_LOCK, EnvOverride};
     #[cfg(unix)]
     use assert_fs::TempDir;
     #[cfg(unix)]
@@ -325,6 +334,49 @@ mod tests {
             err.to_string()
                 .contains("captured prompt exceeds configured limit")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_prompt_reads_stdin_when_capture_env_is_missing() -> Result<()> {
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: "echo".into(),
+            pre_commands: Vec::new(),
+            provider_args: Vec::new(),
+            prompt_limit: 64,
+        };
+        let mut stdin = Cursor::new("prompt from stdin");
+        let prompt = capture_prompt(&cmd, None, &mut stdin)?;
+        assert_eq!(prompt, "prompt from stdin");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_prompt_propagates_pre_pipeline_failure() {
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: "echo".into(),
+            pre_commands: vec!["false".into()],
+            provider_args: Vec::new(),
+            prompt_limit: 64,
+        };
+        let mut stdin = Cursor::new("");
+        let err = capture_prompt(&cmd, None, &mut stdin).unwrap_err();
+        assert!(err.to_string().contains("pre pipeline exited with status"));
+    }
+
+    #[test]
+    fn prompt_for_argument_with_io_trims_newline_and_writes_prompt() -> Result<()> {
+        let mut input = Cursor::new("value\r\n");
+        let mut stderr = Vec::new();
+        let value = prompt_for_argument_with_io("demo", 2, &mut input, &mut stderr)?;
+        assert_eq!(value, "value");
+        let output = String::from_utf8(stderr).expect("valid utf8");
+        assert!(output.contains("placeholder {2}"));
+        assert!(output.contains("> "));
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -403,21 +455,12 @@ mod tests {
             prompt_limit: 64,
         };
 
-        let original = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
-        unsafe {
-            std::env::set_var("TX_CAPTURE_STDIN_DATA", "prompt payload");
-        }
+        let _capture = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "prompt payload");
 
         capture_arg(&cmd)?;
 
         let contents = std::fs::read_to_string(output.path())?;
         assert_eq!(contents, "prompt payload");
-
-        if let Some(value) = original {
-            unsafe { std::env::set_var("TX_CAPTURE_STDIN_DATA", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CAPTURE_STDIN_DATA") };
-        }
         Ok(())
     }
 
@@ -425,9 +468,7 @@ mod tests {
     #[test]
     fn capture_arg_uses_pre_pipeline_output() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
-        }
+        let _capture = EnvOverride::remove("TX_CAPTURE_STDIN_DATA");
 
         let temp = TempDir::new()?;
         let output = temp.child("prompt.txt");
@@ -470,32 +511,17 @@ mod tests {
             prompt_limit: 4,
         };
 
-        let original = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
-        unsafe {
-            std::env::set_var("TX_CAPTURE_STDIN_DATA", "exceeds");
-        }
+        let _capture = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "exceeds");
 
         let err = capture_arg(&cmd).unwrap_err();
-
-        if let Some(value) = original {
-            unsafe { std::env::set_var("TX_CAPTURE_STDIN_DATA", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CAPTURE_STDIN_DATA") };
-        }
-
-        assert!(
-            err.to_string().contains("exceeds configured limit"),
-            "unexpected error message: {err:?}"
-        );
+        assert!(err.to_string().contains("exceeds configured limit"));
     }
 
     #[cfg(unix)]
     #[test]
     fn capture_arg_propagates_provider_failure() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
-        }
+        let _capture = EnvOverride::remove("TX_CAPTURE_STDIN_DATA");
 
         let temp = TempDir::new()?;
         let script = temp.child("provider.sh");
@@ -512,35 +538,63 @@ mod tests {
         };
 
         let err = capture_arg(&cmd).unwrap_err();
-        assert!(
-            err.to_string().contains("exited with status"),
-            "unexpected error message: {err:?}"
-        );
+        assert!(err.to_string().contains("exited with status"));
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_arg_wraps_provider_launch_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _capture = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "prompt");
+
+        let cmd = InternalCaptureArgCommand {
+            provider: "demo".into(),
+            bin: "/definitely/missing/provider-bin".into(),
+            pre_commands: Vec::new(),
+            provider_args: Vec::new(),
+            prompt_limit: 64,
+        };
+
+        let err = capture_arg(&cmd).expect_err("missing provider binary should fail");
+        assert!(err.to_string().contains("failed to launch provider 'demo'"));
     }
 
     #[cfg(unix)]
     #[test]
     fn run_pre_pipeline_errors_when_input_exceeds_limit() {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
-        }
+        let _capture = EnvOverride::remove("TX_CAPTURE_STDIN_DATA");
 
         let err = run_pre_pipeline(&["cat".into()], Some("toolong"), 3).unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds configured limit"),
-            "unexpected error: {err:?}"
-        );
+        assert!(err.to_string().contains("exceeds configured limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_uses_default_shell_when_shell_env_missing() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _unset_shell = EnvOverride::remove("SHELL");
+        let output = run_pre_pipeline(&["cat".into()], Some("hello"), 64)?;
+        assert_eq!(output, "hello");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_pre_pipeline_wraps_spawn_failure_for_invalid_shell() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _bad_shell = EnvOverride::set_var("SHELL", "/definitely/missing/shell");
+        let err = run_pre_pipeline(&["cat".into()], Some("hello"), 64)
+            .expect_err("invalid shell should fail");
+        assert!(err.to_string().contains("failed to spawn pre pipeline"));
     }
 
     #[cfg(unix)]
     #[test]
     fn run_dispatches_capture_arg_command() -> Result<()> {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("TX_CAPTURE_STDIN_DATA");
-        }
+        let _capture = EnvOverride::remove("TX_CAPTURE_STDIN_DATA");
 
         let temp = TempDir::new()?;
         let output = temp.child("prompt.txt");
@@ -568,10 +622,7 @@ mod tests {
     fn read_reader_errors_when_exceeding_limit() {
         let mut cursor = std::io::Cursor::new(b"abcdef".to_vec());
         let err = read_reader(&mut cursor, 3).unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds configured limit"),
-            "unexpected error: {err:?}"
-        );
+        assert!(err.to_string().contains("exceeds configured limit"));
     }
 
     #[cfg(unix)]
@@ -601,22 +652,15 @@ if [ -n "${PA_OUTPUT_LOG:-}" ]; then
   printf 'Demo %s\n' "$first_arg" > "$PA_OUTPUT_LOG"
 fi
 "#,
-        )?;
+        )
+        .expect("write pa script");
         let perms = fs::Permissions::from_mode(0o755);
         fs::set_permissions(pa.path(), perms)?;
 
-        let original_path = std::env::var("PATH").unwrap_or_default();
         let pa_dir = pa.path().parent().unwrap().display().to_string();
-        let new_path = if original_path.is_empty() {
-            pa_dir.clone()
-        } else {
-            format!("{pa_dir}:{original_path}")
-        };
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-            std::env::set_var("PA_ARGS_LOG", args_log.path());
-            std::env::set_var("PA_OUTPUT_LOG", output_log.path());
-        }
+        let _path = EnvOverride::set_var("PATH", &pa_dir);
+        let _args_log = EnvOverride::set_path("PA_ARGS_LOG", args_log.path());
+        let _output_log = EnvOverride::set_path("PA_OUTPUT_LOG", output_log.path());
 
         let cmd = InternalPromptAssemblerCommand {
             prompt: "demo".into(),
@@ -624,15 +668,7 @@ fi
             prompt_limit: 1024,
         };
 
-        let result = assemble_prompt(&cmd);
-
-        unsafe {
-            std::env::set_var("PATH", &original_path);
-            std::env::remove_var("PA_ARGS_LOG");
-            std::env::remove_var("PA_OUTPUT_LOG");
-        }
-
-        let text = result?;
+        let text = assemble_prompt(&cmd)?;
 
         let args_written = std::fs::read_to_string(args_log.path())?;
         assert_eq!(args_written, "value");
@@ -649,7 +685,16 @@ fi
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new().expect("tempdir");
         let pa = temp.child("pa");
-        pa.write_str("#!/bin/sh\nexit 3\n").expect("write script");
+        pa.write_str(
+            r#"#!/bin/sh
+if [ "$1" = "show" ] && [ "${2:-}" = "--json" ]; then
+  printf '%s' '{"profile":{"content":"Demo {0}"}}'
+  exit 0
+fi
+exit 3
+"#,
+        )
+        .expect("write script");
         #[cfg(unix)]
         {
             let perms = std::fs::Permissions::from_mode(0o755);
@@ -658,29 +703,104 @@ fi
 
         let original_path = std::env::var("PATH").unwrap_or_default();
         let pa_dir = pa.path().parent().unwrap().display().to_string();
-        let new_path = if original_path.is_empty() {
-            pa_dir.clone()
-        } else {
-            format!("{pa_dir}:{original_path}")
-        };
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
+        let new_path = format!("{pa_dir}:{original_path}");
+        let _path = EnvOverride::set_var("PATH", &new_path);
 
         let cmd = InternalPromptAssemblerCommand {
             prompt: "demo".into(),
-            prompt_args: Vec::new(),
+            prompt_args: vec!["value".into()],
             prompt_limit: 256,
         };
 
         let err = assemble_prompt(&cmd).expect_err("pa failure should bubble up");
-        assert!(
-            err.to_string().contains("exited with status"),
-            "unexpected error: {err:?}"
-        );
+        assert!(err.to_string().contains("exited with status"));
+    }
 
-        unsafe {
-            std::env::set_var("PATH", &original_path);
-        }
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_reports_non_zero_status_for_show() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa = temp.child("pa");
+        pa.write_str("#!/bin/sh\nif [ \"$1\" = \"show\" ] && [ \"${2:-}\" = \"--json\" ]; then\n  exit 7\nfi\nexit 0\n")?;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa.path(), perms)?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = format!("{pa_dir}:{original_path}");
+        let _path = EnvOverride::set_var("PATH", &new_path);
+
+        let err = fetch_prompt_detail("demo").expect_err("show command should fail");
+        assert!(err.to_string().contains("pa exited with status"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_wraps_spawn_errors_for_show() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa_dir = temp.path().display().to_string();
+        let _path = EnvOverride::set_var("PATH", &pa_dir);
+
+        let err = fetch_prompt_detail("demo").expect_err("missing pa should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to execute 'pa show --json demo'")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_prompt_detail_wraps_invalid_json_from_show() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa = temp.child("pa");
+        pa.write_str(
+            "#!/bin/sh\nif [ \"$1\" = \"show\" ] && [ \"${2:-}\" = \"--json\" ]; then\n  printf '%s' '{bad-json}'\n  exit 0\nfi\nexit 1\n",
+        )
+        .expect("write script");
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(pa.path(), perms)?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = format!("{pa_dir}:{original_path}");
+        let _path = EnvOverride::set_var("PATH", &new_path);
+
+        let err = fetch_prompt_detail("demo").expect_err("invalid json should fail");
+        assert!(err.to_string().contains("failed to parse JSON output"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_argument_count_tracks_highest_unique_placeholder() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let pa = temp.child("pa");
+        pa.write_str(
+            r#"#!/bin/sh
+if [ "$1" = "show" ] && [ "${2:-}" = "--json" ]; then
+  printf '%s' '{"profile":{"content":"A {0} B {2} C {2}"}}'
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .expect("write script");
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(pa.path(), perms)?;
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let pa_dir = pa.path().parent().unwrap().display().to_string();
+        let new_path = format!("{pa_dir}:{original_path}");
+        let _path = EnvOverride::set_var("PATH", &new_path);
+
+        let count = required_argument_count("demo")?;
+        assert_eq!(count, 3);
+        Ok(())
     }
 }

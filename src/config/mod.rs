@@ -96,19 +96,9 @@ pub fn load(dir_override: Option<&Path>) -> Result<LoadedConfig> {
     for source in &sources {
         let contents = fs::read_to_string(&source.path)
             .with_context(|| format!("failed to read {}", source.path.display()))?;
-        let value: Value = toml::from_str(&contents)
+        let table: toml::map::Map<String, Value> = toml::from_str(&contents)
             .with_context(|| format!("failed to parse {}", source.path.display()))?;
-        let table = value.as_table().cloned().ok_or_else(|| {
-            eyre!(
-                "{} must contain a TOML table at the top level",
-                source.path.display()
-            )
-        })?;
-        if value
-            .as_table()
-            .and_then(|table| table.get("preview_filter"))
-            .is_some()
-        {
+        if table.get("preview_filter").is_some() {
             saw_preview_filter = true;
         }
         merge::merge_tables(&mut merged_table, table, Some(&source.path))?;
@@ -482,10 +472,7 @@ mod tests {
         assert!(main.exists(), "expected main config file to exist");
         let contents = fs::read_to_string(&main)?;
         assert!(contents.contains("provider = \"codex\""));
-        assert!(
-            !dirs.config_dir.join(DROPIN_DIR).exists(),
-            "drop-in directory should not be created until needed"
-        );
+        assert!(!dirs.config_dir.join(DROPIN_DIR).exists());
         Ok(())
     }
 
@@ -508,24 +495,9 @@ mod tests {
     #[test]
     fn resolve_default_directories_returns_paths() -> Result<()> {
         let (config, data, cache) = resolve_default_directories()?;
-        assert!(
-            path_contains_component(&config, APP_NAME),
-            "config dir {} should contain '{}'",
-            config.display(),
-            APP_NAME
-        );
-        assert!(
-            path_contains_component(&data, APP_NAME),
-            "data dir {} should contain '{}'",
-            data.display(),
-            APP_NAME
-        );
-        assert!(
-            path_contains_component(&cache, APP_NAME),
-            "cache dir {} should contain '{}'",
-            cache.display(),
-            APP_NAME
-        );
+        assert!(path_contains_component(&config, APP_NAME));
+        assert!(path_contains_component(&data, APP_NAME));
+        assert!(path_contains_component(&cache, APP_NAME));
         Ok(())
     }
 
@@ -611,6 +583,21 @@ mod tests {
     }
 
     #[test]
+    fn gather_sources_includes_main_when_dropins_are_absent() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.child("config");
+        root.create_dir_all()?;
+        root.child(MAIN_CONFIG)
+            .write_str("provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n")?;
+
+        let sources = gather_sources(root.path())?;
+        assert_eq!(sources.len(), 1);
+        assert!(matches!(sources[0].kind, ConfigSourceKind::Main));
+        assert_eq!(sources[0].path, root.child(MAIN_CONFIG).path());
+        Ok(())
+    }
+
+    #[test]
     fn read_toml_files_filters_non_toml_entries() -> Result<()> {
         let temp = TempDir::new()?;
         let dir = temp.child("conf.d");
@@ -640,6 +627,17 @@ mod tests {
         let files = read_toml_files(dir.path())?;
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("00-main.toml"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_toml_files_reports_error_for_non_directory_input() -> Result<()> {
+        let temp = TempDir::new()?;
+        let file = temp.child("conf.d");
+        file.write_str("not a directory")?;
+
+        let err = read_toml_files(file.path()).expect_err("non-directory input should fail");
+        assert!(err.to_string().contains("failed to read directory"));
         Ok(())
     }
 
@@ -678,11 +676,13 @@ mod tests {
         fs::write(
             config_dir.child("config.toml").path(),
             "provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n",
-        )?;
+        )
+        .expect("write main config");
         fs::write(
             conf_d.child("00-extra.toml").path(),
             "[providers.extra]\nbin = \"echo\"\n",
-        )?;
+        )
+        .expect("write drop-in config");
 
         let data_override = temp.child("data");
         data_override.create_dir_all()?;
@@ -705,14 +705,17 @@ mod tests {
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        config_dir.child("config.toml").write_str(
-            "\
+        config_dir
+            .child("config.toml")
+            .write_str(
+                "\
 preview_filter = \"glow\"
 provider = \"echo\"
 [providers.echo]
 bin = \"echo\"
 ",
-        )?;
+            )
+            .expect("write config");
 
         let loaded = load(Some(config_dir.path()))?;
         let merged_table = loaded
@@ -736,14 +739,17 @@ bin = \"echo\"
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        config_dir.child(MAIN_CONFIG).write_str(
-            "\
+        config_dir
+            .child(MAIN_CONFIG)
+            .write_str(
+                "\
 provider = \"echo\"
 [providers.echo]
 bin = \"echo\"
 list = \"value\"
 ",
-        )?;
+            )
+            .expect("write main config");
         let dropins = config_dir.child(DROPIN_DIR);
         dropins.create_dir_all()?;
         dropins
@@ -761,11 +767,29 @@ list = \"value\"
         let err =
             load(Some(config_dir.path())).expect_err("merge should fail for non-array append");
         let message = format!("{err:?}");
-        assert!(
-            message.contains("cannot append to non-array key 'list'"),
-            "unexpected error: {message}"
-        );
+        assert!(message.contains("cannot append to non-array key 'list'"));
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_surfaces_read_errors_for_unreadable_main_config() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all()?;
+        let config_file = config_dir.child(MAIN_CONFIG);
+        config_file.write_str("provider = \"echo\"\n[providers.echo]\nbin = \"echo\"\n")?;
+
+        let perms = fs::Permissions::from_mode(0o000);
+        fs::set_permissions(config_file.path(), perms)?;
+
+        let err = load(Some(config_dir.path())).expect_err("unreadable config should fail");
+        assert!(err.to_string().contains("failed to read"));
+
+        let reset = fs::Permissions::from_mode(0o644);
+        fs::set_permissions(config_file.path(), reset)?;
         Ok(())
     }
 
@@ -782,10 +806,7 @@ list = \"value\"
         };
 
         ensure_default_layout(&dirs)?;
-        assert!(
-            !dirs.config_dir.parent().unwrap().join(DROPIN_DIR).exists(),
-            "drop-in directory should not be created when config path is a file"
-        );
+        assert!(!dirs.config_dir.parent().unwrap().join(DROPIN_DIR).exists());
         Ok(())
     }
 
@@ -807,8 +828,7 @@ list = \"value\"
         let err = ensure_default_layout(&dirs).unwrap_err();
         assert!(
             err.to_string()
-                .contains("failed to write default configuration"),
-            "unexpected error: {err:?}"
+                .contains("failed to write default configuration")
         );
         Ok(())
     }
@@ -816,10 +836,7 @@ list = \"value\"
     #[test]
     fn default_template_contains_provider() {
         let template = default_template();
-        assert!(
-            template.contains("provider = \"codex\""),
-            "expected bundled template to include provider stanza"
-        );
+        assert!(template.contains("provider = \"codex\""));
     }
 
     #[test]
@@ -832,10 +849,7 @@ list = \"value\"
         };
 
         let rendered = bundled_default_config(&dirs);
-        assert!(
-            rendered.contains("provider = \"codex\""),
-            "expected rendered template to include provider stanza"
-        );
+        assert!(rendered.contains("provider = \"codex\""));
         Ok(())
     }
 
@@ -845,13 +859,10 @@ list = \"value\"
         let temp = TempDir::new()?;
         let config_dir = temp.child("config");
         config_dir.create_dir_all()?;
-        std::fs::write(config_dir.child("config.toml").path(), "123")?;
+        std::fs::write(config_dir.child("config.toml").path(), "\"not-a-table\"")?;
 
         let err = load(Some(config_dir.path())).unwrap_err();
-        assert!(
-            err.to_string().contains("failed to parse"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("failed to parse"));
         Ok(())
     }
 
@@ -955,16 +966,12 @@ list = \"value\"
         assert!(loaded.directories.data_dir.exists());
         assert!(loaded.directories.cache_dir.exists());
         assert!(loaded.directories.config_dir.join(MAIN_CONFIG).is_file());
-        assert!(
-            !loaded.directories.config_dir.join(DROPIN_DIR).exists(),
-            "drop-in directory should be created lazily"
-        );
+        assert!(!loaded.directories.config_dir.join(DROPIN_DIR).exists());
         assert!(
             loaded
                 .sources
                 .iter()
-                .any(|src| matches!(src.kind, ConfigSourceKind::Main)),
-            "expected main config source"
+                .any(|src| matches!(src.kind, ConfigSourceKind::Main))
         );
 
         drop(loaded);

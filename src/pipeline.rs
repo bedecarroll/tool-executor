@@ -136,13 +136,7 @@ pub fn build_pipeline(request: &PipelineRequest<'_>) -> Result<PipelinePlan> {
     };
 
     let friendly_display = if wrapper.is_none() && capture_prompt {
-        friendly_capture_display(
-            provider,
-            &pre_commands,
-            &post_commands,
-            &provider_args,
-            &display,
-        )
+        friendly_capture_display(provider, &pre_commands, &post_commands, &provider_args)
     } else {
         display.clone()
     };
@@ -299,7 +293,6 @@ fn friendly_capture_display(
     pre_commands: &[String],
     post_commands: &[String],
     provider_args: &[String],
-    fallback: &str,
 ) -> String {
     let substitution_pipeline = if pre_commands.is_empty() {
         None
@@ -373,12 +366,7 @@ fn friendly_capture_display(
     let mut stages = Vec::with_capacity(post_commands.len() + 1);
     stages.push(provider_stage);
     stages.extend(post_commands.iter().cloned());
-
-    if stages.is_empty() {
-        fallback.to_string()
-    } else {
-        stages.join(" | ")
-    }
+    stages.join(" | ")
 }
 
 fn assemble_friendly_command(bin: &str, args: &[FriendlyArg]) -> String {
@@ -483,11 +471,14 @@ fn build_capture_command(
         internal_args.push(arg.clone());
     }
 
-    let tx_path = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "tx".to_string());
+    let tx_path = resolve_tx_path(std::env::current_exe().ok());
     command_string(&tx_path, &internal_args)
+}
+
+fn resolve_tx_path(current_exe: Option<PathBuf>) -> String {
+    current_exe
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "tx".to_string())
 }
 
 fn expand_env_template(template: &str) -> Result<String> {
@@ -781,11 +772,7 @@ mod tests {
         };
 
         let plan = build_pipeline(&request).expect("pipeline builds");
-        assert!(
-            plan.pipeline.contains("{prompt}"),
-            "expected captured prompt placeholder in pipeline: {}",
-            plan.pipeline
-        );
+        assert!(plan.pipeline.contains("{prompt}"));
         assert!(plan.prompt_assembler.is_some());
         assert_eq!(plan.display, plan.pipeline);
         assert_eq!(plan.friendly_display, "codex --search");
@@ -845,26 +832,11 @@ mod tests {
         };
 
         let plan = build_pipeline(&request).expect("pipeline builds");
-        assert!(
-            !plan.pipeline.contains("internal capture-arg"),
-            "expected capture helper to be skipped: {}",
-            plan.pipeline
-        );
+        assert!(!plan.pipeline.contains("internal capture-arg"));
         assert!(!plan.uses_capture_arg);
-        assert!(
-            plan.pipeline.contains("codex --search"),
-            "expected provider invocation in pipeline: {}",
-            plan.pipeline
-        );
-        assert!(
-            !plan.pipeline.contains("{prompt}"),
-            "expected prompt placeholder to be absent: {}",
-            plan.pipeline
-        );
-        assert_eq!(
-            plan.friendly_display, plan.display,
-            "expected friendly display to match pipeline when capture is disabled"
-        );
+        assert!(plan.pipeline.contains("codex --search"));
+        assert!(!plan.pipeline.contains("{prompt}"));
+        assert_eq!(plan.friendly_display, plan.display);
     }
 
     #[test]
@@ -921,16 +893,9 @@ mod tests {
         };
 
         let plan = build_pipeline(&request).expect("pipeline builds");
-        assert!(
-            plan.pipeline.contains("internal capture-arg"),
-            "expected capture helper when capture enabled: {}",
-            plan.pipeline
-        );
+        assert!(plan.pipeline.contains("internal capture-arg"));
         assert!(plan.uses_capture_arg);
-        assert_eq!(
-            plan.friendly_display, "codex --search",
-            "expected friendly display to omit placeholder when source unknown"
-        );
+        assert_eq!(plan.friendly_display, "codex --search");
     }
 
     #[test]
@@ -951,9 +916,25 @@ mod tests {
         let post: Vec<String> = Vec::new();
         let args = vec!["--prompt=\"{prompt}\"".to_string()];
 
-        let friendly = friendly_capture_display(&provider, &pre, &post, &args, "fallback");
+        let friendly = friendly_capture_display(&provider, &pre, &post, &args);
 
         assert_eq!(friendly, "codex --prompt=\"$(cat prompt.txt)\"");
+    }
+
+    #[test]
+    fn friendly_capture_display_quotes_unquoted_prompt_with_spaces() {
+        let provider = capture_provider_config();
+        let pre = vec!["cat prompt.txt".to_string()];
+        let args = vec!["--label {prompt}".to_string()];
+        let friendly = friendly_capture_display(&provider, &pre, &[], &args);
+        assert_eq!(friendly, "codex \"--label $(cat prompt.txt)\"");
+    }
+
+    #[test]
+    fn prompt_inside_double_quotes_handles_escaped_quotes() {
+        assert!(prompt_inside_double_quotes(
+            "--prompt=\"\\\"quoted\\\" {prompt}\""
+        ));
     }
 
     #[test]
@@ -1064,10 +1045,7 @@ mod tests {
         let snippets: IndexMap<String, Snippet> = IndexMap::new();
         let err = resolve_snippets(&snippets, &["missing".into()], "pre").unwrap_err();
         let message = err.to_string();
-        assert!(
-            message.contains("unknown pre snippet 'missing'"),
-            "unexpected message: {message}"
-        );
+        assert!(message.contains("unknown pre snippet 'missing'"));
     }
 
     #[test]
@@ -1093,15 +1071,11 @@ mod tests {
             },
         };
         let invocation = render_wrapper(&shell_wrapper, &ctx).expect("shell wrapper");
-        match invocation {
-            Invocation::Shell { command } => {
-                assert_eq!(
-                    command,
-                    "wrapper 'ls | cat' --session sess-1 --provider codex"
-                );
-            }
-            Invocation::Exec { .. } => panic!("expected shell invocation, got exec"),
-        }
+        assert!(matches!(
+            invocation,
+            Invocation::Shell { ref command }
+                if command == "wrapper 'ls | cat' --session sess-1 --provider codex"
+        ));
 
         let exec_wrapper = WrapperConfig {
             name: "exec".into(),
@@ -1116,15 +1090,16 @@ mod tests {
             },
         };
         let invocation = render_wrapper(&exec_wrapper, &ctx).expect("exec wrapper");
-        match invocation {
-            Invocation::Exec { argv } => {
-                assert_eq!(
-                    argv,
-                    vec!["exec", "ls | cat", "abc123", "--cwd", "/tmp/project"]
-                );
-            }
-            Invocation::Shell { .. } => panic!("expected exec invocation, got shell"),
-        }
+        assert!(matches!(
+            invocation,
+            Invocation::Exec { ref argv }
+                if argv.len() == 5
+                    && argv[0] == "exec"
+                    && argv[1] == "ls | cat"
+                    && argv[2] == "abc123"
+                    && argv[3] == "--cwd"
+                    && argv[4] == "/tmp/project"
+        ));
 
         let missing_wrapper = WrapperConfig {
             name: "missing".into(),
@@ -1138,13 +1113,71 @@ mod tests {
     }
 
     #[test]
+    fn build_pipeline_display_renders_exec_argv() -> Result<()> {
+        let mut providers = IndexMap::new();
+        providers.insert("codex".into(), test_provider_config());
+
+        let mut wrappers = IndexMap::new();
+        wrappers.insert(
+            "exec-wrap".into(),
+            WrapperConfig {
+                name: "exec-wrap".into(),
+                mode: WrapperMode::Exec {
+                    argv: vec!["runner".into(), "{{CMD}}".into(), "--json".into()],
+                },
+            },
+        );
+
+        let config = Config {
+            defaults: Defaults {
+                provider: Some("codex".into()),
+                profile: None,
+                search_mode: SearchMode::FirstPrompt,
+                terminal_title: None,
+            },
+            providers,
+            snippets: SnippetConfig {
+                pre: IndexMap::new(),
+                post: IndexMap::new(),
+            },
+            wrappers,
+            profiles: IndexMap::new(),
+            features: FeatureConfig {
+                prompt_assembler: None,
+            },
+        };
+
+        let request = PipelineRequest {
+            config: &config,
+            provider_hint: Some("codex"),
+            profile: None,
+            additional_pre: Vec::new(),
+            additional_post: Vec::new(),
+            inline_pre: Vec::new(),
+            wrap: Some("exec-wrap"),
+            provider_args: Vec::new(),
+            capture_prompt: false,
+            prompt_assembler: None,
+            vars: HashMap::new(),
+            session: SessionContext::default(),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let plan = build_pipeline(&request)?;
+        assert!(matches!(plan.invocation, Invocation::Exec { .. }));
+        assert_eq!(plan.display, "runner 'codex --search' --json");
+        assert_eq!(plan.friendly_display, plan.display);
+        Ok(())
+    }
+
+    #[test]
     fn expand_env_template_and_render_env_paths() {
         let home_key = "PIPELINE_TEST_HOME";
         let token_key = "PIPELINE_TEST_TOKEN";
-        let original_home = std::env::var(home_key).ok();
-        let original_token = std::env::var(token_key).ok();
 
         unsafe {
+            std::env::remove_var(home_key);
+            std::env::remove_var(token_key);
             std::env::set_var(home_key, "/home/tester");
             std::env::set_var(token_key, "secret-value");
         }
@@ -1181,23 +1214,9 @@ mod tests {
         let message = format!("{error:?}");
         assert!(message.contains("while expanding $TOKEN"));
 
-        if let Some(value) = original_home {
-            unsafe {
-                std::env::set_var(home_key, value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var(home_key);
-            }
-        }
-        if let Some(value) = original_token {
-            unsafe {
-                std::env::set_var(token_key, value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var(token_key);
-            }
+        unsafe {
+            std::env::remove_var(home_key);
+            std::env::remove_var(token_key);
         }
     }
 
@@ -1211,16 +1230,33 @@ mod tests {
             "--json=\"{prompt}\"".to_string(),
             "--input={prompt}".to_string(),
         ];
-        let friendly = friendly_capture_display(&provider, &pre, &post, &args, "fallback");
+        let friendly = friendly_capture_display(&provider, &pre, &post, &args);
         assert_eq!(
             friendly,
             "codex \"$(cat prompt.txt)\" --json=\"$(cat prompt.txt)\" --input=$(cat prompt.txt) | tail -n1"
         );
 
         let args_no_pre = vec!["--json=\"{prompt}\"".to_string()];
-        let friendly_fallback =
-            friendly_capture_display(&provider, &[], &[], &args_no_pre, "fallback");
+        let friendly_fallback = friendly_capture_display(&provider, &[], &[], &args_no_pre);
         assert_eq!(friendly_fallback, "codex '--json=\"<prompt>\"'");
+    }
+
+    #[test]
+    fn build_capture_command_includes_pre_arguments() {
+        let provider = capture_provider_config();
+        let command = build_capture_command(
+            &provider,
+            &["cat prompt.txt".to_string()],
+            &["--json".to_string()],
+        );
+        assert!(command.contains("--pre"));
+        assert!(command.contains("'cat prompt.txt'"));
+        assert!(command.contains("--arg --json"));
+    }
+
+    #[test]
+    fn resolve_tx_path_falls_back_to_tx_when_current_exe_missing() {
+        assert_eq!(resolve_tx_path(None), "tx");
     }
 
     fn test_provider_config() -> ProviderConfig {

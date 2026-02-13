@@ -376,6 +376,119 @@ fn formatting_helpers_cover_paths() {
     assert_eq!(truncate("truncate", 4), "tru…");
 }
 
+#[test]
+fn fake_events_read_errors_when_empty() {
+    let mut events = FakeEvents::new(Vec::new());
+    let err = events
+        .read()
+        .expect_err("empty fake event queue should error");
+    assert!(err.to_string().contains("no more events"));
+}
+
+#[test]
+fn session_entry_matching_display_and_snippet_fallbacks() {
+    let entry = SessionEntry {
+        id: "root/rollout-2024-10-26T02-42-13-ABCD".into(),
+        provider: "codex".into(),
+        wrapper: Some("ShellWrap".into()),
+        label: None,
+        first_prompt: None,
+        actionable: true,
+        last_active: Some(0),
+        snippet: Some("Snippet body".into()),
+        snippet_role: Some("Assistant".into()),
+    };
+
+    assert!(entry.matches("root/rollout"));
+    assert!(entry.matches("shellwrap"));
+    assert!(entry.matches("02:42:13"));
+    assert_eq!(entry.display_label(), "2024-10-26 02:42:13 • abcd");
+    assert_eq!(
+        entry.snippet_line().as_deref(),
+        Some("[assistant] Snippet body")
+    );
+    assert!(entry.short_session_tag().starts_with("#rollout-2024"));
+
+    let entry_without_role = SessionEntry {
+        snippet_role: None,
+        ..entry.clone()
+    };
+    assert_eq!(
+        entry_without_role.snippet_line().as_deref(),
+        Some("Snippet body")
+    );
+
+    let entry_without_snippet = SessionEntry {
+        snippet: None,
+        snippet_role: None,
+        ..entry
+    };
+    assert_eq!(entry_without_snippet.snippet_line(), None);
+}
+
+#[test]
+fn session_entry_label_and_tag_fallback_paths() {
+    let labeled = SessionEntry {
+        id: "session-1".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        label: Some("rollout-2024-10-26T02-42-13-CUSTOM".into()),
+        first_prompt: Some("Prompt".into()),
+        actionable: true,
+        last_active: Some(0),
+        snippet: None,
+        snippet_role: None,
+    };
+    assert_eq!(labeled.display_label(), "2024-10-26 02:42:13 • custom");
+    assert_eq!(labeled.snippet_line().as_deref(), Some("Prompt"));
+
+    let path_fallback = SessionEntry {
+        label: None,
+        id: "parent/SessionLabel".into(),
+        ..labeled.clone()
+    };
+    assert_eq!(path_fallback.display_label(), "SessionLabel");
+
+    let dashed = SessionEntry {
+        label: None,
+        id: "parent/---".into(),
+        ..labeled
+    };
+    assert_eq!(dashed.short_session_tag(), "#---");
+    assert_eq!(rollout_suffix("---"), None);
+}
+
+#[test]
+fn format_relative_time_covers_future_minutes_and_days() {
+    let now = OffsetDateTime::from_unix_timestamp(1_000_000).expect("valid timestamp");
+    assert_eq!(
+        format_relative_time(Some((now + Duration::minutes(5)).unix_timestamp()), now),
+        Some("in 5m".into())
+    );
+    assert!(
+        format_relative_time(Some((now + Duration::days(2)).unix_timestamp()), now)
+            .expect("future day should render")
+            .starts_with("on ")
+    );
+}
+
+#[test]
+fn markdown_lines_to_text_returns_none_for_empty_input() {
+    let lines: Vec<String> = Vec::new();
+    assert_eq!(markdown_lines_to_text(&lines), None);
+}
+
+#[test]
+fn session_preview_from_result_error_with_wrapper() {
+    let mut session = make_session_entry("sess-error-wrapper");
+    session.wrapper = Some("shellwrap".into());
+    let preview = AppState::session_preview_from_result(&session, Err(eyre!("boom")));
+
+    assert_eq!(preview.lines[0], "**Wrapper**: `shellwrap`");
+    assert_eq!(preview.lines[1], "");
+    assert!(preview.lines[2].contains("boom"));
+}
+
 #[cfg(unix)]
 #[test]
 fn state_filtering_and_provider_cycle() -> Result<()> {
@@ -924,6 +1037,233 @@ fn build_plan_empty_entry_sets_message() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn build_plan_and_preview_handle_no_selection() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    state.entries.clear();
+    state.index = 0;
+    state.list_state.select(None);
+
+    assert!(state.build_plan()?.is_none());
+
+    let preview = state.preview();
+    assert_eq!(preview.lines, vec!["No selection".to_string()]);
+    assert_eq!(preview.title.as_deref(), Some("Preview"));
+    Ok(())
+}
+
+#[test]
+fn selection_fallbacks_show_status_when_no_session_selected() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    let profile = state
+        .profiles
+        .iter()
+        .find(|entry| matches!(entry.kind, ProfileKind::Config { .. }))
+        .cloned()
+        .expect("config profile should exist");
+    state.entries = vec![Entry::Profile(profile)];
+    state.index = 0;
+    state.list_state.select(Some(0));
+
+    assert!(state.selected_session().is_none());
+    state.trigger_print_session_id()?;
+    assert_eq!(
+        state.status_message().as_deref(),
+        Some("Select a session to print its ID.")
+    );
+
+    state.trigger_export_markdown()?;
+    assert_eq!(
+        state.status_message().as_deref(),
+        Some("Select a session to export its transcript.")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn handle_key_normal_covers_backspace_toggle_and_default_branch() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    state.filter = "ab".into();
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?);
+    assert_eq!(state.filter, "a");
+
+    state.full_text = true;
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))?);
+    assert!(!state.full_text);
+    assert_eq!(state.status_message().as_deref(), Some("search: prompt"));
+
+    let filter_before = state.filter.clone();
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?);
+    assert_eq!(state.filter, filter_before);
+
+    state.entries.clear();
+    state.move_selection(1);
+    assert_eq!(state.index, 0);
+    assert_eq!(state.list_state.selected(), None);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn backspace_with_filter_refreshes_entries_and_clears_preview_cache() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("backspace-refresh.jsonl");
+    fs::File::create(&session_path)?.write_all(b"{\"event\":\"backspace\"}\n")?;
+    insert_session(&mut db, &session_path, "sess-backspace")?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    let _ = state.preview();
+    assert!(!state.preview_cache.is_empty());
+    state.filter = "x".into();
+    state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    assert!(state.filter.is_empty());
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?);
+    assert!(state.preview_cache.is_empty());
+    Ok(())
+}
+
+#[test]
+fn refresh_entries_clamps_selection_index() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    state.index = usize::MAX;
+
+    state.refresh_entries()?;
+    assert_eq!(state.index, state.entries.len().saturating_sub(1));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn search_full_text_dedupes_hits_and_backfills_snippet() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("fts-dedupe.jsonl");
+    fs::File::create(&session_path)?.write_all(b"{\"event\":\"fts\"}\n")?;
+    let mut summary = insert_session(&mut db, &session_path, "sess-fts-dedupe")?;
+    summary.first_prompt = None;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let messages = vec![
+        MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "assistant",
+            "branchterm one",
+            Some("event_msg_a".into()),
+            Some(now),
+        ),
+        MessageRecord::new(
+            summary.id.clone(),
+            1,
+            "user",
+            "branchterm two",
+            Some("event_msg_b".into()),
+            Some(now + 1),
+        ),
+    ];
+    db.upsert_session(&SessionIngest::new(summary, messages))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let state = AppState::new(&mut ctx)?;
+    let sessions = state.search_full_text_sessions("branchterm")?;
+
+    assert_eq!(sessions.len(), 1);
+    let session = sessions.first().expect("single deduped session");
+    assert!(session.first_prompt.is_none());
+    assert!(
+        session
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| snippet.contains("branchterm"))
+    );
+    assert!(session.snippet_role.is_some());
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn preview_renders_session_with_filter_and_cache() -> Result<()> {
@@ -1381,6 +1721,47 @@ fn draw_preview_uses_cached_styled_content() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn draw_preview_renders_plain_lines_when_styled_is_missing() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    let key = match &state.entries[state.index] {
+        Entry::Session(session) => format!("session:{}", session.id),
+        Entry::Profile(profile) => format!("profile:{}", profile.display),
+        Entry::Empty(empty) => format!("empty:{}", empty.title),
+    };
+    state.preview_cache.insert(
+        key,
+        Preview {
+            lines: vec!["plain preview".into(), "no markdown styling".into()],
+            styled: None,
+            title: None,
+            timestamp: None,
+            updated_at: Instant::now(),
+        },
+    );
+
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| {
+        let area = frame.area();
+        draw_preview(frame, area, &mut state);
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn run_app_exits_on_escape_event() -> Result<()> {
     let temp = TempDir::new()?;
     let mut config = build_config(temp.path());
@@ -1809,6 +2190,159 @@ fn load_profiles_handles_prompt_statuses() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn load_profiles_covers_conflicts_and_missing_prompt_message() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    config.profiles.insert(
+        "ALPHA".into(),
+        ProfileConfig {
+            name: "ALPHA".into(),
+            provider: "codex".into(),
+            description: None,
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+        },
+    );
+    config.profiles.insert(
+        "alpha".into(),
+        ProfileConfig {
+            name: "alpha".into(),
+            provider: "codex".into(),
+            description: None,
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+        },
+    );
+    config.profiles.insert(
+        "tests/demo".into(),
+        ProfileConfig {
+            name: "tests/demo".into(),
+            provider: "codex".into(),
+            description: Some("conflicting key".into()),
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+        },
+    );
+    config.profiles.insert(
+        "missing-prompt".into(),
+        ProfileConfig {
+            name: "missing-prompt".into(),
+            provider: "codex".into(),
+            description: None,
+            pre: Vec::new(),
+            post: Vec::new(),
+            wrap: None,
+            prompt_assembler: Some("does-not-exist".into()),
+            prompt_assembler_args: Vec::new(),
+        },
+    );
+
+    config.providers.insert(
+        "alpha".into(),
+        ProviderConfig {
+            name: "alpha".into(),
+            bin: "echo".into(),
+            flags: vec!["--alpha".into()],
+            env: Vec::new(),
+            session_roots: vec![temp.path().join("alpha-sessions")],
+            stdin: None,
+        },
+    );
+
+    let script = temp.child("pa");
+    script.write_str(
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  echo '[{\"name\":\"demo\"}]'\nelif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ] && [ \"$3\" = \"demo\" ]; then\n  echo '{\"profile\":{\"content\":\"Virtual content\"}}'\nelse\n  exit 1\nfi\n",
+    )?;
+    let perms = fs::Permissions::from_mode(0o755);
+    fs::set_permissions(script.path(), perms)?;
+
+    let _guard = PathGuard::push(&temp);
+    let mut prompt_assembler = PromptAssembler::new(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: Some(&mut prompt_assembler),
+    };
+
+    let state = AppState::new(&mut ctx)?;
+    assert!(state.message.as_deref().is_some_and(|message| {
+        message.contains("prompt assembler prompt 'does-not-exist' referenced by profile")
+    }));
+    let alpha_entries = state
+        .profiles
+        .iter()
+        .filter(|entry| entry.display.eq_ignore_ascii_case("alpha"))
+        .count();
+    assert_eq!(alpha_entries, 1);
+    assert!(
+        !state.profiles.iter().any(
+            |entry| matches!(entry.kind, ProfileKind::Virtual) && entry.display == "tests/demo"
+        )
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn load_profiles_sets_message_when_virtual_profiles_have_no_provider() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.providers.clear();
+    config.defaults.provider = None;
+    config.features.prompt_assembler = Some(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+
+    let script = temp.child("pa");
+    script.write_str(
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ] && [ \"$2\" = \"--json\" ]; then\n  echo '[{\"name\":\"demo\"}]'\nelif [ \"$1\" = \"show\" ] && [ \"$2\" = \"--json\" ] && [ \"$3\" = \"demo\" ]; then\n  echo '{\"profile\":{\"content\":\"Virtual content\"}}'\nelse\n  exit 1\nfi\n",
+    )?;
+    let perms = fs::Permissions::from_mode(0o755);
+    fs::set_permissions(script.path(), perms)?;
+
+    let _guard = PathGuard::push(&temp);
+    let mut prompt_assembler = PromptAssembler::new(PromptAssemblerConfig {
+        namespace: "tests".into(),
+    });
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: Some(&mut prompt_assembler),
+    };
+
+    let state = AppState::new(&mut ctx)?;
+    assert_eq!(
+        state.message.as_deref(),
+        Some("prompt profiles unavailable: no providers configured")
+    );
+    Ok(())
+}
+
 #[test]
 fn refresh_entries_preserves_config_profile_order() -> Result<()> {
     let temp = TempDir::new()?;
@@ -2055,6 +2589,45 @@ fn provider_profile_preview_formats_command() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn build_markdown_profile_preview_handles_multiline_and_empty_description() {
+    let multiline = ProfileEntry {
+        display: "demo".into(),
+        provider: "codex".into(),
+        pre: Vec::new(),
+        post: Vec::new(),
+        wrap: None,
+        description: Some("First line\nSecond line".into()),
+        tags: Vec::new(),
+        inline_pre: Vec::new(),
+        stdin_supported: false,
+        prompt_assembler: None,
+        prompt_assembler_args: Vec::new(),
+        prompt_available: true,
+        kind: ProfileKind::Virtual,
+        preview_lines: Vec::new(),
+    };
+    let multiline_lines = build_markdown_profile_preview(&multiline);
+    assert_eq!(multiline_lines[1], "**Description**: First line");
+    assert!(multiline_lines.iter().any(|line| line == "Second line"));
+    assert!(
+        multiline_lines
+            .iter()
+            .any(|line| line == "_No prompt output_")
+    );
+
+    let empty_description = ProfileEntry {
+        description: Some("   ".into()),
+        ..multiline
+    };
+    let empty_lines = build_markdown_profile_preview(&empty_description);
+    assert!(
+        empty_lines
+            .iter()
+            .any(|line| line == "**Description**: _None_")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn plan_for_session_builds_resume_plan() -> Result<()> {
@@ -2096,6 +2669,111 @@ fn plan_for_session_builds_resume_plan() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn plan_for_session_handles_provider_without_resume_metadata() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.providers.insert(
+        "alt".into(),
+        ProviderConfig {
+            name: "alt".into(),
+            bin: "echo".into(),
+            flags: vec!["hello".into()],
+            env: Vec::new(),
+            session_roots: vec![temp.path().join("alt-sessions")],
+            stdin: None,
+        },
+    );
+
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = temp.path().join("alt-sessions");
+    fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("alt.jsonl");
+    fs::File::create(&session_path)?.write_all(b"{\"event\":\"resume\"}\n")?;
+
+    let summary = SessionSummary {
+        id: "sess-alt-resume".into(),
+        provider: "alt".into(),
+        wrapper: None,
+        model: None,
+        label: Some("Alt Session".into()),
+        path: session_path,
+        uuid: Some("uuid-sess-alt-resume".into()),
+        first_prompt: Some("hello".into()),
+        actionable: true,
+        created_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        started_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        last_active: Some(OffsetDateTime::now_utc().unix_timestamp()),
+        size: 1,
+        mtime: OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "hello",
+        Some("event_msg_alt".into()),
+        summary.last_active,
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let session_entry = state
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::Session(session) if session.id == "sess-alt-resume" => Some(session.clone()),
+            _ => None,
+        })
+        .expect("session entry");
+
+    let plan = state.plan_for_session(&session_entry)?;
+    assert!(plan.is_some());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_for_session_uses_current_dir_when_session_path_has_no_parent() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    insert_session(&mut db, Path::new("/"), "sess-root-path")?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let session_entry = state
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::Session(session) if session.id == "sess-root-path" => Some(session.clone()),
+            _ => None,
+        })
+        .expect("session entry");
+    let plan = state
+        .plan_for_session(&session_entry)?
+        .expect("resume plan");
+    assert!(plan.pipeline.contains("resume"));
+    Ok(())
+}
+
 #[test]
 fn plan_for_profile_marks_stdin_prompt() -> Result<()> {
     let temp = TempDir::new()?;
@@ -2121,6 +2799,61 @@ fn plan_for_profile_marks_stdin_prompt() -> Result<()> {
         let plan = state.plan_for_profile(&profile_entry)?.expect("plan");
         assert!(plan.needs_stdin_prompt);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_for_virtual_profile_uses_virtual_request_fields() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = build_config(temp.path());
+    config.snippets.pre.insert(
+        "prepare".into(),
+        Snippet {
+            name: "prepare".into(),
+            command: "printf PRE".into(),
+        },
+    );
+    config.snippets.post.insert(
+        "finish".into(),
+        Snippet {
+            name: "finish".into(),
+            command: "cat".into(),
+        },
+    );
+
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    let profile = ProfileEntry {
+        display: "virtual/demo".into(),
+        provider: "codex".into(),
+        pre: vec!["prepare".into()],
+        post: vec!["finish".into()],
+        wrap: None,
+        description: Some("Virtual profile".into()),
+        tags: vec!["demo".into()],
+        inline_pre: Vec::new(),
+        stdin_supported: false,
+        prompt_assembler: None,
+        prompt_assembler_args: Vec::new(),
+        prompt_available: true,
+        kind: ProfileKind::Virtual,
+        preview_lines: vec!["Use this prompt".into()],
+    };
+
+    let plan = state.plan_for_profile(&profile)?.expect("plan");
+    assert!(plan.pipeline.contains("printf PRE"));
+    assert!(plan.pipeline.contains("echo hello"));
+    assert!(plan.pipeline.contains("cat"));
     Ok(())
 }
 

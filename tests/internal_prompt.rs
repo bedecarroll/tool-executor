@@ -53,3 +53,71 @@ printf 'Hello %s\n' "${1:-}"
 
     Ok(())
 }
+
+#[test]
+fn internal_capture_arg_passes_captured_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let provider = temp.child("provider.sh");
+    provider.write_str(
+        r#"#!/bin/sh
+printf '%s' "$2" > "$1"
+"#,
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(provider.path(), perms)?;
+    }
+    let output_file = temp.child("captured.txt");
+
+    #[allow(deprecated)]
+    Command::cargo_bin("tx-dev")?
+        .env("TX_CAPTURE_STDIN_DATA", "payload from env")
+        .arg("internal")
+        .arg("capture-arg")
+        .arg("--provider")
+        .arg("demo")
+        .arg("--bin")
+        .arg(provider.path())
+        .arg("--arg")
+        .arg(output_file.path())
+        .arg("--arg")
+        .arg("{prompt}")
+        .assert()
+        .success();
+
+    let captured = std::fs::read_to_string(output_file.path())?;
+    assert_eq!(captured, "payload from env");
+    Ok(())
+}
+
+#[test]
+fn internal_capture_arg_enforces_prompt_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = TempDir::new()?;
+    let provider = temp.child("provider.sh");
+    provider.write_str("#!/bin/sh\nexit 0\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(provider.path(), perms)?;
+    }
+
+    #[allow(deprecated)]
+    Command::cargo_bin("tx-dev")?
+        .env("TX_CAPTURE_STDIN_DATA", "this exceeds limit")
+        .arg("internal")
+        .arg("capture-arg")
+        .arg("--provider")
+        .arg("demo")
+        .arg("--bin")
+        .arg(provider.path())
+        .arg("--prompt-limit")
+        .arg("4")
+        .assert()
+        .failure()
+        .stderr(contains("captured prompt exceeds configured limit"));
+
+    Ok(())
+}

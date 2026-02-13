@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
 
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -138,11 +137,7 @@ impl Transcript {
             let timestamp = message
                 .timestamp
                 .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok())
-                .and_then(|dt| {
-                    dt.format(&Rfc3339)
-                        .or_else(|_| dt.format(&format_description!("%Y-%m-%d %H:%M:%S")))
-                        .ok()
-                })
+                .and_then(|dt| dt.format(&Rfc3339).ok())
                 .unwrap_or_else(|| "-".to_string());
 
             lines.push(format!("## {timestamp} — {role_title}"));
@@ -247,6 +242,10 @@ pub fn fallback_session_uuid(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
 
     fn sample_summary() -> SessionSummary {
         SessionSummary {
@@ -361,6 +360,12 @@ mod tests {
     }
 
     #[test]
+    fn session_uuid_from_value_returns_none_for_non_object() {
+        let value: Value = serde_json::json!(["not", "an", "object"]);
+        assert_eq!(session_uuid_from_value(&value), None);
+    }
+
+    #[test]
     fn fallback_session_uuid_extracts_rollout_suffix() {
         let path = Path::new("/tmp/rollout-2024-10-26-abcdef.jsonl");
         assert_eq!(fallback_session_uuid(path), Some("abcdef".to_string()));
@@ -370,6 +375,15 @@ mod tests {
     fn fallback_session_uuid_handles_rollout_without_suffix() {
         let path = Path::new("/tmp/rollout-log.jsonl");
         assert_eq!(fallback_session_uuid(path), Some("log".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_session_uuid_returns_none_for_non_utf8_name() {
+        let file_name =
+            OsString::from_vec(vec![0x66, 0x6f, 0xff, 0x2e, 0x6a, 0x73, 0x6f, 0x6e, 0x6c]);
+        let path = PathBuf::from("/tmp").join(file_name);
+        assert_eq!(fallback_session_uuid(&path), None);
     }
 
     #[test]

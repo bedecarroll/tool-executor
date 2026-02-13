@@ -159,4 +159,16 @@ mod tests {
         assert!(plan.is_none());
         Ok(())
     }
+
+    #[test]
+    fn extract_session_uuid_skips_blank_and_invalid_lines_before_fallback() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"\n   \n{not-json}\n")?;
+        let path = file.into_temp_path();
+
+        let uuid = extract_session_uuid(path.as_ref())?.expect("fallback uuid");
+        let expected = fallback_session_uuid(path.as_ref()).expect("expected filename fallback");
+        assert_eq!(uuid, expected);
+        Ok(())
+    }
 }

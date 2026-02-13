@@ -39,19 +39,28 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
     }
 
     let mut app = app::App::bootstrap(cli)?;
-
-    match &cli.command {
-        Some(Command::Search(cmd)) => app.search(cmd),
-        Some(Command::Resume(cmd)) => app.resume(cmd),
-        Some(Command::Export(cmd)) => app.export(cmd),
-        Some(Command::Stats(cmd)) => app.stats(cmd),
-        Some(Command::Config(cmd)) => app.config(cmd),
-        Some(Command::Doctor) => app.doctor(),
-        Some(Command::Db(_)) => unreachable!("db command handled before bootstrap"),
-        Some(Command::Internal(_)) => unreachable!("internal command handled above"),
-        Some(Command::SelfUpdate(cmd)) => app.self_update(cmd),
-        None => app.run_ui(),
+    if let Some(Command::Search(cmd)) = &cli.command {
+        return app.search(cmd);
     }
+    if let Some(Command::Resume(cmd)) = &cli.command {
+        return app.resume(cmd);
+    }
+    if let Some(Command::Export(cmd)) = &cli.command {
+        return app.export(cmd);
+    }
+    if let Some(Command::Stats(cmd)) = &cli.command {
+        return app.stats(cmd);
+    }
+    if let Some(Command::Config(cmd)) = &cli.command {
+        return app.config(cmd);
+    }
+    if matches!(&cli.command, Some(Command::Doctor)) {
+        return app.doctor();
+    }
+    if let Some(Command::SelfUpdate(cmd)) = &cli.command {
+        return app.self_update(cmd);
+    }
+    app.run_ui()
 }
 
 fn init_tracing(cli: &Cli) {
@@ -59,9 +68,10 @@ fn init_tracing(cli: &Cli) {
     let mut filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(level.into())
         .from_env_lossy();
-    if let Ok(directive) = "tui_markdown=off".parse::<tracing_subscriber::filter::Directive>() {
-        filter = filter.add_directive(directive);
-    }
+    let directive = "tui_markdown=off"
+        .parse::<tracing_subscriber::filter::Directive>()
+        .expect("valid tracing directive literal");
+    filter = filter.add_directive(directive);
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -115,11 +125,8 @@ pub fn write_cli_error(
     err: &color_eyre::Report,
     mut writer: impl std::io::Write,
 ) -> std::io::Result<()> {
-    let mut chain = err.chain();
-    if let Some(head) = chain.next() {
-        writeln!(writer, "tx: {head}")?;
-    }
-    for cause in chain {
+    writeln!(writer, "tx: {err}")?;
+    for cause in err.chain().skip(1) {
         writeln!(writer, "    caused by: {cause}")?;
     }
     Ok(())
@@ -128,12 +135,12 @@ pub fn write_cli_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Command, ResumeCommand};
+    use crate::cli::{Command, ResumeCommand, SelfUpdateCommand};
     #[cfg(unix)]
     use crate::cli::{InternalCaptureArgCommand, InternalCommand};
     use crate::db::Database;
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
-    use crate::test_support::{ENV_LOCK, toml_path};
+    use crate::test_support::{ENV_LOCK, EnvOverride, toml_path};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     #[cfg(unix)]
@@ -174,6 +181,18 @@ mod tests {
     }
 
     #[test]
+    fn init_tracing_is_idempotent() {
+        let cli = Cli {
+            config_dir: None,
+            verbose: 0,
+            quiet: false,
+            command: None,
+        };
+        init_tracing(&cli);
+        init_tracing(&cli);
+    }
+
+    #[test]
     fn command_factory_returns_named_command() {
         let cmd = command();
         assert_eq!(cmd.get_name(), "tx");
@@ -206,13 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn run_executes_config_where_command() -> color_eyre::Result<()> {
+    fn run_executes_config_where_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "codex"
@@ -220,26 +239,21 @@ provider = "codex"
 [providers.codex]
 bin = "echo"
 session_roots = ["{root}"]
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", "preset-data");
-            std::env::set_var("TX_CACHE_DIR", "preset-cache");
-        }
-        let original_data = std::env::var("TX_DATA_DIR").ok();
-        let original_cache = std::env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let cli = Cli {
             config_dir: Some(config_dir.path().to_path_buf()),
@@ -248,30 +262,17 @@ session_roots = ["{root}"]
             command: Some(Command::Config(crate::cli::ConfigCommand::Where)),
         };
 
-        run(&cli)?;
-
-        if let Some(value) = original_data {
-            unsafe { std::env::set_var("TX_DATA_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_DATA_DIR") };
-        }
-        if let Some(value) = original_cache {
-            unsafe { std::env::set_var("TX_CACHE_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CACHE_DIR") };
-        }
-
-        Ok(())
+        run(&cli).expect("run config where");
     }
 
     #[test]
-    fn run_invokes_ui_when_no_command() -> color_eyre::Result<()> {
+    fn run_invokes_ui_when_no_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "codex"
@@ -279,26 +280,21 @@ provider = "codex"
 [providers.codex]
 bin = "echo"
 session_roots = ["{root}"]
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", "preset-data");
-            std::env::set_var("TX_CACHE_DIR", "preset-cache");
-        }
-        let original_data = std::env::var("TX_DATA_DIR").ok();
-        let original_cache = std::env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let cli = Cli {
             config_dir: Some(config_dir.path().to_path_buf()),
@@ -307,39 +303,66 @@ session_roots = ["{root}"]
             command: None,
         };
 
-        run(&cli)?;
+        run(&cli).expect("run ui");
+    }
 
-        if let Some(value) = original_data {
-            unsafe { std::env::set_var("TX_DATA_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_DATA_DIR") };
-        }
-        if let Some(value) = original_cache {
-            unsafe { std::env::set_var("TX_CACHE_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CACHE_DIR") };
-        }
-        Ok(())
+    #[test]
+    fn run_executes_self_update_command() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.child("config");
+        config_dir.create_dir_all().expect("create config dir");
+        let sessions_dir = config_dir.child("sessions");
+        sessions_dir.create_dir_all().expect("create sessions dir");
+        let config_toml = format!(
+            r#"
+provider = "codex"
+
+[providers.codex]
+bin = "echo"
+session_roots = ["{root}"]
+        "#,
+            root = toml_path(sessions_dir.path()),
+        );
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
+
+        let data_dir = temp.child("data");
+        data_dir.create_dir_all().expect("create data dir");
+        let cache_dir = temp.child("cache");
+        cache_dir.create_dir_all().expect("create cache dir");
+
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
+
+        let cli = Cli {
+            config_dir: Some(config_dir.path().to_path_buf()),
+            verbose: 0,
+            quiet: true,
+            command: Some(Command::SelfUpdate(SelfUpdateCommand {
+                version: Some("v1.2.3".into()),
+            })),
+        };
+
+        run(&cli).expect("run self-update");
     }
 
     #[cfg(unix)]
     #[test]
-    fn run_executes_internal_capture_arg_command() -> color_eyre::Result<()> {
+    fn run_executes_internal_capture_arg_command() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let output = temp.child("prompt.txt");
         let script = temp.child("provider.sh");
-        script.write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")?;
+        script
+            .write_str("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n")
+            .expect("write script");
         let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(script.path(), perms)?;
+        fs::set_permissions(script.path(), perms).expect("set executable");
 
-        unsafe {
-            std::env::set_var("TX_CAPTURE_STDIN_DATA", "original");
-        }
-        let original = std::env::var("TX_CAPTURE_STDIN_DATA").ok();
-        unsafe {
-            std::env::set_var("TX_CAPTURE_STDIN_DATA", "payload");
-        }
+        let _capture_guard = EnvOverride::set_var("TX_CAPTURE_STDIN_DATA", "payload");
 
         let cli = Cli {
             config_dir: None,
@@ -356,27 +379,20 @@ session_roots = ["{root}"]
             ))),
         };
 
-        run(&cli)?;
+        run(&cli).expect("run internal capture-arg");
 
-        if let Some(value) = original {
-            unsafe { std::env::set_var("TX_CAPTURE_STDIN_DATA", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CAPTURE_STDIN_DATA") };
-        }
-
-        let contents = std::fs::read_to_string(output.path())?;
+        let contents = std::fs::read_to_string(output.path()).expect("read output");
         assert_eq!(contents, "payload");
-        Ok(())
     }
 
     #[test]
-    fn run_returns_error_for_provider_mismatch() -> color_eyre::Result<()> {
+    fn run_returns_error_for_provider_mismatch() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = TempDir::new()?;
+        let temp = TempDir::new().expect("temp dir");
         let config_dir = temp.child("config");
-        config_dir.create_dir_all()?;
+        config_dir.create_dir_all().expect("create config dir");
         let sessions_dir = config_dir.child("sessions");
-        sessions_dir.create_dir_all()?;
+        sessions_dir.create_dir_all().expect("create sessions dir");
         let config_toml = format!(
             r#"
 provider = "demo"
@@ -390,31 +406,28 @@ provider = "demo"
 
 [profiles.alt]
 provider = "alt"
-"#,
+        "#,
             root = toml_path(sessions_dir.path()),
         );
-        config_dir.child("config.toml").write_str(&config_toml)?;
+        config_dir
+            .child("config.toml")
+            .write_str(&config_toml)
+            .expect("write config");
 
         let data_dir = temp.child("data");
-        data_dir.create_dir_all()?;
+        data_dir.create_dir_all().expect("create data dir");
         let cache_dir = temp.child("cache");
-        cache_dir.create_dir_all()?;
+        cache_dir.create_dir_all().expect("create cache dir");
 
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", "preset-data");
-            std::env::set_var("TX_CACHE_DIR", "preset-cache");
-        }
-        let original_data = std::env::var("TX_DATA_DIR").ok();
-        let original_cache = std::env::var("TX_CACHE_DIR").ok();
-        unsafe {
-            std::env::set_var("TX_DATA_DIR", data_dir.path());
-            std::env::set_var("TX_CACHE_DIR", cache_dir.path());
-        }
+        let _data_guard = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let _cache_guard = EnvOverride::set_path("TX_CACHE_DIR", cache_dir.path());
 
         let db_path = data_dir.child("tx.sqlite3");
-        let mut db = Database::open(db_path.path())?;
+        let mut db = Database::open(db_path.path()).expect("open db");
         let session_path = sessions_dir.child("sess-1.jsonl");
-        session_path.write_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n")?;
+        session_path
+            .write_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n")
+            .expect("write session");
 
         let summary = SessionSummary {
             id: "sess-1".into(),
@@ -434,7 +447,8 @@ provider = "alt"
         };
         let mut message = MessageRecord::new(summary.id.clone(), 0, "user", "Hello", None, Some(0));
         message.is_first = true;
-        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))?;
+        db.upsert_session(&SessionIngest::new(summary.clone(), vec![message]))
+            .expect("upsert session");
 
         let session_id = summary.id.clone();
         let cli = Cli {
@@ -457,22 +471,6 @@ provider = "alt"
 
         let err = run(&cli).expect_err("expected provider mismatch error");
         let message = err.to_string();
-        assert!(
-            message.contains("provider mismatch"),
-            "unexpected error: {message}"
-        );
-
-        if let Some(value) = original_data {
-            unsafe { std::env::set_var("TX_DATA_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_DATA_DIR") };
-        }
-        if let Some(value) = original_cache {
-            unsafe { std::env::set_var("TX_CACHE_DIR", value) };
-        } else {
-            unsafe { std::env::remove_var("TX_CACHE_DIR") };
-        }
-
-        Ok(())
+        assert!(message.contains("provider mismatch"));
     }
 }

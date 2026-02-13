@@ -14,6 +14,12 @@ use crate::session::{
 const SCHEMA_VERSION: i32 = 7;
 const SCHEMA_VERSION_V5: i32 = 5;
 const SCHEMA_VERSION_V6: i32 = 6;
+const V5_INDEXES_SQL: &str = r"
+    CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
+    CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
+    CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
+    CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
+";
 
 pub struct Database {
     conn: Connection,
@@ -78,9 +84,9 @@ impl Database {
             self.migrate_to_v6()?;
         }
 
-        if current < SCHEMA_VERSION {
-            self.migrate_to_v7()?;
-        }
+        (current < SCHEMA_VERSION)
+            .then(|| self.migrate_to_v7())
+            .transpose()?;
 
         Ok(())
     }
@@ -88,27 +94,13 @@ impl Database {
     fn migrate_to_v5(&self) -> Result<()> {
         let needs_wrapper = !self.has_column("sessions", "wrapper")?;
 
-        if needs_wrapper {
-            self.conn
-                .execute("ALTER TABLE sessions ADD COLUMN wrapper TEXT", [])?;
-        }
-
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active)",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path)",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid)",
-            [],
-        )?;
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp)",
-            [],
-        )?;
+        needs_wrapper
+            .then(|| {
+                self.conn
+                    .execute("ALTER TABLE sessions ADD COLUMN wrapper TEXT", [])
+            })
+            .transpose()?;
+        self.conn.execute_batch(V5_INDEXES_SQL)?;
 
         self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V5}"), [])?;
@@ -908,7 +900,7 @@ mod tests {
     use super::*;
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
     use std::path::PathBuf;
     use time::OffsetDateTime;
 
@@ -976,6 +968,45 @@ mod tests {
         );
 
         PRAGMA user_version = 4;
+        ";
+
+    const V6_SCHEMA: &str = r"
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            wrapper TEXT,
+            model TEXT,
+            label TEXT,
+            path TEXT NOT NULL,
+            uuid TEXT,
+            first_prompt TEXT,
+            actionable INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER,
+            started_at INTEGER,
+            last_active INTEGER,
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            session_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT,
+            timestamp INTEGER,
+            is_first INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, idx),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            session_id UNINDEXED,
+            role UNINDEXED,
+            content
+        );
+
+        PRAGMA user_version = 6;
         ";
 
     fn create_db() -> Result<Database> {
@@ -1053,29 +1084,19 @@ mod tests {
         db.upsert_session(&ingest)?;
 
         let lower = db.search_full_text("context", None, false)?;
-        assert!(
-            !lower.is_empty(),
-            "expected lower-case search to return results"
-        );
+        assert!(!lower.is_empty());
         let lower_hit = lower
             .iter()
             .find(|hit| hit.session_id == summary.id)
             .expect("summary should be present in lower-case search");
-        assert_eq!(
-            lower_hit.role.as_deref(),
-            Some("user"),
-            "expected role to be captured for lower-case search"
-        );
+        assert_eq!(lower_hit.role.as_deref(), Some("user"));
         assert_eq!(
             lower_hit.snippet.as_deref(),
             Some("Context awareness should be case insensitive.")
         );
 
         let upper = db.search_full_text("Context", None, false)?;
-        assert!(
-            !upper.is_empty(),
-            "expected upper-case search to return results"
-        );
+        assert!(!upper.is_empty());
         assert_eq!(lower.len(), upper.len());
         let upper_hit = upper
             .iter()
@@ -1097,22 +1118,14 @@ mod tests {
         insert_session(&mut db, "sess-2", "alt", "Shared context B", false, now)?;
 
         let all = db.search_first_prompt("Shared", None, false)?;
-        assert_eq!(
-            all.len(),
-            2,
-            "expected both sessions when actionable_only=false"
-        );
+        assert_eq!(all.len(), 2);
 
         let filtered = db.search_first_prompt("Shared", Some("codex"), false)?;
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].provider, "codex");
 
         let actionable_only = db.search_first_prompt("Shared", None, true)?;
-        assert_eq!(
-            actionable_only.len(),
-            1,
-            "expected non-actionable sessions to be filtered"
-        );
+        assert_eq!(actionable_only.len(), 1);
         assert_eq!(actionable_only[0].session_id, "sess-1");
         Ok(())
     }
@@ -1201,7 +1214,8 @@ mod tests {
         };
         db.upsert_session(
             &SessionIngest::new(summary.clone(), vec![message]).with_token_usage(vec![usage]),
-        )?;
+        )
+        .expect("insert session with usage");
 
         let other_summary = SessionSummary {
             id: "sess-2".into(),
@@ -1337,6 +1351,95 @@ mod tests {
     }
 
     #[test]
+    fn upsert_session_replaces_existing_messages_and_usage_rows() {
+        let mut db = create_db().expect("create db");
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+
+        let summary = SessionSummary {
+            id: "sess-replace".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("replace".into()),
+            path: PathBuf::from("sess-replace.jsonl"),
+            uuid: None,
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+
+        let mut first_message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "first", None, Some(now));
+        first_message.is_first = true;
+        let first_usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now,
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 15,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        db.upsert_session(
+            &SessionIngest::new(summary.clone(), vec![first_message.clone()])
+                .with_token_usage(vec![first_usage]),
+        )
+        .expect("insert first snapshot");
+
+        let mut second_message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "second", None, Some(now + 1));
+        second_message.is_first = true;
+        let assistant_message = MessageRecord::new(
+            summary.id.clone(),
+            1,
+            "assistant",
+            "response",
+            None,
+            Some(now + 2),
+        );
+        let second_usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now + 1,
+            input_tokens: 20,
+            cached_input_tokens: 0,
+            output_tokens: 10,
+            reasoning_output_tokens: 0,
+            total_tokens: 30,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        db.upsert_session(
+            &SessionIngest::new(summary, vec![second_message, assistant_message])
+                .with_token_usage(vec![second_usage]),
+        )
+        .expect("replace snapshot");
+
+        let transcript = db
+            .fetch_transcript("sess-replace")
+            .expect("fetch transcript")
+            .expect("transcript exists");
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[0].content, "second");
+        assert_eq!(transcript.messages[1].content, "response");
+
+        let usage_rows = db
+            .token_usage_for_provider("codex")
+            .expect("query token usage");
+        let matching: Vec<_> = usage_rows
+            .into_iter()
+            .filter(|usage| usage.session_id == "sess-replace")
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].timestamp, now + 1);
+    }
+
+    #[test]
     fn upsert_session_persists_model() -> Result<()> {
         let mut db = create_db()?;
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -1388,14 +1491,8 @@ mod tests {
         let columns = stmt
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert!(
-            columns.iter().any(|name| name == "wrapper"),
-            "wrapper column missing after migration"
-        );
-        assert!(
-            columns.iter().any(|name| name == "model"),
-            "model column missing after migration"
-        );
+        assert!(columns.iter().any(|name| name == "wrapper"));
+        assert!(columns.iter().any(|name| name == "model"));
 
         let token_usage_exists: Option<String> = db
             .conn
@@ -1405,10 +1502,7 @@ mod tests {
                 |row| row.get(0),
             )
             .optional()?;
-        assert!(
-            token_usage_exists.is_some(),
-            "token_usage table missing after migration"
-        );
+        assert!(token_usage_exists.is_some());
 
         let version: i32 = db
             .conn
@@ -1419,9 +1513,243 @@ mod tests {
     }
 
     #[test]
+    fn migrate_v4_schema_executes_v5_index_and_v7_paths() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let db = Database { conn };
+        db.configure()?;
+        db.conn.execute_batch(LEGACY_SCHEMA)?;
+
+        db.migrate()?;
+
+        assert!(db.has_column("sessions", "wrapper")?);
+        let idx_messages: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_session_timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        assert_eq!(
+            idx_messages.as_deref(),
+            Some("idx_messages_session_timestamp")
+        );
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn has_column_returns_true_for_existing_columns() -> Result<()> {
+        let db = create_db()?;
+        assert!(db.has_column("sessions", "provider")?);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_handles_intermediate_schema_versions() -> Result<()> {
+        let db = create_db()?;
+
+        db.conn.execute("PRAGMA user_version = 5", [])?;
+        db.migrate()?;
+        let version_after_v5: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version_after_v5, SCHEMA_VERSION);
+
+        db.conn.execute("PRAGMA user_version = 6", [])?;
+        db.migrate()?;
+        let version_after_v6: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version_after_v6, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_fails_on_read_only_create_schema() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("readonly-create.sqlite3");
+        {
+            let conn = Connection::open(db_path.path())?;
+            drop(conn);
+        }
+        let conn = Connection::open_with_flags(db_path.path(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let db = Database { conn };
+        let err = db.migrate().expect_err("read-only migrate should fail");
+        assert!(err.to_string().contains("readonly"));
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_fails_on_read_only_v7_upgrade() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("readonly-v7.sqlite3");
+        {
+            let conn = Connection::open(db_path.path())?;
+            conn.execute_batch(V6_SCHEMA)?;
+        }
+        let conn = Connection::open_with_flags(db_path.path(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let db = Database { conn };
+        let err = db.migrate().expect_err("read-only upgrade should fail");
+        assert!(err.to_string().contains("readonly"));
+        Ok(())
+    }
+
+    #[test]
+    fn database_open_rejects_newer_schema_versions() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("future.sqlite3");
+        let conn = Connection::open(db_path.path())?;
+        conn.execute_batch("PRAGMA user_version = 999;")?;
+        drop(conn);
+
+        let result = Database::open(db_path.path());
+        assert!(result.is_err());
+        let err = result.err().expect("future schema should fail");
+        assert!(
+            err.to_string()
+                .contains("is newer than this binary supports")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_methods_return_errors_when_sessions_table_is_missing() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "sess-1", "codex", "Prompt", true, now)?;
+
+        db.conn
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE sessions;")?;
+
+        assert!(db.existing_by_path("sess-1.jsonl").is_err());
+        assert!(db.sessions_for_provider("codex").is_err());
+        assert!(db.token_usage_for_provider("codex").is_err());
+        assert!(db.user_message_timestamps("codex").is_err());
+        assert!(db.session_summary_by_uuid("missing").is_err());
+        assert!(db.session_summary("sess-1").is_err());
+        assert!(db.latest_actionable_session().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn fetch_transcript_returns_none_for_unknown_identifier() -> Result<()> {
         let db = create_db()?;
         assert!(db.fetch_transcript("missing")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_transcript_by_id_returns_messages() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "direct-id".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("By ID".into()),
+            path: PathBuf::from("direct-id.jsonl"),
+            uuid: Some("direct-id-uuid".into()),
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let mut message =
+            MessageRecord::new(summary.id.clone(), 0, "user", "hello", None, Some(now));
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+        let transcript = db
+            .fetch_transcript("direct-id")?
+            .expect("expected transcript by id");
+        assert_eq!(transcript.session.id, "direct-id");
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content, "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_transcript_returns_error_when_messages_table_is_missing() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        insert_session(&mut db, "sess-1", "codex", "Prompt", true, now)?;
+        db.conn
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE messages;")?;
+
+        assert!(db.fetch_transcript("sess-1").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_session_errors_for_duplicate_message_indices() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "dup-msg".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("dup".into()),
+            path: PathBuf::from("dup-msg.jsonl"),
+            uuid: None,
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let first = MessageRecord::new(summary.id.clone(), 0, "user", "a", None, Some(now));
+        let second = MessageRecord::new(summary.id.clone(), 0, "assistant", "b", None, Some(now));
+        let ingest = SessionIngest::new(summary, vec![first, second]);
+        assert!(db.upsert_session(&ingest).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_session_errors_for_duplicate_token_usage_rows() -> Result<()> {
+        let mut db = create_db()?;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let summary = SessionSummary {
+            id: "dup-usage".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            model: None,
+            label: Some("dup".into()),
+            path: PathBuf::from("dup-usage.jsonl"),
+            uuid: None,
+            first_prompt: Some("hello".into()),
+            actionable: true,
+            created_at: Some(now),
+            started_at: Some(now),
+            last_active: Some(now),
+            size: 1,
+            mtime: now,
+        };
+        let message = MessageRecord::new(summary.id.clone(), 0, "user", "a", None, Some(now));
+        let usage = TokenUsageRecord {
+            session_id: summary.id.clone(),
+            timestamp: now,
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            reasoning_output_tokens: 0,
+            total_tokens: 2,
+            model: Some("gpt-5".into()),
+            rate_limits: None,
+        };
+        let ingest =
+            SessionIngest::new(summary, vec![message]).with_token_usage(vec![usage.clone(), usage]);
+        assert!(db.upsert_session(&ingest).is_err());
         Ok(())
     }
 
