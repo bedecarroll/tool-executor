@@ -163,26 +163,7 @@ fn resolve_directories(dir_override: Option<&Path>) -> Result<AppDirectories> {
 fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
     #[cfg(windows)]
     {
-        resolve_default_directories_with(
-            || {
-                ProjectDirs::from("", "", APP_NAME).map(|dirs| {
-                    (
-                        dirs.config_dir().to_path_buf(),
-                        dirs.data_dir().to_path_buf(),
-                        dirs.cache_dir().to_path_buf(),
-                    )
-                })
-            },
-            || {
-                BaseDirs::new().map(|dirs| {
-                    (
-                        dirs.config_dir().join(APP_NAME),
-                        dirs.data_dir().join(APP_NAME),
-                        dirs.cache_dir().join(APP_NAME),
-                    )
-                })
-            },
-        )
+        resolve_default_directories_with(windows_project_dirs, windows_base_dirs)
     }
 
     #[cfg(not(windows))]
@@ -205,6 +186,31 @@ fn resolve_default_directories() -> Result<(PathBuf, PathBuf, PathBuf)> {
             cache_root.join(APP_NAME),
         ))
     }
+}
+
+#[cfg(windows)]
+fn windows_project_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    ProjectDirs::from("", "", APP_NAME).map(|dirs| {
+        (
+            dirs.config_dir().to_path_buf(),
+            dirs.data_dir().to_path_buf(),
+            dirs.cache_dir().to_path_buf(),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_base_dirs() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    BaseDirs::new().map(|dirs| windows_base_dirs_paths(&dirs))
+}
+
+#[cfg(any(test, windows))]
+fn windows_base_dirs_paths(dirs: &BaseDirs) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        dirs.config_dir().join(APP_NAME),
+        dirs.data_dir().join(APP_NAME),
+        dirs.cache_dir().join(APP_NAME),
+    )
 }
 
 #[cfg(any(test, windows))]
@@ -523,6 +529,15 @@ mod tests {
         let resolved = resolve_default_directories_with(|| None, || Some(fake.clone()))?;
         assert_eq!(resolved, fake);
         Ok(())
+    }
+
+    #[test]
+    fn windows_base_dirs_paths_appends_app_name() {
+        let base = BaseDirs::new().expect("base dirs should exist in test environment");
+        let (config, data, cache) = windows_base_dirs_paths(&base);
+        assert_eq!(config, base.config_dir().join(APP_NAME));
+        assert_eq!(data, base.data_dir().join(APP_NAME));
+        assert_eq!(cache, base.cache_dir().join(APP_NAME));
     }
 
     #[cfg(not(windows))]

@@ -339,12 +339,21 @@ fn formatting_helpers_cover_paths() {
         meaningful_excerpt("   \n# Title\nContent line."),
         Some("# Title Content line.".into())
     );
+    let long_excerpt = "x".repeat(300);
+    assert_eq!(
+        meaningful_excerpt(&long_excerpt),
+        Some(long_excerpt.clone())
+    );
 
     let now = OffsetDateTime::from_unix_timestamp(1_000_000).unwrap();
     let past = now - Duration::minutes(5);
     assert_eq!(
         format_relative_time(Some(past.unix_timestamp()), now),
         Some("5m ago".into())
+    );
+    assert_eq!(
+        format_relative_time(Some((now - Duration::hours(2)).unix_timestamp()), now),
+        Some("2h ago".into())
     );
     assert_eq!(format_relative_time(None, now), None);
     assert_eq!(
