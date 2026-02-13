@@ -81,18 +81,17 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
       - name: Generate coverage report
-        if: ${{ success() && matrix.os == 'ubuntu-latest' }}
+        if: success()
         shell: bash
         run: |
           mkdir -p coverage
-          unset RUSTC_WRAPPER
-          export SCCACHE_DISABLE=1
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --workspace --all-targets --ignore-filename-regex 'src/(app|tui)/tests\.rs$' --lcov --output-path coverage/lcov.info
-          cargo llvm-cov report --ignore-filename-regex 'src/(app|tui)/tests\.rs$' --html --output-dir coverage/html
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cargo llvm-cov report --html --output-dir coverage/html
+          fi
 
       - name: Upload coverage to Codecov
-        if: ${{ success() && matrix.os == 'ubuntu-latest' }}
+        if: success()
         uses: codecov/codecov-action@v5
         with:
           files: coverage/lcov.info
