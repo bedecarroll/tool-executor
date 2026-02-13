@@ -358,31 +358,31 @@ impl<'a> Indexer<'a> {
                 if let Some(clean) = clean_text(&content) {
                     let normalized_role = role.to_ascii_lowercase();
                     let key = (normalized_role.clone(), clean.clone(), timestamp);
-                    if let Some(existing_idx) = seen_messages.get(&key) {
-                        if let Some(existing) = state.messages.get_mut(*existing_idx) {
+                    if let Some(existing_idx) = seen_messages.get(&key).copied() {
+                        let existing = state.messages.get_mut(existing_idx);
+                        if let Some(existing) = existing {
                             update_existing_source(existing, source.as_ref());
                         }
-                        continue;
+                    } else {
+                        if is_instruction_banner(&clean, state.instructions_raw.as_deref()) {
+                            state.saw_instruction_block = true;
+                            continue;
+                        }
+                        let is_user = normalized_role == "user";
+                        let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
+                        if state.first_prompt.is_none() && is_user {
+                            state.first_prompt = Some(clean.clone());
+                        }
+                        state.messages.push(MessageRecord::new(
+                            session_id,
+                            index,
+                            role,
+                            clean,
+                            source.clone(),
+                            timestamp,
+                        ));
+                        seen_messages.insert(key, state.messages.len() - 1);
                     }
-
-                    if is_instruction_banner(&clean, state.instructions_raw.as_deref()) {
-                        state.saw_instruction_block = true;
-                        continue;
-                    }
-                    let is_user = normalized_role == "user";
-                    let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
-                    if state.first_prompt.is_none() && is_user {
-                        state.first_prompt = Some(clean.clone());
-                    }
-                    state.messages.push(MessageRecord::new(
-                        session_id,
-                        index,
-                        role,
-                        clean,
-                        source.clone(),
-                        timestamp,
-                    ));
-                    seen_messages.insert(key, state.messages.len() - 1);
                 }
             }
 
@@ -681,8 +681,9 @@ fn extract_text(container: &Value) -> Option<String> {
                 parts.push(text);
             }
         }
-        if !parts.is_empty() {
-            return Some(parts.join(""));
+        let joined = parts.join("");
+        if !joined.is_empty() {
+            return Some(joined);
         }
     }
 
@@ -1716,10 +1717,10 @@ mod tests {
     fn collect_ingest_state_deduplicates_messages_and_upgrades_source() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("duplicate.jsonl");
-        session_file.write_str("{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n")?;
-        session_file.write_str("{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")?;
+        session_file.write_str("{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")?;
 
         let state = Indexer::collect_ingest_state("codex/duplicate.jsonl", session_file.path())?;
+        assert_eq!(state.wrapper.as_deref(), Some("shellwrap"));
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].content, "Hello");
         assert_eq!(state.messages[0].source.as_deref(), Some("response_item"));
@@ -1731,6 +1732,10 @@ mod tests {
         assert_eq!(
             extract_text(&json!({"content":[{"text":"Hello"},{"message":" world"}]})),
             Some("Hello world".to_string())
+        );
+        assert_eq!(
+            extract_text(&json!({"content":[{"type":"unknown"}], "payload":{"text":"fallback"}})),
+            Some("fallback".to_string())
         );
         assert_eq!(
             extract_text(&json!({"text":"fallback"})),
