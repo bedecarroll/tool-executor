@@ -640,6 +640,34 @@ fn search_role_requires_full_text() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn rag_index_requires_openai_api_key() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.env_remove("OPENAI_API_KEY")
+        .env("TX_SKIP_INDEX", "1")
+        .args(["rag", "index", "--batch-size", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("OPENAI_API_KEY"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
+fn rag_search_requires_openai_api_key() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let mut cmd = base_command(&temp);
+    cmd.env_remove("OPENAI_API_KEY")
+        .env("TX_SKIP_INDEX", "1")
+        .args(["rag", "search", "--query", "find retries", "--k", "5"])
+        .assert()
+        .failure()
+        .stderr(contains("OPENAI_API_KEY"));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn resume_accepts_uuid_identifier() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let uuid = "019a1e58-daad-7740-9a01-7a9527114dd9";

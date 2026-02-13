@@ -35,6 +35,9 @@ pub enum Command {
     /// Manage the local database.
     #[command(subcommand)]
     Db(DbCommand),
+    /// Experimental semantic retrieval over indexed session history.
+    #[command(subcommand)]
+    Rag(RagCommand),
     /// Run environment diagnostics.
     Doctor,
     /// Update tx to the latest released version.
@@ -114,6 +117,55 @@ pub enum StatsCommand {
 pub enum DbCommand {
     /// Delete the indexed session database.
     Reset(DbResetCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RagCommand {
+    /// Experimental: generate and store embeddings for session history chunks.
+    Index(RagIndexCommand),
+    /// Experimental: run semantic KNN search over indexed history chunks.
+    Search(RagSearchCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct RagIndexCommand {
+    /// Only index rows at or after this unix timestamp in milliseconds.
+    #[arg(long)]
+    pub since: Option<i64>,
+    /// Restrict indexing to a single session id.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Delete scoped vectors before rebuilding.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub reindex: bool,
+    /// Number of chunks to process per embeddings batch.
+    #[arg(long, default_value_t = 64, value_parser = parse_positive_usize)]
+    pub batch_size: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct RagSearchCommand {
+    /// Natural-language query to embed and search against history vectors.
+    #[arg(long)]
+    pub query: String,
+    /// Number of nearest neighbors to return.
+    #[arg(long, default_value_t = 20, value_parser = parse_positive_usize)]
+    pub k: usize,
+    /// Restrict to a single session id.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Restrict to a specific tool/source name.
+    #[arg(long)]
+    pub tool: Option<String>,
+    /// Only include results at or after this unix timestamp in milliseconds.
+    #[arg(long)]
+    pub since: Option<i64>,
+    /// Only include results at or before this unix timestamp in milliseconds.
+    #[arg(long)]
+    pub until: Option<i64>,
+    /// Emit structured JSON instead of the default text output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -210,6 +262,16 @@ fn parse_role(raw: &str) -> Result<String, String> {
     }
 }
 
+fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|err| format!("invalid positive integer '{raw}': {err}"))?;
+    if value == 0 {
+        return Err(format!("invalid positive integer '{raw}': must be > 0"));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Args)]
 pub struct SelfUpdateCommand {
     /// Update to a specific release tag (defaults to the latest).
@@ -239,6 +301,14 @@ mod tests {
 
     fn into_config_default(command: Command) -> Option<ConfigDefaultCommand> {
         if let Command::Config(ConfigCommand::Default(cmd)) = command {
+            Some(cmd)
+        } else {
+            None
+        }
+    }
+
+    fn into_rag_search(command: Command) -> Option<RagSearchCommand> {
+        if let Command::Rag(RagCommand::Search(cmd)) = command {
             Some(cmd)
         } else {
             None
@@ -331,9 +401,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_rag_index_command() {
+        let cli = Cli::try_parse_from([
+            "tx",
+            "rag",
+            "index",
+            "--since",
+            "1000",
+            "--session",
+            "sess-1",
+            "--reindex",
+            "--batch-size",
+            "32",
+        ])
+        .expect("parse rag index");
+
+        assert!(cli.command.is_some_and(|command| matches!(
+            command,
+            Command::Rag(RagCommand::Index(RagIndexCommand {
+                since: Some(1000),
+                session: Some(_),
+                reindex: true,
+                batch_size: 32
+            }))
+        )));
+    }
+
+    #[test]
+    fn parse_rag_search_command() {
+        let cli = Cli::try_parse_from([
+            "tx",
+            "rag",
+            "search",
+            "--query",
+            "find timeout bug",
+            "--k",
+            "7",
+            "--session",
+            "sess-2",
+            "--tool",
+            "event_msg",
+            "--since",
+            "10",
+            "--until",
+            "20",
+            "--json",
+        ])
+        .expect("parse rag search");
+
+        let cmd = cli
+            .command
+            .and_then(into_rag_search)
+            .expect("rag search command");
+        assert_eq!(cmd.query, "find timeout bug");
+        assert_eq!(cmd.k, 7);
+        assert_eq!(cmd.session.as_deref(), Some("sess-2"));
+        assert_eq!(cmd.tool.as_deref(), Some("event_msg"));
+        assert_eq!(cmd.since, Some(10));
+        assert_eq!(cmd.until, Some(20));
+        assert!(cmd.json);
+    }
+
+    #[test]
+    fn parse_rag_search_rejects_zero_k() {
+        let err = Cli::try_parse_from([
+            "tx",
+            "rag",
+            "search",
+            "--query",
+            "find timeout bug",
+            "--k",
+            "0",
+        ])
+        .expect_err("zero k should fail");
+        let message = err.to_string();
+        assert!(message.contains("must be > 0"));
+    }
+
+    #[test]
     fn command_extractors_return_none_for_mismatch() {
         assert!(into_search(Command::Stats(StatsCommand::Codex)).is_none());
         assert!(into_resume(Command::Stats(StatsCommand::Codex)).is_none());
         assert!(into_config_default(Command::Stats(StatsCommand::Codex)).is_none());
+        assert!(into_rag_search(Command::Stats(StatsCommand::Codex)).is_none());
     }
 }

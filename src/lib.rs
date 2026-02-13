@@ -7,7 +7,9 @@ pub mod indexer;
 pub mod pipeline;
 pub mod prompts;
 pub mod providers;
+pub mod rag;
 pub mod session;
+pub mod sqlite_ext;
 
 mod app;
 pub mod cli;
@@ -29,6 +31,7 @@ pub use cli::Cli;
 /// Returns an error when initialization or the chosen command fails to execute.
 pub fn run(cli: &Cli) -> color_eyre::Result<()> {
     init_tracing(cli);
+    sqlite_ext::init_sqlite_extensions()?;
 
     if let Some(Command::Internal(cmd)) = &cli.command {
         return internal::run(cmd);
@@ -47,6 +50,9 @@ pub fn run(cli: &Cli) -> color_eyre::Result<()> {
     }
     if let Some(Command::Export(cmd)) = &cli.command {
         return app.export(cmd);
+    }
+    if let Some(Command::Rag(cmd)) = &cli.command {
+        return app.rag(cmd);
     }
     if let Some(Command::Stats(cmd)) = &cli.command {
         return app.stats(cmd);
