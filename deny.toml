@@ -52,4 +52,6 @@ skip = [
   { name = "quick-xml", version = "=0.37.5" },
   { name = "itertools", version = "=0.13.0" },
   { name = "itertools", version = "=0.14.0" },
+  { name = "webpki-roots", version = "=0.26.11" },
+  { name = "webpki-roots", version = "=1.0.4" },
 ]
