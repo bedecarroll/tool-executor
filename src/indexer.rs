@@ -1717,9 +1717,7 @@ mod tests {
     fn collect_ingest_state_deduplicates_messages_and_upgrades_source() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("duplicate.jsonl");
-        session_file.write_str(
-            "{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n",
-        )?;
+        session_file.write_str("{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"wrapper\":\"shellwrap\",\"type\":\"user_message\",\"message\":\"Hello\"}}\n{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")?;
 
         let state = Indexer::collect_ingest_state("codex/duplicate.jsonl", session_file.path())?;
         assert_eq!(state.wrapper.as_deref(), Some("shellwrap"));
