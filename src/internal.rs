@@ -355,6 +355,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn capture_prompt_propagates_pre_pipeline_failure() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let cmd = InternalCaptureArgCommand {
             provider: "demo".into(),
             bin: "echo".into(),
@@ -382,6 +383,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_pre_pipeline_uses_stdin_input() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let commands = vec!["cat".to_string()];
         let output = run_pre_pipeline(&commands, Some("ping"), 32)?;
         assert_eq!(output, "ping");
@@ -391,6 +393,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_pre_pipeline_errors_when_output_exceeds_limit() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let commands = vec!["printf 'abcdef'".to_string()];
         let err = run_pre_pipeline(&commands, None, 3).unwrap_err();
         assert!(err.to_string().contains("exceeds configured limit"));
@@ -399,6 +402,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_pre_pipeline_propagates_non_zero_status() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let commands = vec!["false".to_string()];
         let err = run_pre_pipeline(&commands, None, 16).unwrap_err();
         assert!(err.to_string().contains("pre pipeline exited with status"));
@@ -407,6 +411,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_pre_pipeline_writes_input_to_command() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = TempDir::new()?;
         let log_path = temp.child("log.txt");
         let script = temp.child("capture.sh");
