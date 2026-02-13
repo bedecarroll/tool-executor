@@ -363,27 +363,26 @@ impl<'a> Indexer<'a> {
                         if let Some(existing) = existing {
                             update_existing_source(existing, source.as_ref());
                         }
-                        continue;
+                    } else {
+                        if is_instruction_banner(&clean, state.instructions_raw.as_deref()) {
+                            state.saw_instruction_block = true;
+                            continue;
+                        }
+                        let is_user = normalized_role == "user";
+                        let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
+                        if state.first_prompt.is_none() && is_user {
+                            state.first_prompt = Some(clean.clone());
+                        }
+                        state.messages.push(MessageRecord::new(
+                            session_id,
+                            index,
+                            role,
+                            clean,
+                            source.clone(),
+                            timestamp,
+                        ));
+                        seen_messages.insert(key, state.messages.len() - 1);
                     }
-
-                    if is_instruction_banner(&clean, state.instructions_raw.as_deref()) {
-                        state.saw_instruction_block = true;
-                        continue;
-                    }
-                    let is_user = normalized_role == "user";
-                    let index = i64::try_from(state.messages.len()).unwrap_or(i64::MAX);
-                    if state.first_prompt.is_none() && is_user {
-                        state.first_prompt = Some(clean.clone());
-                    }
-                    state.messages.push(MessageRecord::new(
-                        session_id,
-                        index,
-                        role,
-                        clean,
-                        source.clone(),
-                        timestamp,
-                    ));
-                    seen_messages.insert(key, state.messages.len() - 1);
                 }
             }
 
@@ -682,8 +681,8 @@ fn extract_text(container: &Value) -> Option<String> {
                 parts.push(text);
             }
         }
-        if !parts.is_empty() {
-            let joined = parts.join("");
+        let joined = parts.join("");
+        if !joined.is_empty() {
             return Some(joined);
         }
     }
