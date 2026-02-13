@@ -85,6 +85,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p coverage
+          unset RUSTC_WRAPPER
+          export SCCACHE_DISABLE=1
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --all-targets --ignore-filename-regex 'src/(app|tui)/tests\.rs$' --lcov --output-path coverage/lcov.info
           cargo llvm-cov report --ignore-filename-regex 'src/(app|tui)/tests\.rs$' --html --output-dir coverage/html
