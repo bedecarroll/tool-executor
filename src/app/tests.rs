@@ -518,6 +518,63 @@ fn default_shell_prefers_environment_or_falls_back() {
     assert_eq!(fallback.path, "/bin/sh");
 }
 
+#[cfg(windows)]
+#[test]
+fn default_shell_windows_maps_powershell_to_cmd() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _shell = EnvOverride::set_var("SHELL", "powershell.exe");
+    let _comspec = EnvOverride::set_var("COMSPEC", "cmd.exe");
+
+    let shell = default_shell();
+    assert_eq!(shell.flag, "/C");
+    assert_eq!(shell.path, "cmd.exe");
+}
+
+#[cfg(windows)]
+#[test]
+fn default_shell_windows_handles_empty_comspec() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _shell = EnvOverride::remove("SHELL");
+    let _comspec = EnvOverride::set_var("COMSPEC", "");
+
+    let shell = default_shell();
+    assert_eq!(shell.flag, "/C");
+    assert!(shell.path.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_plan_shell_with_non_cmd_shell_uses_arg_path() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _shell = EnvOverride::set_var("SHELL", "where.exe");
+    let temp = TempDir::new()?;
+
+    let plan = PipelinePlan {
+        pipeline: "where -c anything".into(),
+        display: "where -c anything".into(),
+        friendly_display: "where -c anything".into(),
+        env: Vec::new(),
+        invocation: Invocation::Shell {
+            command: "anything".into(),
+        },
+        provider: "demo".into(),
+        terminal_title: "demo".into(),
+        pre_snippets: Vec::new(),
+        post_snippets: Vec::new(),
+        wrapper: None,
+        needs_stdin_prompt: false,
+        uses_capture_arg: false,
+        capture_has_pre_commands: false,
+        stdin_prompt_label: None,
+        cwd: temp.path().to_path_buf(),
+        prompt_assembler: None,
+    };
+
+    let err = execute_plan(&plan).expect_err("where.exe -c should fail");
+    assert!(err.to_string().contains("command exited with status"));
+    Ok(())
+}
+
 fn setup_directories(temp: &TempDir) -> Result<AppDirectories> {
     let directories = AppDirectories {
         config_dir: temp.path().join("config"),

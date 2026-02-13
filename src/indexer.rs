@@ -1705,6 +1705,38 @@ mod tests {
             "regular user message",
             Some("regular user message")
         ));
+        assert!(is_instruction_banner(
+            "<system_instructions>be precise</system_instructions>",
+            None
+        ));
         assert_eq!(summarize_instructions("\n<INSTRUCTIONS>\n#\n"), None);
+    }
+
+    #[test]
+    fn collect_ingest_state_deduplicates_messages_and_upgrades_source() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("duplicate.jsonl");
+        session_file.write_str("{\"type\":\"event_msg\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n")?;
+        session_file.write_str("{\"type\":\"response_item\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")?;
+
+        let state = Indexer::collect_ingest_state("codex/duplicate.jsonl", session_file.path())?;
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "Hello");
+        assert_eq!(state.messages[0].source.as_deref(), Some("response_item"));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_text_and_clean_text_cover_fallback_paths() {
+        assert_eq!(
+            extract_text(&json!({"content":[{"text":"Hello"},{"message":" world"}]})),
+            Some("Hello world".to_string())
+        );
+        assert_eq!(
+            extract_text(&json!({"text":"fallback"})),
+            Some("fallback".into())
+        );
+        assert_eq!(extract_text(&json!({"unknown": true})), None);
+        assert_eq!(clean_text("   "), None);
     }
 }
