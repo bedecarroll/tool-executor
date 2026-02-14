@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{self, IsTerminal, Write};
 #[cfg(any(test, not(coverage)))]
 use std::io::BufRead;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
