@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- markdownlint-disable-next-line MD024 -->
 ### Changed
 
-- Nothing yet.
+- Dropped `x86_64-unknown-linux-musl` release artifacts from cargo-dist targets due to sqlite-vec musl build incompatibility.
 
 <!-- markdownlint-disable-next-line MD024 -->
 ### Fixed
