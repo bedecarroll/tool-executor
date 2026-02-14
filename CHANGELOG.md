@@ -27,6 +27,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.8.0] - 2026-02-14
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Added experimental semantic history retrieval via `tx rag index` and `tx rag search`, backed by sqlite-vec-powered embeddings and filterable CLI output.
+- Added `stats codex` activity metrics for top session turn counts and highest context compaction totals.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Improved shared CLI error handling and tightened resume/capture reliability in command execution paths.
+- Refactored large `app` and `tui` test modules into dedicated files and improved env-mutation test isolation.
+- Updated dependencies, including lockfile bumps required to address cargo-deny advisories.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Fixed semantic metadata insertion when `tool_name` is missing to avoid sqlite-vec `TEXT NULL` failures.
+- Reduced CI warning noise by documenting accepted transitive `cargo-deny` duplicates and cleaning coverage-only dead code paths.
+
 ## [0.7.0] - 2026-01-25
 
 <!-- markdownlint-disable-next-line MD024 -->
