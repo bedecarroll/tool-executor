@@ -28,7 +28,7 @@ members = [ "crates/tx",]
 [dependencies]
 blake3 = "1.8"
 bytemuck = "1.24"
-clap_complete = "4.5.65"
+clap_complete = "4.5.66"
 clap_mangen = "0.2.31"
 color-eyre = "0.6"
 crossterm = "0.29"
@@ -44,7 +44,7 @@ once_cell = "1.21"
 shell-escape = "0.1"
 thiserror = "2.0.18"
 tracing = "0.1.44"
-ureq = { version = "2.12", features = ["json"] }
+ureq = { version = "3.2", features = ["json"] }
 walkdir = "2.5"
 which = "8.0"
 unicode-width = "0.2.2"
@@ -52,11 +52,11 @@ unicode-width = "0.2.2"
 [dev-dependencies]
 assert_fs = "1.1"
 predicates = "3.1"
-tempfile = "3.24"
+tempfile = "3.25"
 assert_cmd = "2.1"
 
 [dependencies.clap]
-version = "4.5.57"
+version = "4.5.58"
 features = [ "derive",]
 
 [dependencies.indexmap]
@@ -89,7 +89,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "0.9.11"
+version = "1.0.1"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
