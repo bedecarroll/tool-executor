@@ -1,0 +1,3 @@
+interface:
+  display_name: "Prepare Release"
+  short_description: "Prepare versioned release PRs with jj and gh"
