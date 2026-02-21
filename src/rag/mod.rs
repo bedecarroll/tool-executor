@@ -106,13 +106,15 @@ impl OpenAIEmbeddingProvider {
             model,
             base_url,
             #[cfg(not(coverage))]
-            client: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout_read(Duration::from_secs(60))
-                .timeout_write(Duration::from_secs(60))
-                .build(),
+            client: ureq::Agent::config_builder()
+                .timeout_connect(Some(Duration::from_secs(10)))
+                .timeout_recv_response(Some(Duration::from_secs(60)))
+                .timeout_recv_body(Some(Duration::from_secs(60)))
+                .timeout_send_body(Some(Duration::from_secs(60)))
+                .build()
+                .into(),
             #[cfg(coverage)]
-            client: ureq::AgentBuilder::new().build(),
+            client: ureq::Agent::new_with_defaults(),
         })
     }
 
@@ -120,50 +122,61 @@ impl OpenAIEmbeddingProvider {
     fn embed_batch_with_retry(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut attempt = 0usize;
         loop {
-            let response = self
+            let request = self
                 .client
                 .post(&format!("{}/embeddings", self.base_url))
-                .set("Authorization", &format!("Bearer {}", self.api_key))
-                .set("Content-Type", "application/json")
-                .send_json(json!({
-                    "model": self.model,
-                    "input": texts,
-                }));
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .config()
+                .http_status_as_error(false)
+                .build();
+            let response = request.send_json(json!({
+                "model": self.model,
+                "input": texts,
+            }));
 
             match response {
-                Ok(response) => {
-                    let parsed: OpenAIEmbeddingResponse = response
-                        .into_json()
-                        .context("failed to decode embeddings response body")?;
-
-                    if parsed.data.len() != texts.len() {
+                Ok(mut response) => {
+                    let status = response.status().as_u16();
+                    if is_retryable_status(status) && attempt < MAX_RETRIES {
+                        let body = response.body_mut().read_to_string().unwrap_or_default();
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            status,
+                            body = %body,
+                            "retrying embeddings request after server status"
+                        );
+                    } else if !(200..300).contains(&status) {
+                        let body = response.body_mut().read_to_string().unwrap_or_default();
                         return Err(eyre!(
-                            "embeddings response size mismatch: expected {}, got {}",
-                            texts.len(),
-                            parsed.data.len()
+                            "embeddings request failed with status {}: {}",
+                            status,
+                            body
                         ));
-                    }
+                    } else {
+                        let parsed: OpenAIEmbeddingResponse = response
+                            .body_mut()
+                            .read_json()
+                            .context("failed to decode embeddings response body")?;
 
-                    let mut sorted = parsed.data;
-                    sorted.sort_by_key(|item| item.index);
-                    let mut vectors = Vec::with_capacity(sorted.len());
-                    for item in sorted {
-                        vectors.push(item.embedding);
+                        if parsed.data.len() != texts.len() {
+                            return Err(eyre!(
+                                "embeddings response size mismatch: expected {}, got {}",
+                                texts.len(),
+                                parsed.data.len()
+                            ));
+                        }
+
+                        let mut sorted = parsed.data;
+                        sorted.sort_by_key(|item| item.index);
+                        let mut vectors = Vec::with_capacity(sorted.len());
+                        for item in sorted {
+                            vectors.push(item.embedding);
+                        }
+                        return Ok(vectors);
                     }
-                    return Ok(vectors);
                 }
-                Err(ureq::Error::Status(code, response))
-                    if is_retryable_status(code) && attempt < MAX_RETRIES =>
-                {
-                    let body = response.into_string().unwrap_or_default();
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        status = code,
-                        body = %body,
-                        "retrying embeddings request after server status"
-                    );
-                }
-                Err(err @ ureq::Error::Transport(_)) if attempt < MAX_RETRIES => {
+                Err(err) if is_retryable_transport_error(&err) && attempt < MAX_RETRIES => {
                     tracing::warn!(
                         attempt = attempt + 1,
                         error = %err,
@@ -214,6 +227,17 @@ impl EmbeddingProvider for OpenAIEmbeddingProvider {
 #[cfg(not(coverage))]
 fn is_retryable_status(code: u16) -> bool {
     matches!(code, 429 | 500 | 502 | 503 | 504)
+}
+
+#[cfg(not(coverage))]
+fn is_retryable_transport_error(err: &ureq::Error) -> bool {
+    matches!(
+        err,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+    )
 }
 
 #[cfg(not(coverage))]
