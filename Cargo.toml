@@ -56,7 +56,7 @@ tempfile = "3.25"
 assert_cmd = "2.1"
 
 [dependencies.clap]
-version = "4.5.58"
+version = "4.5.60"
 features = [ "derive",]
 
 [dependencies.indexmap]
@@ -89,7 +89,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "1.0.1"
+version = "1.0.3"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
