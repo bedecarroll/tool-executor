@@ -295,9 +295,35 @@ fn session_entry_helpers_and_matching() {
     assert!(entry.matches("hello"));
     assert!(entry.matches("snippet"));
     assert!(entry.matches("#sess"));
+    assert!(!entry.is_subagent_job_session());
     assert_eq!(entry.display_label(), "Demo");
     assert_eq!(entry.snippet_line().as_deref(), Some("Hello prompt"));
     assert_eq!(entry.short_session_tag(), "#sess");
+}
+
+#[test]
+fn session_entry_detects_subagent_job_sessions() {
+    let entry = SessionEntry {
+        id: "sess-subagent".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        label: Some("Subagent".into()),
+        first_prompt: Some(
+            "You are processing one item for a generic agent job. Job ID: abc123".into(),
+        ),
+        actionable: true,
+        last_active: Some(0),
+        snippet: None,
+        snippet_role: None,
+    };
+    assert!(entry.is_subagent_job_session());
+
+    let snippet_only = SessionEntry {
+        first_prompt: None,
+        snippet: Some("generic agent job pending".into()),
+        ..entry
+    };
+    assert!(snippet_only.is_subagent_job_session());
 }
 
 #[test]
@@ -1137,6 +1163,14 @@ fn handle_key_normal_covers_backspace_toggle_and_default_branch() -> Result<()> 
     assert!(!state.full_text);
     assert_eq!(state.status_message().as_deref(), Some("search: prompt"));
 
+    assert!(!state.show_subagent_sessions);
+    assert!(!state.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?);
+    assert!(state.show_subagent_sessions);
+    assert_eq!(
+        state.status_message().as_deref(),
+        Some("subagent sessions: shown")
+    );
+
     let filter_before = state.filter.clone();
     assert!(!state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?);
     assert_eq!(state.filter, filter_before);
@@ -1145,6 +1179,174 @@ fn handle_key_normal_covers_backspace_toggle_and_default_branch() -> Result<()> 
     state.move_selection(1);
     assert_eq!(state.index, 0);
     assert_eq!(state.list_state.selected(), None);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_entries_hides_subagent_sessions_until_toggled() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+
+    let regular_path = session_dir.join("regular.jsonl");
+    fs::File::create(&regular_path)?.write_all(b"{\"event\":\"regular\"}\n")?;
+    let mut regular = insert_session(&mut db, &regular_path, "sess-regular")?;
+    regular.first_prompt = Some("normal prompt".into());
+    let mut regular_msg = MessageRecord::new(
+        regular.id.clone(),
+        0,
+        "user",
+        "normal prompt",
+        Some("event_msg_regular".into()),
+        regular.last_active,
+    );
+    regular_msg.is_first = true;
+    db.upsert_session(&SessionIngest::new(regular, vec![regular_msg]))?;
+
+    let subagent_path = session_dir.join("subagent.jsonl");
+    fs::File::create(&subagent_path)?.write_all(b"{\"event\":\"subagent\"}\n")?;
+    let mut subagent = insert_session(&mut db, &subagent_path, "sess-subagent")?;
+    subagent.first_prompt =
+        Some("You are processing one item for a generic agent job. Job ID: xyz".into());
+    let mut subagent_msg = MessageRecord::new(
+        subagent.id.clone(),
+        0,
+        "user",
+        "You are processing one item for a generic agent job. Job ID: xyz",
+        Some("event_msg_subagent".into()),
+        subagent.last_active,
+    );
+    subagent_msg.is_first = true;
+    db.upsert_session(&SessionIngest::new(subagent, vec![subagent_msg]))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+
+    let visible_before = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Session(_)))
+        .count();
+    assert_eq!(visible_before, 1);
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+    let visible_after = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Session(_)))
+        .count();
+    assert_eq!(visible_after, 2);
+    assert_eq!(
+        state.status_message().as_deref(),
+        Some("subagent sessions: shown")
+    );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+    let visible_hidden_again = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Session(_)))
+        .count();
+    assert_eq!(visible_hidden_again, 1);
+    assert_eq!(
+        state.status_message().as_deref(),
+        Some("subagent sessions: hidden")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_entries_includes_non_subagent_sessions_past_limit() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+
+    for idx in 0..(SESSION_LIMIT + 5) {
+        let path = session_dir.join(format!("subagent-{idx}.jsonl"));
+        fs::File::create(&path)?.write_all(b"{\"event\":\"subagent\"}\n")?;
+        let mut summary = insert_session(&mut db, &path, &format!("sess-subagent-{idx}"))?;
+        let ts = 1_800_000_000_i64 + i64::try_from(idx).expect("index fits in i64");
+        summary.first_prompt =
+            Some("You are processing one item for a generic agent job. Job ID: many".into());
+        summary.created_at = Some(ts);
+        summary.started_at = Some(ts);
+        summary.last_active = Some(ts);
+        summary.mtime = ts;
+        let mut message = MessageRecord::new(
+            summary.id.clone(),
+            0,
+            "user",
+            "You are processing one item for a generic agent job. Job ID: many",
+            Some(format!("event_msg_subagent_{idx}")),
+            Some(ts),
+        );
+        message.is_first = true;
+        db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+    }
+
+    let path = session_dir.join("older-non-subagent.jsonl");
+    fs::File::create(&path)?.write_all(b"{\"event\":\"normal\"}\n")?;
+    let mut summary = insert_session(&mut db, &path, "sess-normal-older")?;
+    summary.first_prompt = Some("real user question".into());
+    summary.created_at = Some(1_700_000_000);
+    summary.started_at = Some(1_700_000_000);
+    summary.last_active = Some(1_700_000_000);
+    summary.mtime = 1_700_000_000;
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "real user question",
+        Some("event_msg_normal".into()),
+        Some(1_700_000_000),
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let state = AppState::new(&mut ctx)?;
+
+    assert!(
+        state.entries.iter().any(
+            |entry| matches!(entry, Entry::Session(session) if session.id == "sess-normal-older")
+        ),
+        "expected older non-subagent session to remain visible"
+    );
+
     Ok(())
 }
 
