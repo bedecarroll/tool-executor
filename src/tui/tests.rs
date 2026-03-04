@@ -1360,6 +1360,48 @@ fn refresh_entries_includes_non_subagent_sessions_past_limit() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn refresh_entries_truncates_non_search_sessions_at_session_limit() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .expect("provider")
+        .session_roots
+        .first()
+        .expect("session root")
+        .clone();
+    fs::create_dir_all(&session_dir)?;
+
+    for idx in 0..(SESSION_LIMIT + 5) {
+        let path = session_dir.join(format!("regular-{idx}.jsonl"));
+        fs::File::create(&path)?.write_all(b"{\"event\":\"regular\"}\n")?;
+        insert_session(&mut db, &path, &format!("sess-regular-{idx}"))?;
+    }
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let state = AppState::new(&mut ctx)?;
+
+    let visible_sessions = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Session(_)))
+        .count();
+    assert_eq!(visible_sessions, SESSION_LIMIT);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn backspace_with_filter_refreshes_entries_and_clears_preview_cache() -> Result<()> {
     let temp = TempDir::new()?;
     let mut config = build_config(temp.path());
