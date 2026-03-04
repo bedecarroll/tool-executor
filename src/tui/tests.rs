@@ -1338,7 +1338,7 @@ fn refresh_entries_includes_non_subagent_sessions_past_limit() -> Result<()> {
         db: &mut db,
         prompt: None,
     };
-    let state = AppState::new(&mut ctx)?;
+    let mut state = AppState::new(&mut ctx)?;
 
     assert!(
         state.entries.iter().any(
@@ -1346,6 +1346,14 @@ fn refresh_entries_includes_non_subagent_sessions_past_limit() -> Result<()> {
         ),
         "expected older non-subagent session to remain visible"
     );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+    let visible_after_toggle = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Session(_)))
+        .count();
+    assert_eq!(visible_after_toggle, SESSION_LIMIT);
 
     Ok(())
 }
