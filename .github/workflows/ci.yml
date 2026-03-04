@@ -39,6 +39,10 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Install mise
         uses: jdx/mise-action@v3
+        with:
+          # 2026.3.0 started enforcing task timeout=20s and breaks our long-running test task.
+          # Pin to last known-good release until upstream timeout behavior is resolved.
+          version: 2026.2.17
 
       # rustup caches can omit components; install them explicitly to guarantee rustfmt/clippy availability.
       - name: Install rust components
