@@ -2424,6 +2424,7 @@ fn run_self_update_with_propagates_updater_error() {
 
 #[test]
 fn app_self_update_uses_test_backend() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     let cmd = SelfUpdateCommand {
         version: Some("v1.2.3".into()),
@@ -2434,6 +2435,7 @@ fn app_self_update_uses_test_backend() -> Result<()> {
 
 #[test]
 fn app_self_update_surfaces_test_backend_failure() -> Result<()> {
+    let _env = ENV_LOCK.lock().unwrap();
     let (_temp, app, _summary) = build_app_fixture(Vec::new())?;
     let _guard = EnvOverride::set_var("TX_SELF_UPDATE_TEST_FAIL", "1");
     let cmd = SelfUpdateCommand {

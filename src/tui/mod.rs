@@ -47,7 +47,7 @@ use unicode_width::UnicodeWidthStr;
 const SESSION_LIMIT: usize = 200;
 const PREVIEW_MESSAGE_LIMIT: usize = 8;
 const MESSAGE_FILTER_MODE: &str = "Filtering results";
-const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-Y print ID  •  Ctrl-E export  •  Ctrl-P filter  •  Ctrl-F search  •  Esc quit";
+const DEFAULT_STATUS_HINT: &str = "↑/↓ scroll  •  Tab emit  •  Enter run  •  Ctrl-Y print ID  •  Ctrl-E export  •  Ctrl-P filter  •  Ctrl-F search  •  Ctrl-G subagents  •  Esc quit";
 const RELATIVE_TIME_WIDTH: usize = 8;
 const PROFILE_IDENTIFIER_LIMIT: usize = 40;
 
@@ -224,6 +224,7 @@ struct AppState<'ctx> {
     provider_filter: Option<String>,
     provider_order: Vec<String>,
     full_text: bool,
+    show_subagent_sessions: bool,
     message: Option<String>,
     overlay_message: Option<(String, Instant)>,
     preview_cache: HashMap<String, Preview>,
@@ -404,6 +405,22 @@ impl SessionEntry {
         }
         format!("#{}", truncate_len(last, 12))
     }
+
+    fn is_subagent_job_session(&self) -> bool {
+        self.first_prompt
+            .as_deref()
+            .is_some_and(is_subagent_job_boilerplate)
+            || self
+                .snippet
+                .as_deref()
+                .is_some_and(is_subagent_job_boilerplate)
+    }
+}
+
+fn is_subagent_job_boilerplate(text: &str) -> bool {
+    let normalized = normalize_whitespace(text).to_ascii_lowercase();
+    normalized.contains("you are processing one item for a generic agent job")
+        || normalized.contains("generic agent job")
 }
 
 fn truncate_len(input: &str, max: usize) -> String {
@@ -613,6 +630,7 @@ impl<'ctx> AppState<'ctx> {
             provider_filter: None,
             provider_order,
             full_text: matches!(defaults.search_mode, SearchMode::FullText),
+            show_subagent_sessions: false,
             message: None,
             overlay_message: None,
             preview_cache: HashMap::new(),
@@ -867,6 +885,10 @@ impl<'ctx> AppState<'ctx> {
             sessions.retain(|session| session.actionable);
         }
 
+        if !self.show_subagent_sessions {
+            sessions.retain(|session| !session.is_subagent_job_session());
+        }
+
         if searching && !self.full_text {
             let query = self.filter.to_ascii_lowercase();
             sessions.retain(|session| session.matches(&query));
@@ -894,6 +916,10 @@ impl<'ctx> AppState<'ctx> {
                 .unwrap_or_default()
                 .cmp(&a.last_active.unwrap_or_default())
         });
+
+        if !searching && sessions.len() > SESSION_LIMIT {
+            sessions.truncate(SESSION_LIMIT);
+        }
 
         let mut entries = profile_entries;
         entries.extend(sessions.into_iter().map(Entry::Session));
@@ -926,14 +952,14 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn load_sessions(&self) -> Result<Vec<SessionEntry>> {
+        let limit = if self.show_subagent_sessions {
+            Some(SESSION_LIMIT)
+        } else {
+            None
+        };
         self.ctx
             .db
-            .list_sessions(
-                self.provider_filter.as_deref(),
-                true,
-                None,
-                Some(SESSION_LIMIT),
-            )
+            .list_sessions(self.provider_filter.as_deref(), true, None, limit)
             .map(|queries| queries.into_iter().map(SessionEntry::from_query).collect())
     }
 
@@ -1035,6 +1061,17 @@ impl<'ctx> AppState<'ctx> {
                     "search: full-text"
                 } else {
                     "search: prompt"
+                };
+                self.set_temporary_status_message(mode_label.to_string(), Duration::from_secs(3));
+                Ok(false)
+            }
+            (KeyCode::Char('g' | 'G'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.show_subagent_sessions = !self.show_subagent_sessions;
+                self.refresh_entries()?;
+                let mode_label = if self.show_subagent_sessions {
+                    "subagent sessions: shown"
+                } else {
+                    "subagent sessions: hidden"
                 };
                 self.set_temporary_status_message(mode_label.to_string(), Duration::from_secs(3));
                 Ok(false)
