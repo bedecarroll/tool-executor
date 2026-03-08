@@ -89,7 +89,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "1.0.3"
+version = "1.0.6"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
