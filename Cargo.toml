@@ -29,7 +29,7 @@ members = [ "crates/tx",]
 blake3 = "1.8"
 bytemuck = "1.24"
 clap_complete = "4.6.0"
-clap_mangen = "0.2.33"
+clap_mangen = "0.3.0"
 color-eyre = "0.6"
 crossterm = "0.29"
 directories = "6.0.0"
@@ -44,7 +44,7 @@ once_cell = "1.21"
 shell-escape = "0.1"
 thiserror = "2.0.18"
 tracing = "0.1.44"
-ureq = { version = "3.2", features = ["json"] }
+ureq = { version = "3.3", features = ["json"] }
 walkdir = "2.5"
 which = "8.0"
 unicode-width = "0.2.2"
@@ -89,7 +89,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "1.0.6"
+version = "1.1.0"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
@@ -102,7 +102,7 @@ default-features = false
 features = [ "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls",]
 
 [dev-dependencies.insta]
-version = "1.46.3"
+version = "1.47.0"
 features = [ "filters",]
 
 [dev-dependencies.criterion]
