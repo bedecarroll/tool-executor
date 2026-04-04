@@ -60,7 +60,7 @@ version = "4.6.0"
 features = [ "derive",]
 
 [dependencies.indexmap]
-version = "2.13.0"
+version = "2.13.1"
 features = [ "serde",]
 
 [dependencies.ratatui]
@@ -89,7 +89,7 @@ version = "0.3"
 features = [ "formatting", "local-offset", "macros", "parsing",]
 
 [dependencies.toml]
-version = "1.1.0"
+version = "1.1.2"
 features = [ "preserve_order",]
 
 [dependencies.tracing-subscriber]
@@ -102,7 +102,7 @@ default-features = false
 features = [ "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls",]
 
 [dev-dependencies.insta]
-version = "1.47.0"
+version = "1.47.2"
 features = [ "filters",]
 
 [dev-dependencies.criterion]
