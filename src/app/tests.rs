@@ -42,6 +42,7 @@ fn sample_summary() -> SessionSummary {
         uuid: Some("abc".into()),
         first_prompt: Some("Hello".into()),
         actionable: true,
+        subagent: false,
         created_at: Some(1),
         started_at: Some(2),
         last_active: Some(3),
@@ -748,6 +749,7 @@ fn seed_database(
         uuid: Some("uuid-1".into()),
         first_prompt: Some("Hello world".into()),
         actionable: true,
+        subagent: false,
         created_at: Some(now),
         started_at: Some(now),
         last_active: Some(now),
@@ -847,6 +849,93 @@ fn app_search_and_export_paths() -> Result<()> {
         session_id: summary.id.clone(),
     };
     app.export(&export_cmd)?;
+    Ok(())
+}
+
+#[test]
+fn app_search_hides_subagent_sessions_before_applying_limit() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let now = summary.last_active.expect("fixture timestamp");
+    let hidden_summary = SessionSummary {
+        id: "subagent-hidden".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some("subagent".into()),
+        path: PathBuf::from("/tmp/subagent-hidden.jsonl"),
+        uuid: Some("subagent-hidden".into()),
+        first_prompt: Some(
+            "You are processing one item for a generic agent job. Job ID: xyz".into(),
+        ),
+        actionable: true,
+        subagent: true,
+        created_at: Some(now + 10),
+        started_at: Some(now + 10),
+        last_active: Some(now + 10),
+        size: 1,
+        mtime: now + 10,
+    };
+    let mut hidden_message = MessageRecord::new(
+        hidden_summary.id.clone(),
+        0,
+        "user",
+        "You are processing one item for a generic agent job. Job ID: xyz",
+        Some("event_msg_subagent".into()),
+        hidden_summary.last_active,
+    );
+    hidden_message.is_first = true;
+    app.db
+        .upsert_session(&SessionIngest::new(hidden_summary, vec![hidden_message]))?;
+
+    let search_cmd = SearchCommand {
+        term: None,
+        full_text: false,
+        provider: None,
+        since: None,
+        role: None,
+        limit: Some(1),
+    };
+    app.search(&search_cmd)?;
+    Ok(())
+}
+
+#[test]
+fn resolve_resume_summary_last_skips_subagent_sessions() -> Result<()> {
+    let (_temp, mut app, summary) = build_app_fixture(Vec::new())?;
+    let now = summary.last_active.expect("fixture timestamp");
+    let hidden_summary = SessionSummary {
+        id: "subagent-last".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some("subagent".into()),
+        path: PathBuf::from("/tmp/subagent-last.jsonl"),
+        uuid: Some("subagent-last".into()),
+        first_prompt: Some(
+            "You are processing one item for a generic agent job. Job ID: xyz".into(),
+        ),
+        actionable: true,
+        subagent: true,
+        created_at: Some(now + 10),
+        started_at: Some(now + 10),
+        last_active: Some(now + 10),
+        size: 1,
+        mtime: now + 10,
+    };
+    let mut hidden_message = MessageRecord::new(
+        hidden_summary.id.clone(),
+        0,
+        "user",
+        "You are processing one item for a generic agent job. Job ID: xyz",
+        Some("event_msg_subagent".into()),
+        hidden_summary.last_active,
+    );
+    hidden_message.is_first = true;
+    app.db
+        .upsert_session(&SessionIngest::new(hidden_summary, vec![hidden_message]))?;
+
+    let resolved = app.resolve_resume_summary("last")?;
+    assert_eq!(resolved.id, summary.id);
     Ok(())
 }
 
@@ -1289,6 +1378,29 @@ fn collate_search_results_returns_hit_details() -> Result<()> {
     let (returned_hit, returned_summary) = &detailed[0];
     assert_eq!(returned_hit.session_id, hit.session_id);
     assert_eq!(returned_summary.id, summary.id);
+    Ok(())
+}
+
+#[test]
+fn collate_search_results_skips_summary_marked_subagent() -> Result<()> {
+    let hit = SearchHit {
+        session_id: "sess-1".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        label: None,
+        role: Some("user".into()),
+        snippet: Some("Normal looking prompt".into()),
+        last_active: Some(100),
+        actionable: false,
+    };
+    let summary = SessionSummary {
+        subagent: true,
+        ..sample_summary()
+    };
+    let mut lookup = |_id: &str| -> Result<Option<SessionSummary>> { Ok(Some(summary.clone())) };
+
+    let detailed = App::collate_search_results(vec![hit], None, None, None, &mut lookup)?;
+    assert!(detailed.is_empty());
     Ok(())
 }
 

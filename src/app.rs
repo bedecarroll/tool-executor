@@ -33,7 +33,7 @@ use crate::pipeline::{
 use crate::prompts::{PromptAssembler, PromptStatus};
 use crate::providers;
 use crate::rag::{OpenAIEmbeddingProvider, RagIndexOptions, index_history, search_history};
-use crate::session::{SearchHit, SessionSummary, Transcript};
+use crate::session::{SearchHit, SessionSummary, Transcript, is_subagent_job_session_texts};
 use crate::tui;
 use crate::util;
 
@@ -42,6 +42,9 @@ pub enum AppError {
     #[error("provider mismatch: session uses '{expected}' but pipeline asked for '{actual}'")]
     ProviderMismatch { expected: String, actual: String },
 }
+
+const SEARCH_SESSION_DISAPPEARED: &str = "session '{}' disappeared during search";
+const RESUME_SESSION_DISAPPEARED: &str = "session '{}' disappeared during resume lookup";
 
 pub struct App<'cli> {
     pub cli: &'cli Cli,
@@ -117,17 +120,25 @@ impl<'cli> App<'cli> {
         if term.is_none() {
             let sessions =
                 self.db
-                    .list_sessions(cmd.provider.as_deref(), true, since_epoch, cmd.limit)?;
+                    .list_sessions(cmd.provider.as_deref(), true, since_epoch, None)?;
 
             let mut payload = Vec::new();
             for session in &sessions {
-                if let Some(summary) = self.db.session_summary(&session.id)? {
+                let summary =
+                    self.session_summary_required(&session.id, SEARCH_SESSION_DISAPPEARED)?;
+                if !summary.subagent
+                    && !is_subagent_job_session_texts(summary.first_prompt.as_deref(), None)
+                {
                     payload.push(summary_to_json(
                         &summary,
                         summary.first_prompt.as_deref(),
                         None,
                     ));
                 }
+            }
+
+            if let Some(limit) = cmd.limit {
+                payload.truncate(limit);
             }
 
             println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -137,10 +148,10 @@ impl<'cli> App<'cli> {
         let term = term.unwrap();
         let hits = if cmd.full_text {
             self.db
-                .search_full_text(term, cmd.provider.as_deref(), false)?
+                .search_full_text(term, cmd.provider.as_deref(), true)?
         } else {
             self.db
-                .search_first_prompt(term, cmd.provider.as_deref(), false)?
+                .search_first_prompt(term, cmd.provider.as_deref(), true)?
         };
 
         let role_filter = cmd.role.as_deref();
@@ -271,6 +282,14 @@ impl<'cli> App<'cli> {
             let Some(summary) = summary_lookup(&hit.session_id)? else {
                 continue;
             };
+            if summary.subagent
+                || is_subagent_job_session_texts(
+                    summary.first_prompt.as_deref(),
+                    hit.snippet.as_deref(),
+                )
+            {
+                continue;
+            }
             if let Some(cutoff) = since_epoch
                 && summary.last_active.is_some_and(|last| last < cutoff)
             {
@@ -300,6 +319,12 @@ impl<'cli> App<'cli> {
         })
     }
 
+    fn session_summary_required(&self, session_id: &str, context: &str) -> Result<SessionSummary> {
+        self.db
+            .session_summary(session_id)?
+            .ok_or_else(|| eyre!("{}", context.replace("{}", session_id)))
+    }
+
     /// Resolve a session summary from an explicit identifier or `last`.
     ///
     /// # Errors
@@ -310,10 +335,18 @@ impl<'cli> App<'cli> {
             return Ok(summary);
         }
         if session_id.eq_ignore_ascii_case("last") {
-            return self
-                .db
-                .latest_actionable_session()?
-                .ok_or_else(|| eyre!("no previous sessions available to resume"));
+            let sessions = self.db.list_sessions(None, true, None, None)?;
+            for session in sessions {
+                let summary =
+                    self.session_summary_required(&session.id, RESUME_SESSION_DISAPPEARED)?;
+                if summary.subagent
+                    || is_subagent_job_session_texts(summary.first_prompt.as_deref(), None)
+                {
+                    continue;
+                }
+                return Ok(summary);
+            }
+            return Err(eyre!("no previous sessions available to resume"));
         }
 
         Err(eyre!("session '{}' not found", session_id))

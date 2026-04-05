@@ -22,6 +22,7 @@ fn make_summary(
         uuid: Some(uuid.to_string()),
         first_prompt: Some(format!("{id} prompt")),
         actionable,
+        subagent: false,
         created_at: Some(now),
         started_at: Some(now),
         last_active: Some(now),

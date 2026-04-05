@@ -17,7 +17,7 @@ use crate::config::model::{Config, ProviderConfig};
 use crate::db::Database;
 use crate::session::{
     MessageRecord, SessionIngest, SessionSummary, TokenUsageRecord, fallback_session_uuid,
-    session_uuid_from_value,
+    is_subagent_job_session_texts, session_meta_source_is_subagent, session_uuid_from_value,
 };
 
 #[derive(Debug, Default)]
@@ -180,10 +180,13 @@ impl<'a> Indexer<'a> {
             first.is_first = true;
         }
 
+        let subagent =
+            state.subagent || is_subagent_job_session_texts(state.first_prompt.as_deref(), None);
         let actionable = state
             .messages
             .iter()
-            .any(|message| message.role.eq_ignore_ascii_case("user"));
+            .any(|message| message.role.eq_ignore_ascii_case("user"))
+            && !subagent;
         if state.first_prompt.is_none() {
             state.first_prompt = state
                 .messages
@@ -203,6 +206,7 @@ impl<'a> Indexer<'a> {
             uuid: session_uuid,
             first_prompt: state.first_prompt,
             actionable,
+            subagent,
             created_at,
             started_at,
             last_active: Some(last_active),
@@ -291,6 +295,7 @@ impl<'a> Indexer<'a> {
                 .is_some_and(|ty| ty == "session_meta")
             {
                 state.current_model = "unknown".to_string();
+                state.subagent |= session_meta_source_is_subagent(&value);
             }
 
             if value
@@ -457,6 +462,7 @@ struct IngestState {
     latest_timestamp: Option<i64>,
     wrapper: Option<String>,
     model: Option<String>,
+    subagent: bool,
     token_usage: Vec<TokenUsageRecord>,
     current_model: String,
 }
@@ -476,6 +482,7 @@ impl Default for IngestState {
             latest_timestamp: None,
             wrapper: None,
             model: None,
+            subagent: false,
             token_usage: Vec::new(),
             current_model: "unknown".to_string(),
         }
@@ -891,6 +898,28 @@ mod tests {
     }
 
     #[test]
+    fn ingest_marks_subagent_sessions_from_session_meta_source() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str("{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Normal looking prompt\"}}\n")?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert!(ingest.summary.subagent);
+        assert!(!ingest.summary.actionable);
+        assert_eq!(
+            ingest.summary.first_prompt.as_deref(),
+            Some("Normal looking prompt")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn instruction_banners_are_excluded_from_transcript() -> Result<()> {
         let temp = TempDir::new()?;
         let session_file = temp.child("session.jsonl");
@@ -1171,6 +1200,7 @@ mod tests {
             uuid: Some("missing".into()),
             first_prompt: Some("hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(0),
             started_at: Some(0),
             last_active: Some(0),

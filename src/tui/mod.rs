@@ -37,7 +37,7 @@ use crate::pipeline::{
 };
 use crate::prompts::{PromptStatus, VirtualProfile};
 use crate::providers;
-use crate::session::{SearchHit, SessionQuery, Transcript};
+use crate::session::{SearchHit, SessionQuery, Transcript, is_subagent_job_session_texts};
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
@@ -247,6 +247,7 @@ struct SessionEntry {
     label: Option<String>,
     first_prompt: Option<String>,
     actionable: bool,
+    subagent: bool,
     last_active: Option<i64>,
     snippet: Option<String>,
     snippet_role: Option<String>,
@@ -311,6 +312,7 @@ impl SessionEntry {
             label: query.label,
             first_prompt: query.first_prompt,
             actionable: query.actionable,
+            subagent: query.subagent,
             last_active: query.last_active,
             snippet: None,
             snippet_role: None,
@@ -325,6 +327,7 @@ impl SessionEntry {
             label: hit.label,
             first_prompt: hit.snippet.clone(),
             actionable: hit.actionable,
+            subagent: false,
             last_active: hit.last_active,
             snippet: hit.snippet,
             snippet_role: hit.role,
@@ -407,20 +410,9 @@ impl SessionEntry {
     }
 
     fn is_subagent_job_session(&self) -> bool {
-        self.first_prompt
-            .as_deref()
-            .is_some_and(is_subagent_job_boilerplate)
-            || self
-                .snippet
-                .as_deref()
-                .is_some_and(is_subagent_job_boilerplate)
+        self.subagent
+            || is_subagent_job_session_texts(self.first_prompt.as_deref(), self.snippet.as_deref())
     }
-}
-
-fn is_subagent_job_boilerplate(text: &str) -> bool {
-    let normalized = normalize_whitespace(text).to_ascii_lowercase();
-    normalized.contains("you are processing one item for a generic agent job")
-        || normalized.contains("generic agent job")
 }
 
 fn truncate_len(input: &str, max: usize) -> String {
@@ -881,11 +873,13 @@ impl<'ctx> AppState<'ctx> {
             self.load_sessions()?
         };
 
-        if !searching {
+        if !searching && !self.show_subagent_sessions {
             sessions.retain(|session| session.actionable);
         }
 
-        if !self.show_subagent_sessions {
+        if self.show_subagent_sessions {
+            sessions.retain(|session| session.actionable || session.is_subagent_job_session());
+        } else {
             sessions.retain(|session| !session.is_subagent_job_session());
         }
 
@@ -959,15 +953,22 @@ impl<'ctx> AppState<'ctx> {
         };
         self.ctx
             .db
-            .list_sessions(self.provider_filter.as_deref(), true, None, limit)
+            .list_sessions(
+                self.provider_filter.as_deref(),
+                !self.show_subagent_sessions,
+                None,
+                limit,
+            )
             .map(|queries| queries.into_iter().map(SessionEntry::from_query).collect())
     }
 
     fn search_full_text_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
+        let provider_filter = self.provider_filter.as_deref();
+        let actionable_only = !self.show_subagent_sessions;
         let hits = self
             .ctx
             .db
-            .search_full_text(term, self.provider_filter.as_deref(), false)?;
+            .search_full_text(term, provider_filter, actionable_only)?;
 
         let mut seen = HashSet::new();
         let mut sessions = Vec::new();
@@ -986,6 +987,7 @@ impl<'ctx> AppState<'ctx> {
                     label: summary.label.clone(),
                     first_prompt: summary.first_prompt.clone(),
                     actionable: summary.actionable,
+                    subagent: summary.subagent,
                     last_active: summary.last_active,
                 };
                 entry = SessionEntry::from_query(query);
@@ -1003,11 +1005,30 @@ impl<'ctx> AppState<'ctx> {
     }
 
     fn search_prompt_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
+        let provider_filter = self.provider_filter.as_deref();
+        let actionable_only = !self.show_subagent_sessions;
         let hits = self
             .ctx
             .db
-            .search_first_prompt(term, self.provider_filter.as_deref(), false)?;
-        Ok(hits.into_iter().map(SessionEntry::from_hit).collect())
+            .search_first_prompt(term, provider_filter, actionable_only)?;
+        let mut sessions = Vec::new();
+        for hit in hits {
+            let mut entry = SessionEntry::from_hit(hit.clone());
+            if let Some(summary) = self.ctx.db.session_summary(&hit.session_id)? {
+                entry = SessionEntry::from_query(SessionQuery {
+                    id: summary.id,
+                    provider: summary.provider,
+                    wrapper: summary.wrapper,
+                    label: summary.label,
+                    first_prompt: summary.first_prompt,
+                    actionable: summary.actionable,
+                    subagent: summary.subagent,
+                    last_active: summary.last_active,
+                });
+            }
+            sessions.push(entry);
+        }
+        Ok(sessions)
     }
 
     fn handle_key_normal(&mut self, key: KeyEvent) -> Result<bool> {

@@ -15,6 +15,7 @@ pub struct SessionSummary {
     pub uuid: Option<String>,
     pub first_prompt: Option<String>,
     pub actionable: bool,
+    pub subagent: bool,
     pub created_at: Option<i64>,
     pub started_at: Option<i64>,
     pub last_active: Option<i64>,
@@ -33,6 +34,7 @@ pub struct SessionIngest {
 pub struct MessageRecord {
     pub session_id: String,
     pub index: i64,
+    pub source_event_id: Option<i64>,
     pub role: String,
     pub content: String,
     pub source: Option<String>,
@@ -61,6 +63,7 @@ pub struct SessionQuery {
     pub label: Option<String>,
     pub first_prompt: Option<String>,
     pub actionable: bool,
+    pub subagent: bool,
     pub last_active: Option<i64>,
 }
 
@@ -191,6 +194,7 @@ impl MessageRecord {
         Self {
             session_id: session_id.into(),
             index,
+            source_event_id: Some(index),
             role: role.into(),
             content: content.into(),
             source,
@@ -198,6 +202,37 @@ impl MessageRecord {
             is_first: false,
         }
     }
+}
+
+#[must_use]
+pub fn is_subagent_job_boilerplate(text: &str) -> bool {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.to_ascii_lowercase();
+    normalized.contains("you are processing one item for a generic agent job")
+        || normalized.contains("generic agent job")
+        || normalized.contains(
+            "the following is the codex agent history whose request action you are assessing",
+        )
+        || normalized.contains("assess the exact planned action")
+}
+
+#[must_use]
+pub fn is_subagent_job_session_texts(first_prompt: Option<&str>, snippet: Option<&str>) -> bool {
+    first_prompt.is_some_and(is_subagent_job_boilerplate)
+        || snippet.is_some_and(is_subagent_job_boilerplate)
+}
+
+#[must_use]
+pub fn session_meta_source_is_subagent(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|ty| ty == "session_meta")
+        && value
+            .get("payload")
+            .and_then(|payload| payload.get("source"))
+            .and_then(Value::as_object)
+            .is_some_and(|source| source.contains_key("subagent"))
 }
 
 /// Attempt to extract a session UUID from a parsed Codex log entry.
@@ -258,6 +293,7 @@ mod tests {
             uuid: Some("abc123".into()),
             first_prompt: Some("Hello world".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(1),
             started_at: Some(2),
             last_active: Some(3),
@@ -357,6 +393,27 @@ mod tests {
     fn session_uuid_from_value_uses_payload_id() {
         let value: Value = serde_json::json!({"payload": {"id": "payload-42"}});
         assert_eq!(session_uuid_from_value(&value), Some("payload-42".into()));
+    }
+
+    #[test]
+    fn subagent_job_detection_normalizes_whitespace() {
+        assert!(is_subagent_job_boilerplate(
+            "You are   processing one item for a generic\nagent job. Job ID: xyz"
+        ));
+        assert!(is_subagent_job_boilerplate(
+            "The following is the Codex agent history whose request action you are assessing."
+        ));
+        assert!(is_subagent_job_boilerplate(
+            "Assess the exact planned action below."
+        ));
+        assert!(is_subagent_job_session_texts(
+            Some("normal"),
+            Some("generic agent job")
+        ));
+        assert!(!is_subagent_job_session_texts(
+            Some("normal prompt"),
+            Some("ordinary snippet")
+        ));
     }
 
     #[test]

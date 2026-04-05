@@ -160,6 +160,7 @@ fn sample_ingest(path: &Path) -> SessionIngest {
         uuid: Some("uuid-demo".into()),
         first_prompt: Some("Hello".into()),
         actionable: true,
+        subagent: false,
         created_at: Some(1),
         started_at: Some(1),
         last_active: Some(2),
