@@ -5,6 +5,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # Upstream sqlite-vec releases are currently not safe to adopt automatically.
+      - dependency-name: sqlite-vec
     groups:
       all-version-updates:
         patterns:
