@@ -530,6 +530,7 @@ mod tests {
             uuid: Some("rag-session-uuid".to_string()),
             first_prompt: Some("Hello semantic search".to_string()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),

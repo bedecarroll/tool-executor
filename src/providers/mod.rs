@@ -37,6 +37,7 @@ mod tests {
             uuid: None,
             first_prompt: None,
             actionable: false,
+            subagent: false,
             created_at: None,
             started_at: None,
             last_active: None,

@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use color_eyre::Result;
@@ -8,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, params_f
 
 use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, TokenUsageRecord,
-    Transcript,
+    Transcript, is_subagent_job_session_texts, session_meta_source_is_subagent,
 };
 use crate::sqlite_ext;
 
@@ -16,16 +17,20 @@ mod rag;
 
 pub use rag::*;
 
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 10;
 const SCHEMA_VERSION_V5: i32 = 5;
 const SCHEMA_VERSION_V6: i32 = 6;
 const SCHEMA_VERSION_V7: i32 = 7;
+const SCHEMA_VERSION_V8: i32 = 8;
+const SCHEMA_VERSION_V9: i32 = 9;
 const V5_INDEXES_SQL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
     CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
     CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
     CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
 ";
+
+type SessionBackfillRow = (String, String, Option<String>, bool);
 
 /// Encode an `f32` vector into `SQLite` BLOB form expected by sqlite-vec.
 #[must_use]
@@ -37,6 +42,58 @@ pub struct Database {
     conn: Connection,
 }
 
+fn assert_isolated_test_db_path(path: &Path) -> Result<()> {
+    if !is_test_harness_process() || test_db_path_is_isolated(path) {
+        return Ok(());
+    }
+
+    Err(eyre!(
+        "refusing to open database at {} from test harness; tests must use a temp directory or override TX_DATA_DIR/XDG_DATA_HOME",
+        path.display()
+    ))
+}
+
+fn is_test_harness_process() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .and_then(|parent| parent.file_name().map(ToOwned::to_owned))
+        })
+        .is_some_and(|name| name == "deps" || name == "doctestbins")
+}
+
+fn test_db_path_is_isolated(path: &Path) -> bool {
+    if std::env::var_os("TX_ALLOW_LIVE_DB_IN_TESTS").is_some() {
+        return true;
+    }
+
+    let path = absolutize_path(path);
+    allowed_test_db_roots()
+        .into_iter()
+        .map(|root| absolutize_path(&root))
+        .any(|root| path.starts_with(root))
+}
+
+fn allowed_test_db_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    if let Some(path) = std::env::var_os("TX_DATA_DIR") {
+        roots.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(PathBuf::from(path).join("tx"));
+    }
+    roots
+}
+
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+}
+
 impl Database {
     /// Open or create the `SQLite` database at the given path.
     ///
@@ -44,6 +101,7 @@ impl Database {
     ///
     /// Returns an error if the database file cannot be opened or initialized.
     pub fn open(path: &Path) -> Result<Self> {
+        assert_isolated_test_db_path(path)?;
         sqlite_ext::init_sqlite_extensions()?;
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
@@ -102,8 +160,16 @@ impl Database {
             .then(|| self.migrate_to_v7())
             .transpose()?;
 
-        (current < SCHEMA_VERSION)
+        (current < SCHEMA_VERSION_V8)
             .then(|| self.migrate_to_v8())
+            .transpose()?;
+
+        (current < SCHEMA_VERSION_V9)
+            .then(|| self.migrate_to_v9())
+            .transpose()?;
+
+        (current < SCHEMA_VERSION)
+            .then(|| self.migrate_to_v10())
             .transpose()?;
 
         Ok(())
@@ -190,6 +256,39 @@ impl Database {
             ";
         self.conn.execute_batch(sql)?;
         self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V8}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v9(&self) -> Result<()> {
+        if !self.has_column("messages", "source_event_id")? {
+            let sql = "ALTER TABLE messages ADD COLUMN source_event_id INTEGER";
+            self.conn.execute(sql, [])?;
+        }
+        self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V9}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v10(&self) -> Result<()> {
+        if !self.has_column("sessions", "subagent")? {
+            let add_subagent_column =
+                "ALTER TABLE sessions ADD COLUMN subagent INTEGER NOT NULL DEFAULT 0";
+            self.conn.execute(add_subagent_column, [])?;
+        }
+
+        let sessions = self.session_backfill_rows()?;
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE sessions SET actionable = ?2, subagent = ?3 WHERE id = ?1")?;
+        for (id, path, first_prompt, actionable) in sessions {
+            let subagent = session_log_indicates_subagent(Path::new(&path))?
+                .unwrap_or_else(|| is_subagent_job_session_texts(first_prompt.as_deref(), None));
+            let actionable = actionable && !subagent;
+            stmt.execute(params![id, i64::from(actionable), i64::from(subagent)])?;
+        }
+
+        self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
         Ok(())
     }
@@ -207,6 +306,26 @@ impl Database {
         Ok(false)
     }
 
+    fn session_backfill_rows(&self) -> Result<Vec<SessionBackfillRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path, first_prompt, actionable FROM sessions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)? != 0,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn create_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
@@ -220,6 +339,7 @@ impl Database {
                 uuid TEXT,
                 first_prompt TEXT,
                 actionable INTEGER NOT NULL DEFAULT 1,
+                subagent INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER,
                 started_at INTEGER,
                 last_active INTEGER,
@@ -235,6 +355,7 @@ impl Database {
                 source TEXT,
                 timestamp INTEGER,
                 is_first INTEGER NOT NULL DEFAULT 0,
+                source_event_id INTEGER,
                 PRIMARY KEY (session_id, idx),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -313,6 +434,7 @@ impl Database {
                     uuid,
                     first_prompt,
                     actionable,
+                    subagent,
                     created_at,
                     started_at,
                     last_active,
@@ -348,13 +470,14 @@ impl Database {
                 uuid,
                 first_prompt,
                 actionable,
+                subagent,
                 created_at,
                 started_at,
                 last_active,
                 size,
                 mtime
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 wrapper = excluded.wrapper,
@@ -364,6 +487,7 @@ impl Database {
                 uuid = excluded.uuid,
                 first_prompt = excluded.first_prompt,
                 actionable = excluded.actionable,
+                subagent = excluded.subagent,
                 created_at = excluded.created_at,
                 started_at = excluded.started_at,
                 last_active = excluded.last_active,
@@ -380,6 +504,7 @@ impl Database {
                 s.uuid.as_deref(),
                 s.first_prompt.as_deref(),
                 i64::from(s.actionable),
+                i64::from(s.subagent),
                 s.created_at,
                 s.started_at,
                 s.last_active,
@@ -415,6 +540,7 @@ impl Database {
                 uuid,
                 first_prompt,
                 actionable,
+                subagent,
                 created_at,
                 started_at,
                 last_active,
@@ -525,7 +651,7 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<Vec<SessionQuery>> {
         let mut query = String::from(
-            "SELECT id, provider, wrapper, label, first_prompt, actionable, last_active FROM sessions",
+            "SELECT id, provider, wrapper, label, first_prompt, actionable, subagent, last_active FROM sessions",
         );
         let mut clauses = Vec::new();
         let mut params: Vec<SqlValue> = Vec::new();
@@ -659,17 +785,18 @@ impl Database {
         let session_id = summary.id.clone();
 
         let mut messages_stmt = self.conn.prepare(
-            "SELECT idx, role, content, source, timestamp, is_first FROM messages WHERE session_id = ?1 ORDER BY idx",
+            "SELECT idx, source_event_id, role, content, source, timestamp, is_first FROM messages WHERE session_id = ?1 ORDER BY idx",
         )?;
         let message_rows = messages_stmt.query_map([session_id.clone()], |row| {
             Ok(MessageRecord {
                 session_id: session_id.clone(),
                 index: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                source: row.get(3)?,
-                timestamp: row.get(4)?,
-                is_first: row.get::<_, i64>(5)? != 0,
+                source_event_id: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get(3)?,
+                source: row.get(4)?,
+                timestamp: row.get(5)?,
+                is_first: row.get::<_, i64>(6)? != 0,
             })
         })?;
         let mut messages = Vec::new();
@@ -696,6 +823,7 @@ impl Database {
                 uuid,
                 first_prompt,
                 actionable,
+                subagent,
                 created_at,
                 started_at,
                 last_active,
@@ -728,6 +856,7 @@ impl Database {
                 uuid,
                 first_prompt,
                 actionable,
+                subagent,
                 created_at,
                 started_at,
                 last_active,
@@ -776,6 +905,7 @@ impl Database {
                 uuid,
                 first_prompt,
                 actionable,
+                subagent,
                 created_at,
                 started_at,
                 last_active,
@@ -826,7 +956,7 @@ fn clear_session_data(tx: &Transaction<'_>, session_id: &str) -> Result<()> {
 
 fn insert_messages(tx: &Transaction<'_>, ingest: &SessionIngest) -> Result<()> {
     let mut stmt = tx.prepare(
-        "INSERT INTO messages (session_id, idx, role, content, source, timestamp, is_first) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO messages (session_id, idx, role, content, source, timestamp, is_first, source_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for message in &ingest.messages {
         stmt.execute(params![
@@ -837,6 +967,7 @@ fn insert_messages(tx: &Transaction<'_>, ingest: &SessionIngest) -> Result<()> {
             message.source.as_deref(),
             message.timestamp,
             i64::from(message.is_first),
+            message.source_event_id.unwrap_or(message.index),
         ])?;
     }
     Ok(())
@@ -900,6 +1031,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         uuid: row.get::<_, Option<String>>("uuid")?,
         first_prompt: row.get::<_, Option<String>>("first_prompt")?,
         actionable: row.get::<_, i64>("actionable")? != 0,
+        subagent: row.get::<_, i64>("subagent")? != 0,
         created_at: row.get::<_, Option<i64>>("created_at")?,
         started_at: row.get::<_, Option<i64>>("started_at")?,
         last_active: row.get::<_, Option<i64>>("last_active")?,
@@ -916,7 +1048,8 @@ fn map_query(row: &Row<'_>) -> rusqlite::Result<SessionQuery> {
         label: row.get(3)?,
         first_prompt: row.get(4)?,
         actionable: row.get::<_, i64>(5)? != 0,
-        last_active: row.get(6)?,
+        subagent: row.get::<_, i64>(6)? != 0,
+        last_active: row.get(7)?,
     })
 }
 
@@ -947,9 +1080,35 @@ fn map_token_usage(row: &Row<'_>) -> rusqlite::Result<TokenUsageRecord> {
     })
 }
 
+fn session_log_indicates_subagent(path: &Path) -> Result<Option<bool>> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().take(256) {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        return Ok(Some(session_meta_source_is_subagent(&value)));
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{ENV_LOCK, EnvOverride};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use rusqlite::{Connection, OpenFlags};
@@ -1061,6 +1220,87 @@ mod tests {
         PRAGMA user_version = 6;
         ";
 
+    const V8_SCHEMA: &str = r"
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            wrapper TEXT,
+            model TEXT,
+            label TEXT,
+            path TEXT NOT NULL,
+            uuid TEXT,
+            first_prompt TEXT,
+            actionable INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER,
+            started_at INTEGER,
+            last_active INTEGER,
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS messages (
+            session_id TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT,
+            timestamp INTEGER,
+            is_first INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, idx),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            session_id UNINDEXED,
+            role UNINDEXED,
+            content
+        );
+
+        CREATE TABLE IF NOT EXISTS token_usage (
+            session_id TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            model TEXT,
+            rate_limits TEXT,
+            PRIMARY KEY (
+                session_id,
+                timestamp,
+                input_tokens,
+                cached_input_tokens,
+                output_tokens,
+                reasoning_output_tokens,
+                total_tokens
+            ),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
+        CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
+        CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_session_chunks USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding FLOAT[1536],
+            session_id TEXT PARTITION KEY,
+            ts_ms INTEGER,
+            tool_name TEXT,
+            kind TEXT,
+            model TEXT,
+            content_hash TEXT,
+            +text TEXT,
+            +source_event_id INTEGER
+        );
+
+        PRAGMA user_version = 8;
+        ";
+
     fn create_db() -> Result<Database> {
         sqlite_ext::init_sqlite_extensions()?;
         let conn = Connection::open_in_memory()?;
@@ -1088,6 +1328,7 @@ mod tests {
             uuid: None,
             first_prompt: Some(prompt.into()),
             actionable,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1116,6 +1357,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Context awareness request".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1247,6 +1489,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1280,6 +1523,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Hi".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1334,6 +1578,7 @@ mod tests {
             uuid: Some("abc-123".into()),
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1386,6 +1631,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1418,6 +1664,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1506,6 +1753,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1623,6 +1871,88 @@ mod tests {
     }
 
     #[test]
+    fn migrate_v8_schema_adds_source_event_id_column() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("v8.sqlite3");
+        sqlite_ext::init_sqlite_extensions()?;
+        {
+            let conn = Connection::open(db_path.path())?;
+            conn.execute_batch(V8_SCHEMA)?;
+        }
+
+        let db = Database::open(db_path.path())?;
+        assert!(db.has_column("messages", "source_event_id")?);
+
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v9_schema_backfills_subagent_flag_and_hides_session() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.child("v9.sqlite3");
+        let session_path = temp.child("subagent.jsonl");
+        session_path.write_str("{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Normal looking prompt\"}}\n")?;
+        sqlite_ext::init_sqlite_extensions()?;
+        {
+            let conn = Connection::open(db_path.path())?;
+            conn.execute_batch(V8_SCHEMA)?;
+            let add_source_event_id = "ALTER TABLE messages ADD COLUMN source_event_id INTEGER";
+            conn.execute(add_source_event_id, [])?;
+            conn.execute("PRAGMA user_version = 9", [])?;
+            conn.execute(
+                "INSERT INTO sessions (id, provider, wrapper, model, label, path, uuid, first_prompt, actionable, created_at, started_at, last_active, size, mtime) VALUES (?1, 'codex', NULL, NULL, 'Subagent', ?2, NULL, 'Normal looking prompt', 1, 1, 1, 1, 1, 1)",
+                params!["sess-subagent", session_path.path().to_string_lossy()])?;
+        }
+
+        let db = Database::open(db_path.path())?;
+        let summary = db
+            .session_summary("sess-subagent")?
+            .expect("session summary after migration");
+        assert!(summary.subagent);
+        assert!(!summary.actionable);
+        assert!(db.has_column("sessions", "subagent")?);
+
+        let version: i32 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[test]
+    fn session_log_indicates_subagent_handles_blank_invalid_and_missing_meta() -> Result<()> {
+        let temp = TempDir::new()?;
+
+        let blank_and_invalid = temp.child("blank-and-invalid.jsonl");
+        blank_and_invalid.write_str("\n{not-json}\n")?;
+        assert_eq!(
+            session_log_indicates_subagent(blank_and_invalid.path())?,
+            None
+        );
+
+        let non_meta = temp.child("non-meta.jsonl");
+        let non_meta_event = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n";
+        non_meta.write_str(non_meta_event)?;
+        assert_eq!(session_log_indicates_subagent(non_meta.path())?, None);
+
+        let top_level = temp.child("top-level.jsonl");
+        top_level.write_str("{\"type\":\"session_meta\",\"payload\":{\"source\":\"cli\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n")?;
+        assert_eq!(
+            session_log_indicates_subagent(top_level.path())?,
+            Some(false)
+        );
+
+        let subagent = temp.child("subagent-meta.jsonl");
+        subagent.write_str("{\"type\":\"session_meta\",\"payload\":{\"source\":{\"subagent\":{\"other\":\"guardian\"}}}}\n")?;
+        assert_eq!(session_log_indicates_subagent(subagent.path())?, Some(true));
+        Ok(())
+    }
+
+    #[test]
     fn migrate_fails_on_read_only_create_schema() -> Result<()> {
         let temp = TempDir::new()?;
         let db_path = temp.child("readonly-create.sqlite3");
@@ -1671,6 +2001,70 @@ mod tests {
     }
 
     #[test]
+    fn test_harness_db_guard_rejects_non_temp_default_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _data_override = EnvOverride::remove("TX_DATA_DIR");
+        let _xdg_override = EnvOverride::remove("XDG_DATA_HOME");
+
+        #[cfg(windows)]
+        let path = PathBuf::from(r"C:\Users\example\AppData\Local\tx\tx.sqlite3");
+        #[cfg(not(windows))]
+        let path = PathBuf::from("/home/example/.local/share/tx/tx.sqlite3");
+
+        let err = assert_isolated_test_db_path(&path).expect_err("live path should be rejected");
+        assert!(err.to_string().contains("refusing to open database"));
+    }
+
+    #[test]
+    fn test_harness_db_guard_allows_temp_and_overridden_paths() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let temp_db_path = temp.child("tx.sqlite3");
+        assert!(assert_isolated_test_db_path(temp_db_path.path()).is_ok());
+
+        let data_dir = temp.child("data-root");
+        data_dir.create_dir_all()?;
+        let _data_override = EnvOverride::set_path("TX_DATA_DIR", data_dir.path());
+        let overridden_db_path = data_dir.child("custom.sqlite3");
+        assert!(assert_isolated_test_db_path(overridden_db_path.path()).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_harness_db_guard_allows_xdg_data_home_tx_paths() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let _data_override = EnvOverride::remove("TX_DATA_DIR");
+        let _xdg_override = EnvOverride::set_path("XDG_DATA_HOME", temp.path());
+        let xdg_db_path = temp.child("tx").child("tx.sqlite3");
+        assert!(assert_isolated_test_db_path(xdg_db_path.path()).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_harness_db_guard_allows_explicit_override_for_non_temp_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _data_override = EnvOverride::remove("TX_DATA_DIR");
+        let _xdg_override = EnvOverride::remove("XDG_DATA_HOME");
+        let _allow_override = EnvOverride::set_var("TX_ALLOW_LIVE_DB_IN_TESTS", "1");
+
+        #[cfg(windows)]
+        let path = PathBuf::from(r"C:\Users\example\AppData\Local\tx\tx.sqlite3");
+        #[cfg(not(windows))]
+        let path = PathBuf::from("/home/example/.local/share/tx/tx.sqlite3");
+
+        assert!(assert_isolated_test_db_path(&path).is_ok());
+    }
+
+    #[test]
+    fn absolutize_path_expands_relative_paths() {
+        let relative = Path::new("relative-db.sqlite3");
+        let absolute = absolutize_path(relative);
+        assert!(absolute.is_absolute());
+        assert!(absolute.ends_with(relative));
+    }
+
+    #[test]
     fn query_methods_return_errors_when_sessions_table_is_missing() -> Result<()> {
         let mut db = create_db()?;
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -1710,6 +2104,7 @@ mod tests {
             uuid: Some("direct-id-uuid".into()),
             first_prompt: Some("hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1756,6 +2151,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1783,6 +2179,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1821,6 +2218,7 @@ mod tests {
             uuid: Some("uuid-lookup".into()),
             first_prompt: Some("payload".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(now),
             started_at: Some(now),
             last_active: Some(now),
@@ -1830,6 +2228,7 @@ mod tests {
         let mut message =
             MessageRecord::new(summary.id.clone(), 0, "user", "payload", None, Some(now));
         message.is_first = true;
+        message.source_event_id = Some(42);
         db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
 
         let transcript = db
@@ -1837,6 +2236,7 @@ mod tests {
             .expect("expected transcript via uuid fallback");
         assert_eq!(transcript.session.id, "uuid-session");
         assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].source_event_id, Some(42));
         Ok(())
     }
 

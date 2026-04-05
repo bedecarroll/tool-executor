@@ -445,6 +445,7 @@ provider = "alt"
             uuid: Some("uuid-1".into()),
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(0),
             started_at: Some(0),
             last_active: Some(0),

@@ -63,7 +63,7 @@ impl Database {
             r"
             SELECT
                 m.session_id,
-                m.idx,
+                COALESCE(m.source_event_id, m.idx),
                 COALESCE(m.timestamp * 1000, s.last_active * 1000, s.mtime * 1000) AS ts_ms,
                 m.source,
                 lower(m.role) AS role,
@@ -327,6 +327,7 @@ mod tests {
             uuid: None,
             first_prompt: Some(content.to_string()),
             actionable: true,
+            subagent: false,
             created_at: Some(ts_s),
             started_at: Some(ts_s),
             last_active: Some(ts_s),

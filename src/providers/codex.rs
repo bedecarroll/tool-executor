@@ -78,6 +78,7 @@ mod tests {
             uuid: None,
             first_prompt: Some("Hello".into()),
             actionable: true,
+            subagent: false,
             created_at: Some(1),
             started_at: Some(1),
             last_active: Some(1),
