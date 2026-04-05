@@ -27,6 +27,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.9.0] - 2026-04-04
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Breaking
+
+- Nothing yet.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Added explicit subagent session provenance in the SQLite database so `tx` can retain all session logs while defaulting user-facing views to actionable sessions.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Hid subagent sessions by default across TUI, `search`, and `resume last` flows while preserving the TUI toggle for revealing them on demand.
+- Refreshed dependencies and CI action pins, including the semantic history client migration to `ureq` 3.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Fixed schema migrations to accept existing schema-9 databases and backfill subagent metadata for older indexed sessions.
+- Prevented tests from writing to live databases by requiring temp or explicitly overridden data roots in the test harness.
+
 ## [0.8.1] - 2026-02-14
 
 <!-- markdownlint-disable-next-line MD024 -->
