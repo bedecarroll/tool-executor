@@ -2031,6 +2031,17 @@ mod tests {
     }
 
     #[test]
+    fn test_harness_db_guard_allows_xdg_data_home_tx_paths() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new()?;
+        let _data_override = EnvOverride::remove("TX_DATA_DIR");
+        let _xdg_override = EnvOverride::set_path("XDG_DATA_HOME", temp.path());
+        let xdg_db_path = temp.child("tx").child("tx.sqlite3");
+        assert!(assert_isolated_test_db_path(xdg_db_path.path()).is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn test_harness_db_guard_allows_explicit_override_for_non_temp_paths() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _data_override = EnvOverride::remove("TX_DATA_DIR");
