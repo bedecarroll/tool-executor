@@ -74,6 +74,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("demo".into()),
+            thread_name: None,
             path: PathBuf::from("/tmp/session.jsonl"),
             uuid: None,
             first_prompt: Some("Hello".into()),

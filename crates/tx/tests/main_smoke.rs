@@ -82,6 +82,7 @@ provider = "alt"
         wrapper: None,
         model: None,
         label: Some("Demo".into()),
+        thread_name: None,
         path: session_path.path().to_path_buf(),
         uuid: Some("uuid-1".into()),
         first_prompt: Some("Hello".into()),

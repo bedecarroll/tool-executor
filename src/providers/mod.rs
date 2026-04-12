@@ -33,6 +33,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: None,
+            thread_name: None,
             path: "/tmp/other.jsonl".into(),
             uuid: None,
             first_prompt: None,

@@ -38,6 +38,7 @@ fn sample_summary() -> SessionSummary {
         wrapper: Some("shellwrap".into()),
         model: None,
         label: Some("demo".into()),
+        thread_name: None,
         path: PathBuf::from("/tmp/file.jsonl"),
         uuid: Some("abc".into()),
         first_prompt: Some("Hello".into()),
@@ -745,6 +746,7 @@ fn seed_database(
         wrapper: Some("shellwrap".into()),
         model: None,
         label: Some("Demo Session".into()),
+        thread_name: None,
         path: session_path,
         uuid: Some("uuid-1".into()),
         first_prompt: Some("Hello world".into()),
@@ -862,6 +864,7 @@ fn app_search_hides_subagent_sessions_before_applying_limit() -> Result<()> {
         wrapper: None,
         model: None,
         label: Some("subagent".into()),
+        thread_name: None,
         path: PathBuf::from("/tmp/subagent-hidden.jsonl"),
         uuid: Some("subagent-hidden".into()),
         first_prompt: Some(
@@ -909,6 +912,7 @@ fn resolve_resume_summary_last_skips_subagent_sessions() -> Result<()> {
         wrapper: None,
         model: None,
         label: Some("subagent".into()),
+        thread_name: None,
         path: PathBuf::from("/tmp/subagent-last.jsonl"),
         uuid: Some("subagent-last".into()),
         first_prompt: Some(

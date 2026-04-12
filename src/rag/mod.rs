@@ -526,6 +526,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("Rag Session".to_string()),
+            thread_name: None,
             path: temp.path().join("rag-session-1.jsonl"),
             uuid: Some("rag-session-uuid".to_string()),
             first_prompt: Some("Hello semantic search".to_string()),

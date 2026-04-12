@@ -18,6 +18,7 @@ fn make_summary(
         wrapper: None,
         model: None,
         label: Some(id.to_string()),
+        thread_name: None,
         path,
         uuid: Some(uuid.to_string()),
         first_prompt: Some(format!("{id} prompt")),
