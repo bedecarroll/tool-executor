@@ -27,6 +27,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+## [0.10.0] - 2026-04-15
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Breaking
+
+- Nothing yet.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Added
+
+- Surfaced renamed Codex session thread names near the top of the TUI list with profile-like styling, prompt context, and prioritized fuzzy matching so named sessions are easier to spot and resume.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Changed
+
+- Aligned named-session spacing and presentation with profile entries while still keeping the underlying session context visible in the browser list.
+
+<!-- markdownlint-disable-next-line MD024 -->
+### Fixed
+
+- Nothing yet.
+
 ## [0.9.0] - 2026-04-05
 
 <!-- markdownlint-disable-next-line MD024 -->
