@@ -11,6 +11,7 @@ pub struct SessionSummary {
     pub wrapper: Option<String>,
     pub model: Option<String>,
     pub label: Option<String>,
+    pub thread_name: Option<String>,
     pub path: PathBuf,
     pub uuid: Option<String>,
     pub first_prompt: Option<String>,
@@ -61,6 +62,7 @@ pub struct SessionQuery {
     pub provider: String,
     pub wrapper: Option<String>,
     pub label: Option<String>,
+    pub thread_name: Option<String>,
     pub first_prompt: Option<String>,
     pub actionable: bool,
     pub subagent: bool,
@@ -235,6 +237,40 @@ pub fn session_meta_source_is_subagent(value: &Value) -> bool {
             .is_some_and(|source| source.contains_key("subagent"))
 }
 
+#[must_use]
+pub fn thread_name_update_from_value(value: &Value) -> Option<Option<String>> {
+    let payload = value.get("payload");
+
+    let is_session_meta = value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|ty| ty == "session_meta");
+    if is_session_meta && payload.and_then(|inner| inner.get("thread_name")).is_some() {
+        return Some(normalize_thread_name(
+            payload.and_then(|inner| inner.get("thread_name")),
+        ));
+    }
+
+    let update_type = payload
+        .and_then(|inner| inner.get("type"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("type").and_then(Value::as_str));
+    if update_type.is_some_and(|ty| ty == "thread_name_updated") {
+        return Some(normalize_thread_name(
+            payload
+                .and_then(|inner| inner.get("thread_name"))
+                .or_else(|| value.get("thread_name")),
+        ));
+    }
+
+    None
+}
+
+fn normalize_thread_name(value: Option<&Value>) -> Option<String> {
+    let raw = value.and_then(Value::as_str)?.trim();
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
 /// Attempt to extract a session UUID from a parsed Codex log entry.
 #[must_use]
 pub fn session_uuid_from_value(value: &Value) -> Option<String> {
@@ -289,6 +325,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("demo".into()),
+            thread_name: None,
             path: PathBuf::from("/tmp/sample.jsonl"),
             uuid: Some("abc123".into()),
             first_prompt: Some("Hello world".into()),
@@ -343,6 +380,36 @@ mod tests {
                 .any(|line| line.contains("… and 1 more messages"))
         );
         assert!(lines.iter().all(|line| !line.contains("Skip me")));
+    }
+
+    #[test]
+    fn thread_name_update_handles_meta_empty_and_invalid_values() {
+        let meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "thread_name": "  tax  "
+            }
+        });
+        assert_eq!(
+            thread_name_update_from_value(&meta),
+            Some(Some("tax".to_string()))
+        );
+
+        let empty = serde_json::json!({
+            "type": "thread_name_updated",
+            "payload": {
+                "thread_name": "   "
+            }
+        });
+        assert_eq!(thread_name_update_from_value(&empty), Some(None));
+
+        let invalid = serde_json::json!({
+            "type": "thread_name_updated",
+            "payload": {
+                "thread_name": 7
+            }
+        });
+        assert_eq!(thread_name_update_from_value(&invalid), Some(None));
     }
 
     #[test]

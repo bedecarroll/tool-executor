@@ -245,6 +245,7 @@ struct SessionEntry {
     provider: String,
     wrapper: Option<String>,
     label: Option<String>,
+    thread_name: Option<String>,
     first_prompt: Option<String>,
     actionable: bool,
     subagent: bool,
@@ -310,6 +311,7 @@ impl SessionEntry {
             provider: query.provider,
             wrapper: query.wrapper,
             label: query.label,
+            thread_name: query.thread_name,
             first_prompt: query.first_prompt,
             actionable: query.actionable,
             subagent: query.subagent,
@@ -325,6 +327,7 @@ impl SessionEntry {
             provider: hit.provider,
             wrapper: hit.wrapper,
             label: hit.label,
+            thread_name: None,
             first_prompt: hit.snippet.clone(),
             actionable: hit.actionable,
             subagent: false,
@@ -335,47 +338,58 @@ impl SessionEntry {
     }
 
     fn matches(&self, needle: &str) -> bool {
-        let needle = needle.to_ascii_lowercase();
-        if self.id.to_ascii_lowercase().contains(&needle) {
-            return true;
+        self.match_priority(&needle.to_ascii_lowercase()).is_some()
+    }
+
+    fn match_priority(&self, needle: &str) -> Option<u8> {
+        let needle = (!needle.is_empty()).then_some(needle)?;
+
+        let display_label = self.display_label();
+        let short_tag = self.short_session_tag();
+
+        Self::field_match_priority(self.thread_name(), needle, 0)
+            .or_else(|| Self::field_match_priority(Some(display_label.as_str()), needle, 3))
+            .or_else(|| Self::field_match_priority(self.label.as_deref(), needle, 6))
+            .or_else(|| Self::field_match_priority(self.first_prompt.as_deref(), needle, 9))
+            .or_else(|| Self::field_match_priority(self.snippet.as_deref(), needle, 12))
+            .or_else(|| Self::field_match_priority(Some(self.id.as_str()), needle, 15))
+            .or_else(|| Self::field_match_priority(Some(self.provider.as_str()), needle, 18))
+            .or_else(|| Self::field_match_priority(self.wrapper.as_deref(), needle, 21))
+            .or_else(|| Self::field_match_priority(Some(short_tag.as_str()), needle, 24))
+    }
+
+    fn field_match_priority(value: Option<&str>, needle: &str, base: u8) -> Option<u8> {
+        let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+        let value = value.to_ascii_lowercase();
+        if value == needle {
+            Some(base)
+        } else if value.starts_with(needle) {
+            Some(base + 1)
+        } else if value.contains(needle) {
+            Some(base + 2)
+        } else {
+            None
         }
-        if self.provider.to_ascii_lowercase().contains(&needle) {
-            return true;
+    }
+
+    fn thread_name(&self) -> Option<&str> {
+        self.thread_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|thread_name| !thread_name.is_empty())
+    }
+
+    fn has_thread_name(&self) -> bool {
+        self.thread_name().is_some()
+    }
+
+    fn title_style(&self) -> Style {
+        let style = Style::default().add_modifier(Modifier::BOLD);
+        if self.has_thread_name() {
+            style.fg(Color::LightCyan)
+        } else {
+            style
         }
-        if self
-            .wrapper
-            .as_ref()
-            .is_some_and(|wrapper| wrapper.to_ascii_lowercase().contains(&needle))
-        {
-            return true;
-        }
-        if self
-            .label
-            .as_ref()
-            .is_some_and(|label| label.to_ascii_lowercase().contains(&needle))
-        {
-            return true;
-        }
-        if self
-            .first_prompt
-            .as_ref()
-            .is_some_and(|prompt| prompt.to_ascii_lowercase().contains(&needle))
-        {
-            return true;
-        }
-        if self
-            .snippet
-            .as_ref()
-            .is_some_and(|snippet| snippet.to_ascii_lowercase().contains(&needle))
-        {
-            return true;
-        }
-        if self.display_label().to_ascii_lowercase().contains(&needle) {
-            return true;
-        }
-        self.short_session_tag()
-            .to_ascii_lowercase()
-            .contains(&needle)
     }
 
     fn display_label(&self) -> String {
@@ -384,6 +398,22 @@ impl SessionEntry {
         }
         let last = self.id.rsplit('/').next().unwrap_or_default();
         format_rollout_label(last).unwrap_or_else(|| last.to_string())
+    }
+
+    fn list_title(&self) -> String {
+        if let Some(thread_name) = self.thread_name() {
+            return thread_name.to_string();
+        }
+
+        self.snippet_line().unwrap_or_else(|| self.display_label())
+    }
+
+    fn list_description(&self) -> Option<String> {
+        self.thread_name()?;
+        self.first_prompt
+            .as_deref()
+            .and_then(meaningful_excerpt)
+            .or_else(|| self.snippet_line())
     }
 
     fn snippet_line(&self) -> Option<String> {
@@ -863,12 +893,8 @@ impl<'ctx> AppState<'ctx> {
 
     fn refresh_entries(&mut self) -> Result<()> {
         let searching = !self.filter.is_empty();
-        let mut sessions = if searching {
-            if self.full_text {
-                self.search_full_text_sessions(&self.filter)?
-            } else {
-                self.search_prompt_sessions(&self.filter)?
-            }
+        let mut sessions = if searching && self.full_text {
+            self.search_full_text_sessions(&self.filter)?
         } else {
             self.load_sessions()?
         };
@@ -905,11 +931,28 @@ impl<'ctx> AppState<'ctx> {
             profile_entries.push(Entry::Profile(profile.clone()));
         }
 
-        sessions.sort_by(|a, b| {
-            b.last_active
-                .unwrap_or_default()
-                .cmp(&a.last_active.unwrap_or_default())
-        });
+        if searching && !self.full_text {
+            let query = self.filter.to_ascii_lowercase();
+            sessions.sort_by(|a, b| {
+                a.match_priority(&query)
+                    .unwrap_or(u8::MAX)
+                    .cmp(&b.match_priority(&query).unwrap_or(u8::MAX))
+                    .then_with(|| b.has_thread_name().cmp(&a.has_thread_name()))
+                    .then_with(|| {
+                        b.last_active
+                            .unwrap_or_default()
+                            .cmp(&a.last_active.unwrap_or_default())
+                    })
+            });
+        } else {
+            sessions.sort_by(|a, b| {
+                b.has_thread_name().cmp(&a.has_thread_name()).then_with(|| {
+                    b.last_active
+                        .unwrap_or_default()
+                        .cmp(&a.last_active.unwrap_or_default())
+                })
+            });
+        }
 
         if !searching && sessions.len() > SESSION_LIMIT {
             sessions.truncate(SESSION_LIMIT);
@@ -985,6 +1028,7 @@ impl<'ctx> AppState<'ctx> {
                     provider: summary.provider.clone(),
                     wrapper: summary.wrapper.clone(),
                     label: summary.label.clone(),
+                    thread_name: summary.thread_name.clone(),
                     first_prompt: summary.first_prompt.clone(),
                     actionable: summary.actionable,
                     subagent: summary.subagent,
@@ -1001,33 +1045,6 @@ impl<'ctx> AppState<'ctx> {
             sessions.push(entry);
         }
 
-        Ok(sessions)
-    }
-
-    fn search_prompt_sessions(&self, term: &str) -> Result<Vec<SessionEntry>> {
-        let provider_filter = self.provider_filter.as_deref();
-        let actionable_only = !self.show_subagent_sessions;
-        let hits = self
-            .ctx
-            .db
-            .search_first_prompt(term, provider_filter, actionable_only)?;
-        let mut sessions = Vec::new();
-        for hit in hits {
-            let mut entry = SessionEntry::from_hit(hit.clone());
-            if let Some(summary) = self.ctx.db.session_summary(&hit.session_id)? {
-                entry = SessionEntry::from_query(SessionQuery {
-                    id: summary.id,
-                    provider: summary.provider,
-                    wrapper: summary.wrapper,
-                    label: summary.label,
-                    first_prompt: summary.first_prompt,
-                    actionable: summary.actionable,
-                    subagent: summary.subagent,
-                    last_active: summary.last_active,
-                });
-            }
-            sessions.push(entry);
-        }
         Ok(sessions)
     }
 
@@ -1522,50 +1539,66 @@ fn draw(frame: &mut Frame<'_>, state: &mut AppState<'_>) {
     draw_status(frame, vertical[1], state);
 }
 
-fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
-    let now = OffsetDateTime::now_utc();
-    let identifier_width = state
-        .entries
+fn list_identifier_width(entries: &[Entry]) -> usize {
+    entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::Profile(profile) => {
-                let truncated = truncate(&profile.display, PROFILE_IDENTIFIER_LIMIT);
-                Some(truncated.chars().count())
+            Entry::Profile(profile) => Some(profile.display.as_str()),
+            Entry::Session(session) if session.has_thread_name() => {
+                Some(session.thread_name().unwrap_or_default())
             }
             _ => None,
         })
+        .map(|label| truncate(label, PROFILE_IDENTIFIER_LIMIT).chars().count())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+fn padded_identifier(label: &str, width: usize) -> String {
+    let truncated = truncate(label, PROFILE_IDENTIFIER_LIMIT);
+    let truncated_len = truncated.chars().count();
+    if width == 0 || truncated_len >= width {
+        truncated
+    } else {
+        format!("{truncated:<width$}")
+    }
+}
+
+fn draw_entries(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
+    let now = OffsetDateTime::now_utc();
+    let identifier_width = list_identifier_width(&state.entries);
     let items = state
         .entries
         .iter()
         .map(|entry| match entry {
             Entry::Session(session) => {
-                let raw_relative = format_relative_time(session.last_active, now)
-                    .unwrap_or_else(|| "n/a".to_string());
-                let relative = pad_relative_time(&raw_relative);
-                let label = session
-                    .snippet_line()
-                    .unwrap_or_else(|| session.display_label());
+                let label = session.list_title();
                 let label = normalize_whitespace(&label);
-                let label = truncate(&label, 200);
-                let spans = vec![
-                    Span::styled(relative, Style::default().fg(Color::DarkGray)),
-                    Span::raw("  "),
-                    Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
-                ];
+                let spans = if session.has_thread_name() {
+                    let identifier = padded_identifier(&label, identifier_width);
+                    let mut spans = vec![Span::styled(identifier, session.title_style())];
+                    if let Some(description) = session.list_description() {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(
+                            truncate(&normalize_whitespace(&description), 80),
+                            Style::default().fg(Color::White),
+                        ));
+                    }
+                    spans
+                } else {
+                    let raw_relative = format_relative_time(session.last_active, now)
+                        .unwrap_or_else(|| "n/a".to_string());
+                    let relative = pad_relative_time(&raw_relative);
+                    vec![
+                        Span::styled(relative, Style::default().fg(Color::DarkGray)),
+                        Span::raw("  "),
+                        Span::styled(truncate(&label, 200), session.title_style()),
+                    ]
+                };
                 ListItem::new(Line::from(spans))
             }
             Entry::Profile(profile) => {
-                let identifier = {
-                    let truncated = truncate(&profile.display, PROFILE_IDENTIFIER_LIMIT);
-                    let truncated_len = truncated.chars().count();
-                    if identifier_width == 0 || truncated_len >= identifier_width {
-                        truncated
-                    } else {
-                        format!("{truncated:<identifier_width$}")
-                    }
-                };
+                let identifier = padded_identifier(&profile.display, identifier_width);
                 let mut spans = vec![Span::styled(
                     identifier,
                     Style::default()

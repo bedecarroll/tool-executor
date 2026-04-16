@@ -1033,6 +1033,7 @@ fn summary_to_json(
         "provider": summary.provider,
         "wrapper": summary.wrapper,
         "label": summary.label,
+        "thread_name": summary.thread_name,
         "path": summary.path.to_string_lossy(),
         "uuid": summary.uuid,
         "first_prompt": summary.first_prompt,

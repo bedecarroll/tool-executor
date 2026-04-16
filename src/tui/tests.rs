@@ -160,6 +160,7 @@ fn insert_session(db: &mut Database, path: &Path, id: &str) -> Result<SessionSum
         wrapper: None,
         model: None,
         label: Some(format!("Session {id}")),
+        thread_name: None,
         path: path.to_path_buf(),
         uuid: Some(format!("uuid-{id}")),
         first_prompt: Some("Hello there".into()),
@@ -192,6 +193,7 @@ fn insert_session_without_uuid(db: &mut Database, path: &Path, id: &str) -> Resu
         wrapper: None,
         model: None,
         label: Some(format!("Session {id}")),
+        thread_name: None,
         path: path.to_path_buf(),
         uuid: None,
         first_prompt: Some("Hello there".into()),
@@ -286,6 +288,7 @@ fn session_entry_helpers_and_matching() {
         provider: "codex".into(),
         wrapper: None,
         label: Some("Demo".into()),
+        thread_name: None,
         first_prompt: Some("Hello prompt".into()),
         actionable: true,
         subagent: false,
@@ -298,10 +301,112 @@ fn session_entry_helpers_and_matching() {
     assert!(entry.matches("hello"));
     assert!(entry.matches("snippet"));
     assert!(entry.matches("#sess"));
+    assert!(!entry.matches(""));
     assert!(!entry.is_subagent_job_session());
     assert_eq!(entry.display_label(), "Demo");
     assert_eq!(entry.snippet_line().as_deref(), Some("Hello prompt"));
     assert_eq!(entry.short_session_tag(), "#sess");
+
+    let named = SessionEntry {
+        thread_name: Some("  tax  ".into()),
+        ..entry.clone()
+    };
+    assert_eq!(named.list_title(), "tax");
+    assert_eq!(named.list_description().as_deref(), Some("Hello prompt"));
+    assert!(named.matches("tax"));
+    assert_eq!(
+        named.title_style(),
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD)
+    );
+
+    let blank_named = SessionEntry {
+        thread_name: Some("   ".into()),
+        ..entry
+    };
+    assert_eq!(blank_named.list_title(), "Hello prompt");
+    assert_eq!(blank_named.list_description(), None);
+    assert!(blank_named.matches("demo"));
+    assert_eq!(
+        blank_named.title_style(),
+        Style::default().add_modifier(Modifier::BOLD)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn named_sessions_render_like_profile_style_entries() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+    let mut state = AppState::new(&mut ctx)?;
+    state.entries = vec![
+        Entry::Profile(ProfileEntry {
+            display: "Wrapped Profile".into(),
+            provider: "codex".into(),
+            pre: vec!["echo prepare".into()],
+            post: vec!["echo cleanup".into()],
+            wrap: Some("shellwrap".into()),
+            description: Some("Run codex".into()),
+            tags: vec!["team".into()],
+            inline_pre: Vec::new(),
+            stdin_supported: true,
+            prompt_assembler: None,
+            prompt_assembler_args: Vec::new(),
+            prompt_available: true,
+            kind: ProfileKind::Config {
+                name: "wrapped".into(),
+            },
+            preview_lines: Vec::new(),
+        }),
+        Entry::Session(SessionEntry {
+            id: "sess".into(),
+            provider: "codex".into(),
+            wrapper: None,
+            label: Some("Demo".into()),
+            thread_name: Some("tax".into()),
+            first_prompt: Some("file the California return".into()),
+            actionable: true,
+            subagent: false,
+            last_active: Some(0),
+            snippet: Some("assistant summary".into()),
+            snippet_role: Some("assistant".into()),
+        }),
+    ];
+    state.index = 1;
+    state.list_state.select(Some(1));
+
+    let snapshot = render_to_string(&mut state, 60, 12)?;
+    let profile_line = snapshot
+        .lines()
+        .find(|line| line.contains("Wrapped Profile") && line.contains("Run codex"))
+        .expect("profile row");
+    let selected_line = snapshot
+        .lines()
+        .find(|line| line.contains('▶'))
+        .expect("selected session row");
+    let profile_list_row = profile_line.split('│').nth(1).expect("profile list pane");
+    let selected_list_row = selected_line.split('│').nth(1).expect("session list pane");
+    let profile_content = profile_list_row.chars().skip(2).collect::<String>();
+    let selected_content = selected_list_row.chars().skip(2).collect::<String>();
+    assert!(selected_content.contains("tax"));
+    assert!(selected_content.contains("file the"));
+    assert!(!selected_content.contains("1970-01-01"));
+    assert_eq!(
+        profile_content.find("Run codex"),
+        selected_content.find("file the")
+    );
+    Ok(())
 }
 
 #[test]
@@ -311,6 +416,7 @@ fn session_entry_detects_subagent_job_sessions() {
         provider: "codex".into(),
         wrapper: None,
         label: Some("Subagent".into()),
+        thread_name: None,
         first_prompt: Some(
             "You are processing one item for a generic agent job. Job ID: abc123".into(),
         ),
@@ -431,6 +537,7 @@ fn session_entry_matching_display_and_snippet_fallbacks() {
         provider: "codex".into(),
         wrapper: Some("ShellWrap".into()),
         label: None,
+        thread_name: None,
         first_prompt: None,
         actionable: true,
         subagent: false,
@@ -473,6 +580,7 @@ fn session_entry_label_and_tag_fallback_paths() {
         provider: "codex".into(),
         wrapper: None,
         label: Some("rollout-2024-10-26T02-42-13-CUSTOM".into()),
+        thread_name: None,
         first_prompt: Some("Prompt".into()),
         actionable: true,
         subagent: false,
@@ -616,6 +724,7 @@ fn make_session_entry(id: &str) -> SessionEntry {
         provider: "codex".into(),
         wrapper: None,
         label: Some("Demo".into()),
+        thread_name: None,
         first_prompt: Some("Hello".into()),
         actionable: true,
         subagent: false,
@@ -625,6 +734,58 @@ fn make_session_entry(id: &str) -> SessionEntry {
     }
 }
 
+#[cfg(unix)]
+fn insert_ranked_session(
+    db: &mut Database,
+    path: &Path,
+    id: &str,
+    thread_name: Option<&str>,
+    first_prompt: &str,
+    last_active: i64,
+) -> Result<()> {
+    fs::File::create(path)?.write_all(b"{\"event\":\"session\"}\n")?;
+    let summary = SessionSummary {
+        id: id.into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some(format!("Session {id}")),
+        thread_name: thread_name.map(str::to_string),
+        path: path.to_path_buf(),
+        uuid: Some(format!("uuid-{id}")),
+        first_prompt: Some(first_prompt.to_string()),
+        actionable: true,
+        subagent: false,
+        created_at: Some(last_active),
+        started_at: Some(last_active),
+        last_active: Some(last_active),
+        size: 15,
+        mtime: last_active,
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        first_prompt,
+        Some(format!("event_msg_{id}")),
+        Some(last_active),
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn listed_session_ids(entries: &[Entry]) -> Vec<&str> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Session(session) => Some(session.id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn make_transcript(id: &str) -> Transcript {
     let summary = SessionSummary {
         id: id.into(),
@@ -632,6 +793,7 @@ fn make_transcript(id: &str) -> Transcript {
         wrapper: None,
         model: None,
         label: Some("Demo".into()),
+        thread_name: None,
         path: PathBuf::from("/tmp/demo.jsonl"),
         uuid: Some("uuid-demo".into()),
         first_prompt: Some("Hello".into()),
@@ -2672,6 +2834,72 @@ fn refresh_entries_preserves_config_profile_order() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn refresh_entries_prioritizes_named_sessions_in_list_and_search() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = build_config(temp.path());
+    let directories = build_directories(&temp);
+    directories.ensure_all()?;
+    let mut db = Database::open(&directories.data_dir.join("tx.sqlite3"))?;
+    let session_dir = config
+        .providers
+        .get("codex")
+        .unwrap()
+        .session_roots
+        .first()
+        .unwrap()
+        .to_path_buf();
+    fs::create_dir_all(&session_dir)?;
+
+    insert_ranked_session(
+        &mut db,
+        &session_dir.join("named.jsonl"),
+        "sess-tax",
+        Some("tax"),
+        "boring prompt",
+        100,
+    )?;
+    insert_ranked_session(
+        &mut db,
+        &session_dir.join("recent.jsonl"),
+        "sess-recent",
+        None,
+        "recent prompt",
+        300,
+    )?;
+    insert_ranked_session(
+        &mut db,
+        &session_dir.join("prompt-match.jsonl"),
+        "sess-prompt-match",
+        None,
+        "tax filing estimate",
+        400,
+    )?;
+
+    let mut ctx = UiContext {
+        config: &config,
+        directories: &directories,
+        db: &mut db,
+        prompt: None,
+    };
+
+    let mut state = AppState::new(&mut ctx)?;
+
+    let listed_sessions = listed_session_ids(&state.entries);
+    assert_eq!(listed_sessions[0], "sess-tax");
+
+    state.full_text = false;
+    state.filter = "tax".into();
+    state.refresh_entries()?;
+
+    let searched_sessions = listed_session_ids(&state.entries);
+    assert_eq!(searched_sessions[0], "sess-tax");
+    assert_eq!(searched_sessions[1], "sess-prompt-match");
+
+    Ok(())
+}
+
 #[test]
 fn preview_handles_missing_and_profile_entries() -> Result<()> {
     let temp = TempDir::new()?;
@@ -2706,6 +2934,7 @@ fn preview_handles_missing_and_profile_entries() -> Result<()> {
         provider: "codex".into(),
         wrapper: None,
         label: Some("missing".into()),
+        thread_name: None,
         first_prompt: None,
         actionable: true,
         subagent: false,
@@ -2970,6 +3199,7 @@ fn plan_for_session_handles_provider_without_resume_metadata() -> Result<()> {
         wrapper: None,
         model: None,
         label: Some("Alt Session".into()),
+        thread_name: None,
         path: session_path,
         uuid: Some("uuid-sess-alt-resume".into()),
         first_prompt: Some("hello".into()),
@@ -3398,6 +3628,7 @@ fn render_search_results_snapshot(state: &mut AppState<'_>) -> Result<String> {
             provider: "codex".into(),
             wrapper: Some("shellwrap".into()),
             label: Some("Refactor Feature".into()),
+            thread_name: None,
             first_prompt: Some("refactor feature layout".into()),
             actionable: true,
             subagent: false,
@@ -3410,6 +3641,7 @@ fn render_search_results_snapshot(state: &mut AppState<'_>) -> Result<String> {
             provider: "codex".into(),
             wrapper: None,
             label: Some("Refactor Tests".into()),
+            thread_name: None,
             first_prompt: Some("improve test names".into()),
             actionable: true,
             subagent: false,

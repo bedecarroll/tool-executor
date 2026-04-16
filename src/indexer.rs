@@ -18,6 +18,7 @@ use crate::db::Database;
 use crate::session::{
     MessageRecord, SessionIngest, SessionSummary, TokenUsageRecord, fallback_session_uuid,
     is_subagent_job_session_texts, session_meta_source_is_subagent, session_uuid_from_value,
+    thread_name_update_from_value,
 };
 
 #[derive(Debug, Default)]
@@ -202,6 +203,7 @@ impl<'a> Indexer<'a> {
             wrapper: state.wrapper,
             model: state.model,
             label,
+            thread_name: state.thread_name,
             path: path.to_path_buf(),
             uuid: session_uuid,
             first_prompt: state.first_prompt,
@@ -287,6 +289,10 @@ impl<'a> Indexer<'a> {
 
             if state.session_uuid.is_none() {
                 state.session_uuid = session_uuid_from_value(&value);
+            }
+
+            if let Some(thread_name) = thread_name_update_from_value(&value) {
+                state.thread_name = thread_name;
             }
 
             if value
@@ -458,6 +464,7 @@ struct IngestState {
     saw_instruction_block: bool,
     saw_any_record: bool,
     session_uuid: Option<String>,
+    thread_name: Option<String>,
     earliest_timestamp: Option<i64>,
     latest_timestamp: Option<i64>,
     wrapper: Option<String>,
@@ -478,6 +485,7 @@ impl Default for IngestState {
             saw_instruction_block: false,
             saw_any_record: false,
             session_uuid: None,
+            thread_name: None,
             earliest_timestamp: None,
             latest_timestamp: None,
             wrapper: None,
@@ -887,10 +895,9 @@ mod tests {
 
         let metadata = std::fs::metadata(session_file.path())?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
-        let now = current_unix_time();
         let provider = provider_with_root(temp.path());
 
-        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, 1, Some(1))?;
 
         assert_eq!(ingest.summary.model.as_deref(), Some("o3-mini"));
         assert_eq!(ingest.summary.first_prompt.as_deref(), Some("Hello"));
@@ -916,6 +923,24 @@ mod tests {
             ingest.summary.first_prompt.as_deref(),
             Some("Normal looking prompt")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ingest_captures_thread_name_updates() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session_file = temp.child("session.jsonl");
+        session_file.write_str("{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Hello\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_name_updated\",\"thread_id\":\"session-1\",\"thread_name\":\"tax\"}}\n")?;
+
+        let metadata = std::fs::metadata(session_file.path())?;
+        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        let now = current_unix_time();
+        let provider = provider_with_root(temp.path());
+
+        let ingest = Indexer::build_ingest(&provider, session_file.path(), size, now, Some(now))?;
+
+        assert_eq!(ingest.summary.thread_name.as_deref(), Some("tax"));
+        assert_eq!(ingest.summary.first_prompt.as_deref(), Some("Hello"));
         Ok(())
     }
 
@@ -1196,6 +1221,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("orphaned".into()),
+            thread_name: None,
             path: missing_path.path().to_path_buf(),
             uuid: Some("missing".into()),
             first_prompt: Some("hello".into()),

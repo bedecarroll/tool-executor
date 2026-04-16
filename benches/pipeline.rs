@@ -156,6 +156,7 @@ fn sample_ingest(path: &Path) -> SessionIngest {
         wrapper: Some("shellwrap".into()),
         model: None,
         label: Some("Demo".into()),
+        thread_name: None,
         path: path.to_path_buf(),
         uuid: Some("uuid-demo".into()),
         first_prompt: Some("Hello".into()),

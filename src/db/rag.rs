@@ -323,6 +323,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some(session_id.to_string()),
+            thread_name: None,
             path: PathBuf::from(format!("{session_id}.jsonl")),
             uuid: None,
             first_prompt: Some(content.to_string()),

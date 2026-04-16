@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, params_f
 use crate::session::{
     MessageRecord, SearchHit, SessionIngest, SessionQuery, SessionSummary, TokenUsageRecord,
     Transcript, is_subagent_job_session_texts, session_meta_source_is_subagent,
+    thread_name_update_from_value,
 };
 use crate::sqlite_ext;
 
@@ -17,12 +18,13 @@ mod rag;
 
 pub use rag::*;
 
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 const SCHEMA_VERSION_V5: i32 = 5;
 const SCHEMA_VERSION_V6: i32 = 6;
 const SCHEMA_VERSION_V7: i32 = 7;
 const SCHEMA_VERSION_V8: i32 = 8;
 const SCHEMA_VERSION_V9: i32 = 9;
+const SCHEMA_VERSION_V10: i32 = 10;
 const V5_INDEXES_SQL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_sessions_provider_last_active ON sessions(provider, last_active);
     CREATE INDEX IF NOT EXISTS idx_sessions_path ON sessions(path);
@@ -168,8 +170,12 @@ impl Database {
             .then(|| self.migrate_to_v9())
             .transpose()?;
 
-        (current < SCHEMA_VERSION)
+        (current < SCHEMA_VERSION_V10)
             .then(|| self.migrate_to_v10())
+            .transpose()?;
+
+        (current < SCHEMA_VERSION)
+            .then(|| self.migrate_to_v11())
             .transpose()?;
 
         Ok(())
@@ -289,6 +295,26 @@ impl Database {
         }
 
         self.conn
+            .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION_V10}"), [])?;
+        Ok(())
+    }
+
+    fn migrate_to_v11(&self) -> Result<()> {
+        if !self.has_column("sessions", "thread_name")? {
+            self.conn
+                .execute("ALTER TABLE sessions ADD COLUMN thread_name TEXT", [])?;
+        }
+
+        let sessions = self.session_backfill_rows()?;
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE sessions SET thread_name = ?2 WHERE id = ?1")?;
+        for (id, path, _, _) in sessions {
+            let thread_name = session_log_thread_name(Path::new(&path))?;
+            stmt.execute(params![id, thread_name])?;
+        }
+
+        self.conn
             .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
         Ok(())
     }
@@ -335,6 +361,7 @@ impl Database {
                 wrapper TEXT,
                 model TEXT,
                 label TEXT,
+                thread_name TEXT,
                 path TEXT NOT NULL,
                 uuid TEXT,
                 first_prompt TEXT,
@@ -430,6 +457,7 @@ impl Database {
                     wrapper,
                     model,
                     label,
+                    thread_name,
                     path,
                     uuid,
                     first_prompt,
@@ -466,6 +494,7 @@ impl Database {
                 wrapper,
                 model,
                 label,
+                thread_name,
                 path,
                 uuid,
                 first_prompt,
@@ -477,12 +506,13 @@ impl Database {
                 size,
                 mtime
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 provider = excluded.provider,
                 wrapper = excluded.wrapper,
                 model = excluded.model,
                 label = excluded.label,
+                thread_name = excluded.thread_name,
                 path = excluded.path,
                 uuid = excluded.uuid,
                 first_prompt = excluded.first_prompt,
@@ -500,6 +530,7 @@ impl Database {
                 s.wrapper.as_deref(),
                 s.model.as_deref(),
                 s.label.as_deref(),
+                s.thread_name.as_deref(),
                 s.path.to_string_lossy(),
                 s.uuid.as_deref(),
                 s.first_prompt.as_deref(),
@@ -536,6 +567,7 @@ impl Database {
                 wrapper,
                 model,
                 label,
+                thread_name,
                 path,
                 uuid,
                 first_prompt,
@@ -651,7 +683,7 @@ impl Database {
         limit: Option<usize>,
     ) -> Result<Vec<SessionQuery>> {
         let mut query = String::from(
-            "SELECT id, provider, wrapper, label, first_prompt, actionable, subagent, last_active FROM sessions",
+            "SELECT id, provider, wrapper, label, thread_name, first_prompt, actionable, subagent, last_active FROM sessions",
         );
         let mut clauses = Vec::new();
         let mut params: Vec<SqlValue> = Vec::new();
@@ -819,6 +851,7 @@ impl Database {
                 wrapper,
                 model,
                 label,
+                thread_name,
                 path,
                 uuid,
                 first_prompt,
@@ -852,6 +885,7 @@ impl Database {
                 wrapper,
                 model,
                 label,
+                thread_name,
                 path,
                 uuid,
                 first_prompt,
@@ -901,6 +935,7 @@ impl Database {
                 wrapper,
                 model,
                 label,
+                thread_name,
                 path,
                 uuid,
                 first_prompt,
@@ -1027,6 +1062,7 @@ fn map_summary(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         wrapper: row.get::<_, Option<String>>("wrapper")?,
         model: row.get::<_, Option<String>>("model")?,
         label: row.get::<_, Option<String>>("label")?,
+        thread_name: row.get::<_, Option<String>>("thread_name")?,
         path: PathBuf::from(path),
         uuid: row.get::<_, Option<String>>("uuid")?,
         first_prompt: row.get::<_, Option<String>>("first_prompt")?,
@@ -1046,10 +1082,11 @@ fn map_query(row: &Row<'_>) -> rusqlite::Result<SessionQuery> {
         provider: row.get(1)?,
         wrapper: row.get(2)?,
         label: row.get(3)?,
-        first_prompt: row.get(4)?,
-        actionable: row.get::<_, i64>(5)? != 0,
-        subagent: row.get::<_, i64>(6)? != 0,
-        last_active: row.get(7)?,
+        thread_name: row.get(4)?,
+        first_prompt: row.get(5)?,
+        actionable: row.get::<_, i64>(6)? != 0,
+        subagent: row.get::<_, i64>(7)? != 0,
+        last_active: row.get(8)?,
     })
 }
 
@@ -1103,6 +1140,26 @@ fn session_log_indicates_subagent(path: &Path) -> Result<Option<bool>> {
     }
 
     Ok(None)
+}
+
+fn session_log_thread_name(path: &Path) -> Result<Option<String>> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Ok(None);
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut thread_name = None;
+
+    for line in reader.lines() {
+        let line = line?;
+        let parsed = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+        thread_name = parsed
+            .as_ref()
+            .and_then(thread_name_update_from_value)
+            .unwrap_or(thread_name);
+    }
+
+    Ok(thread_name)
 }
 
 #[cfg(test)]
@@ -1324,6 +1381,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some(prompt.into()),
+            thread_name: None,
             path: PathBuf::from(format!("{id}.jsonl")),
             uuid: None,
             first_prompt: Some(prompt.into()),
@@ -1353,6 +1411,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("demo".into()),
+            thread_name: None,
             path: PathBuf::from("session-1.jsonl"),
             uuid: None,
             first_prompt: Some("Context awareness request".into()),
@@ -1485,6 +1544,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("Usage".into()),
+            thread_name: None,
             path: PathBuf::from("sess-1.jsonl"),
             uuid: None,
             first_prompt: Some("Hello".into()),
@@ -1519,6 +1579,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("Other".into()),
+            thread_name: None,
             path: PathBuf::from("sess-2.jsonl"),
             uuid: None,
             first_prompt: Some("Hi".into()),
@@ -1574,6 +1635,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("UUID".into()),
+            thread_name: None,
             path: PathBuf::from("sess-uuid.jsonl"),
             uuid: Some("abc-123".into()),
             first_prompt: Some("Hello".into()),
@@ -1627,6 +1689,7 @@ mod tests {
             wrapper: Some("shellwrap".into()),
             model: None,
             label: Some("Wrapped".into()),
+            thread_name: None,
             path: PathBuf::from("sess-wrap.jsonl"),
             uuid: None,
             first_prompt: Some("Hello".into()),
@@ -1660,6 +1723,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("replace".into()),
+            thread_name: None,
             path: PathBuf::from("sess-replace.jsonl"),
             uuid: None,
             first_prompt: Some("hello".into()),
@@ -1749,6 +1813,7 @@ mod tests {
             wrapper: None,
             model: Some("o3-mini".into()),
             label: Some("Model".into()),
+            thread_name: None,
             path: PathBuf::from("sess-model.jsonl"),
             uuid: None,
             first_prompt: Some("Hello".into()),
@@ -1953,6 +2018,25 @@ mod tests {
     }
 
     #[test]
+    fn session_log_thread_name_handles_blank_invalid_and_updates() -> Result<()> {
+        let temp = TempDir::new()?;
+        let session = temp.child("thread-name.jsonl");
+        let contents = [
+            "\nnot-json\n",
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-1\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_name_updated\",\"thread_name\":\"tax\"}}\n",
+        ]
+        .concat();
+        session.write_str(&contents)?;
+
+        assert_eq!(
+            session_log_thread_name(session.path())?,
+            Some("tax".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn migrate_fails_on_read_only_create_schema() -> Result<()> {
         let temp = TempDir::new()?;
         let db_path = temp.child("readonly-create.sqlite3");
@@ -2100,6 +2184,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("By ID".into()),
+            thread_name: None,
             path: PathBuf::from("direct-id.jsonl"),
             uuid: Some("direct-id-uuid".into()),
             first_prompt: Some("hello".into()),
@@ -2147,6 +2232,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("dup".into()),
+            thread_name: None,
             path: PathBuf::from("dup-msg.jsonl"),
             uuid: None,
             first_prompt: Some("hello".into()),
@@ -2175,6 +2261,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("dup".into()),
+            thread_name: None,
             path: PathBuf::from("dup-usage.jsonl"),
             uuid: None,
             first_prompt: Some("hello".into()),
@@ -2214,6 +2301,7 @@ mod tests {
             wrapper: None,
             model: None,
             label: Some("By UUID".into()),
+            thread_name: None,
             path: PathBuf::from("uuid-session.jsonl"),
             uuid: Some("uuid-lookup".into()),
             first_prompt: Some("payload".into()),
