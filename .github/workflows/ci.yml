@@ -32,21 +32,22 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Enable sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
       - name: Install mise
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151
 
       # rustup caches can omit components; install them explicitly to guarantee rustfmt/clippy availability.
       - name: Install rust components
         run: rustup component add --toolchain 1.90.0 rustfmt clippy llvm-tools-preview
 
       - name: Cache cargo builds
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           cache-targets: true
 
@@ -64,7 +65,7 @@ jobs:
 
       - name: Upload test results to Codecov
         if: always()
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
         with:
           token: ${{ env.CODECOV_TOKEN }}
           report_type: test_results
@@ -76,7 +77,7 @@ jobs:
 
       - name: Upload test report artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: nextest-junit-${{ matrix.os }}
           path: target/nextest/ci/junit.xml
@@ -93,7 +94,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: success()
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
         with:
           files: coverage/lcov.info
           flags: rust-unit
@@ -103,7 +104,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: ${{ success() && matrix.os == 'ubuntu-latest' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: coverage-html
           path: coverage/html
