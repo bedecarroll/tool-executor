@@ -43,8 +43,8 @@ pub enum AppError {
     ProviderMismatch { expected: String, actual: String },
 }
 
-const SEARCH_SESSION_DISAPPEARED: &str = "session '{}' disappeared during search";
 const RESUME_SESSION_DISAPPEARED: &str = "session '{}' disappeared during resume lookup";
+const SEARCH_SESSION_DISAPPEARED: &str = "session '{}' disappeared during search";
 
 pub struct App<'cli> {
     pub cli: &'cli Cli,
@@ -118,28 +118,22 @@ impl<'cli> App<'cli> {
         }
 
         if term.is_none() {
-            let sessions =
-                self.db
-                    .list_sessions(cmd.provider.as_deref(), true, since_epoch, None)?;
-
             let mut payload = Vec::new();
-            for session in &sessions {
-                let summary =
-                    self.session_summary_required(&session.id, SEARCH_SESSION_DISAPPEARED)?;
-                if !summary.subagent
-                    && !is_subagent_job_session_texts(summary.first_prompt.as_deref(), None)
-                {
-                    payload.push(summary_to_json(
-                        &summary,
-                        summary.first_prompt.as_deref(),
-                        None,
-                    ));
-                }
-            }
-
-            if let Some(limit) = cmd.limit {
-                payload.truncate(limit);
-            }
+            self.db
+                .visit_sessions(cmd.provider.as_deref(), true, since_epoch, |session| {
+                    let summary =
+                        self.session_summary_required(&session.id, SEARCH_SESSION_DISAPPEARED)?;
+                    if !summary.subagent
+                        && !is_subagent_job_session_texts(summary.first_prompt.as_deref(), None)
+                    {
+                        payload.push(summary_to_json(
+                            &summary,
+                            summary.first_prompt.as_deref(),
+                            None,
+                        ));
+                    }
+                    Ok(cmd.limit.is_none_or(|limit| payload.len() < limit))
+                })?;
 
             println!("{}", serde_json::to_string_pretty(&payload)?);
             return Ok(());

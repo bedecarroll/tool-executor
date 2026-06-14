@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::SystemTime;
 
 use color_eyre::Result;
@@ -14,7 +15,7 @@ use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
 
 use crate::config::model::{Config, ProviderConfig};
-use crate::db::Database;
+use crate::db::{Database, IndexedSession};
 use crate::session::{
     MessageRecord, SessionIngest, SessionSummary, TokenUsageRecord, fallback_session_uuid,
     is_subagent_job_session_texts, session_meta_source_is_subagent, session_uuid_from_value,
@@ -46,6 +47,85 @@ enum FileProcess {
     Skipped(String),
 }
 
+struct SessionFile {
+    path: PathBuf,
+    canonical_path: PathBuf,
+    size: i64,
+    mtime: i64,
+    created_at: Option<i64>,
+}
+
+fn indexed_session(summary: &SessionSummary) -> IndexedSession {
+    IndexedSession {
+        id: summary.id.clone(),
+        path: summary.path.clone(),
+        size: summary.size,
+        mtime: summary.mtime,
+    }
+}
+
+fn canonical_entry_path(root: &Path, canonical_root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root).map_or_else(
+        |_| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+        |relative| canonical_root.join(relative),
+    )
+}
+
+fn read_session_file(path: PathBuf, canonical_path: PathBuf) -> Result<SessionFile> {
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+    let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    let mtime = system_time_to_unix(metadata.modified().ok()).unwrap_or_else(current_unix_time);
+    let created_at = system_time_to_unix(metadata.created().ok());
+
+    Ok(SessionFile {
+        path,
+        canonical_path,
+        size,
+        mtime,
+        created_at,
+    })
+}
+
+fn read_session_files(paths: Vec<(PathBuf, PathBuf)>) -> Vec<(PathBuf, Result<SessionFile>)> {
+    if paths.len() < 2 {
+        return paths
+            .into_iter()
+            .map(|(path, canonical_path)| {
+                let result = read_session_file(path.clone(), canonical_path);
+                (path, result)
+            })
+            .collect();
+    }
+
+    let workers = thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(8)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(workers);
+
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in paths.chunks(chunk_size) {
+            let chunk = chunk.to_vec();
+            handles.push(scope.spawn(move || {
+                chunk
+                    .into_iter()
+                    .map(|(path, canonical_path)| {
+                        let result = read_session_file(path.clone(), canonical_path);
+                        (path, result)
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("metadata worker panicked"))
+            .collect()
+    })
+}
+
 impl<'a> Indexer<'a> {
     pub fn new(db: &'a mut Database, config: &'a Config) -> Self {
         Self { db, config }
@@ -60,8 +140,8 @@ impl<'a> Indexer<'a> {
         let mut report = IndexReport::default();
 
         for provider in self.config.providers.values() {
-            let existing_sessions = self.db.sessions_for_provider(&provider.name)?;
-            let mut existing_by_path: HashMap<String, SessionSummary> = existing_sessions
+            let existing_sessions = self.db.indexed_sessions_for_provider(&provider.name)?;
+            let mut existing_by_path: HashMap<String, IndexedSession> = existing_sessions
                 .iter()
                 .map(|session| (session.path.to_string_lossy().to_string(), session.clone()))
                 .collect();
@@ -73,11 +153,17 @@ impl<'a> Indexer<'a> {
                 }
                 if root.is_file() {
                     if is_jsonl(root) {
-                        match self.process_file(provider, root, &existing_by_path) {
+                        let canonical_path = root.canonicalize().unwrap_or_else(|_| root.clone());
+                        let file = read_session_file(root.clone(), canonical_path);
+                        match file
+                            .and_then(|file| self.process_file(provider, &file, &existing_by_path))
+                        {
                             Ok(FileProcess::Updated(summary)) => {
                                 seen.insert(summary.id.clone());
-                                existing_by_path
-                                    .insert(summary.path.to_string_lossy().to_string(), *summary);
+                                existing_by_path.insert(
+                                    summary.path.to_string_lossy().to_string(),
+                                    indexed_session(&summary),
+                                );
                                 report.updated += 1;
                                 report.scanned += 1;
                             }
@@ -96,6 +182,8 @@ impl<'a> Indexer<'a> {
                     continue;
                 }
 
+                let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+                let mut paths = Vec::new();
                 for entry in WalkDir::new(root)
                     .follow_links(true)
                     .into_iter()
@@ -107,12 +195,21 @@ impl<'a> Indexer<'a> {
                         continue;
                     }
 
-                    report.scanned += 1;
-                    match self.process_file(provider, path, &existing_by_path) {
+                    let canonical_path = canonical_entry_path(root, &canonical_root, path);
+                    paths.push((path.to_path_buf(), canonical_path));
+                }
+
+                report.scanned += paths.len();
+                for (path, file) in read_session_files(paths) {
+                    match file
+                        .and_then(|file| self.process_file(provider, &file, &existing_by_path))
+                    {
                         Ok(FileProcess::Updated(summary)) => {
                             seen.insert(summary.id.clone());
-                            existing_by_path
-                                .insert(summary.path.to_string_lossy().to_string(), *summary);
+                            existing_by_path.insert(
+                                summary.path.to_string_lossy().to_string(),
+                                indexed_session(&summary),
+                            );
                             report.updated += 1;
                         }
                         Ok(FileProcess::Skipped(id)) => {
@@ -120,10 +217,7 @@ impl<'a> Indexer<'a> {
                             report.skipped += 1;
                         }
                         Err(err) => {
-                            report.errors.push(IndexError {
-                                path: path.to_path_buf(),
-                                error: err,
-                            });
+                            report.errors.push(IndexError { path, error: err });
                         }
                     }
                 }
@@ -144,26 +238,25 @@ impl<'a> Indexer<'a> {
     fn process_file(
         &mut self,
         provider: &ProviderConfig,
-        path: &Path,
-        existing_by_path: &HashMap<String, SessionSummary>,
+        file: &SessionFile,
+        existing_by_path: &HashMap<String, IndexedSession>,
     ) -> Result<FileProcess> {
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("failed to read metadata for {}", path.display()))?;
-        let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
-        let mtime = system_time_to_unix(metadata.modified().ok()).unwrap_or_else(current_unix_time);
-        let created_at = system_time_to_unix(metadata.created().ok());
-
-        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let path_str = canonical_path.to_string_lossy().to_string();
+        let path_str = file.canonical_path.to_string_lossy().to_string();
 
         if let Some(existing) = existing_by_path.get(&path_str)
-            && !existing.is_stale(size, mtime)
+            && !existing.is_stale(file.size, file.mtime)
         {
             return Ok(FileProcess::Skipped(existing.id.clone()));
         }
 
-        let ingest = Self::build_ingest(provider, &canonical_path, size, mtime, created_at)
-            .with_context(|| format!("failed to ingest session from {}", path.display()))?;
+        let ingest = Self::build_ingest(
+            provider,
+            &file.canonical_path,
+            file.size,
+            file.mtime,
+            file.created_at,
+        )
+        .with_context(|| format!("failed to ingest session from {}", file.path.display()))?;
         let summary = ingest.summary.clone();
         self.db.upsert_session(&ingest)?;
         Ok(FileProcess::Updated(Box::new(summary)))
@@ -1474,6 +1567,19 @@ mod tests {
         let (id, relative) = compute_session_id(&provider, file.path());
         assert_eq!(id, format!("{}/symlinked.jsonl", provider.name));
         assert_eq!(relative, "symlinked.jsonl");
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_entry_path_falls_back_when_path_is_outside_root() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = temp.child("root");
+        root.create_dir_all()?;
+        let outside = temp.child("outside.jsonl");
+        outside.write_str("{}\n")?;
+
+        let canonical = canonical_entry_path(root.path(), root.path(), outside.path());
+        assert_eq!(canonical, outside.path().canonicalize()?);
         Ok(())
     }
 
