@@ -41,6 +41,11 @@ pub struct Indexer<'a> {
     config: &'a Config,
 }
 
+enum FileProcess {
+    Updated(Box<SessionSummary>),
+    Skipped(String),
+}
+
 impl<'a> Indexer<'a> {
     pub fn new(db: &'a mut Database, config: &'a Config) -> Self {
         Self { db, config }
@@ -55,6 +60,11 @@ impl<'a> Indexer<'a> {
         let mut report = IndexReport::default();
 
         for provider in self.config.providers.values() {
+            let existing_sessions = self.db.sessions_for_provider(&provider.name)?;
+            let mut existing_by_path: HashMap<String, SessionSummary> = existing_sessions
+                .iter()
+                .map(|session| (session.path.to_string_lossy().to_string(), session.clone()))
+                .collect();
             let mut seen = HashSet::new();
             for root in &provider.session_roots {
                 if !root.exists() {
@@ -63,13 +73,16 @@ impl<'a> Indexer<'a> {
                 }
                 if root.is_file() {
                     if is_jsonl(root) {
-                        match self.process_file(provider, root) {
-                            Ok(Some(id)) => {
-                                seen.insert(id);
+                        match self.process_file(provider, root, &existing_by_path) {
+                            Ok(FileProcess::Updated(summary)) => {
+                                seen.insert(summary.id.clone());
+                                existing_by_path
+                                    .insert(summary.path.to_string_lossy().to_string(), *summary);
                                 report.updated += 1;
                                 report.scanned += 1;
                             }
-                            Ok(None) => {
+                            Ok(FileProcess::Skipped(id)) => {
+                                seen.insert(id);
                                 report.skipped += 1;
                             }
                             Err(err) => {
@@ -95,12 +108,15 @@ impl<'a> Indexer<'a> {
                     }
 
                     report.scanned += 1;
-                    match self.process_file(provider, path) {
-                        Ok(Some(id)) => {
-                            seen.insert(id);
+                    match self.process_file(provider, path, &existing_by_path) {
+                        Ok(FileProcess::Updated(summary)) => {
+                            seen.insert(summary.id.clone());
+                            existing_by_path
+                                .insert(summary.path.to_string_lossy().to_string(), *summary);
                             report.updated += 1;
                         }
-                        Ok(None) => {
+                        Ok(FileProcess::Skipped(id)) => {
+                            seen.insert(id);
                             report.skipped += 1;
                         }
                         Err(err) => {
@@ -114,8 +130,7 @@ impl<'a> Indexer<'a> {
             }
 
             // remove stale sessions for provider
-            let existing = self.db.sessions_for_provider(&provider.name)?;
-            for session in existing {
+            for session in existing_sessions {
                 if !seen.contains(&session.id) && !session.path.exists() {
                     self.db.delete_session(&session.id)?;
                     report.removed += 1;
@@ -126,7 +141,12 @@ impl<'a> Indexer<'a> {
         Ok(report)
     }
 
-    fn process_file(&mut self, provider: &ProviderConfig, path: &Path) -> Result<Option<String>> {
+    fn process_file(
+        &mut self,
+        provider: &ProviderConfig,
+        path: &Path,
+        existing_by_path: &HashMap<String, SessionSummary>,
+    ) -> Result<FileProcess> {
         let metadata = fs::metadata(path)
             .with_context(|| format!("failed to read metadata for {}", path.display()))?;
         let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -136,17 +156,17 @@ impl<'a> Indexer<'a> {
         let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let path_str = canonical_path.to_string_lossy().to_string();
 
-        if let Some(existing) = self.db.existing_by_path(&path_str)?
+        if let Some(existing) = existing_by_path.get(&path_str)
             && !existing.is_stale(size, mtime)
         {
-            return Ok(None);
+            return Ok(FileProcess::Skipped(existing.id.clone()));
         }
 
         let ingest = Self::build_ingest(provider, &canonical_path, size, mtime, created_at)
             .with_context(|| format!("failed to ingest session from {}", path.display()))?;
-        let id = ingest.summary.id.clone();
+        let summary = ingest.summary.clone();
         self.db.upsert_session(&ingest)?;
-        Ok(Some(id))
+        Ok(FileProcess::Updated(Box::new(summary)))
     }
 
     fn build_ingest(
