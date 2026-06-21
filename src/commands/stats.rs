@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -737,8 +738,8 @@ mod tests {
     use crate::session::{MessageRecord, SessionIngest, SessionSummary};
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
     use std::path::PathBuf;
     use time::OffsetDateTime;
 
