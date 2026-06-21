@@ -108,9 +108,9 @@ impl OpenAIEmbeddingProvider {
             #[cfg(not(coverage))]
             client: ureq::Agent::config_builder()
                 .timeout_connect(Some(Duration::from_secs(10)))
-                .timeout_recv_response(Some(Duration::from_secs(60)))
-                .timeout_recv_body(Some(Duration::from_secs(60)))
-                .timeout_send_body(Some(Duration::from_secs(60)))
+                .timeout_recv_response(Some(Duration::from_mins(1)))
+                .timeout_recv_body(Some(Duration::from_mins(1)))
+                .timeout_send_body(Some(Duration::from_mins(1)))
                 .build()
                 .into(),
             #[cfg(coverage)]
