@@ -44,7 +44,7 @@ jobs:
 
       # rustup caches can omit components; install them explicitly to guarantee rustfmt/clippy availability.
       - name: Install rust components
-        run: rustup component add --toolchain 1.90.0 rustfmt clippy llvm-tools-preview
+        run: rustup component add --toolchain 1.96.0 rustfmt clippy llvm-tools-preview
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
