@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -383,7 +384,7 @@ fn render_top_models(stats: &CodexStats) {
     }
     println!("Top models by total tokens:");
     let mut rows: Vec<_> = stats.token_stats.model_totals.iter().collect();
-    rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    rows.sort_by_key(|a| Reverse(a.1.total));
     for (model, usage) in rows.into_iter().take(5) {
         println!("  {model}: total {}", human_int(usage.total));
     }
@@ -738,6 +739,7 @@ mod tests {
     use assert_fs::TempDir;
     use assert_fs::prelude::*;
     use std::collections::{BTreeMap, HashMap, HashSet};
+
     use std::path::PathBuf;
     use time::OffsetDateTime;
 

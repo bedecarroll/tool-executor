@@ -308,16 +308,11 @@ impl RawDefaults {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum RawStdinMode {
+    #[default]
     Pipe,
     CaptureArg,
-}
-
-impl Default for RawStdinMode {
-    fn default() -> Self {
-        Self::Pipe
-    }
 }
 
 impl RawStdinMode {

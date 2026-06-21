@@ -1934,7 +1934,7 @@ fn status_message_prefers_overlay_then_filter() -> Result<()> {
     };
 
     let mut state = AppState::new(&mut ctx)?;
-    state.set_temporary_status_message("overlay".into(), StdDuration::from_secs(60));
+    state.set_temporary_status_message("overlay".into(), StdDuration::from_mins(1));
     assert_eq!(state.status_message().as_deref(), Some("overlay"));
 
     let backend = TestBackend::new(40, 6);
@@ -2041,7 +2041,7 @@ fn status_message_handles_all_sources() -> Result<()> {
 
     let mut state = AppState::new(&mut ctx)?;
 
-    state.set_temporary_status_message("overlay".into(), StdDuration::from_secs(60));
+    state.set_temporary_status_message("overlay".into(), StdDuration::from_mins(1));
     assert_eq!(state.status_message().as_deref(), Some("overlay"));
 
     state.overlay_message = Some((
@@ -3580,7 +3580,7 @@ fn tui_draw_snapshots() -> Result<()> {
 
     state.overlay_message = Some((
         "provider: codex".into(),
-        Instant::now() + StdDuration::from_secs(60),
+        Instant::now() + StdDuration::from_mins(1),
     ));
     let overlay_snapshot = render_to_string(&mut state, 60, 10)?;
     insta::assert_snapshot!("tui_status_overlay_render", overlay_snapshot);
