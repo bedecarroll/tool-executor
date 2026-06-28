@@ -249,9 +249,22 @@ impl<'a> Indexer<'a> {
             return Ok(FileProcess::Skipped(existing.id.clone()));
         }
 
+        let canonical_path = file
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| file.canonical_path.clone());
+        if canonical_path != file.canonical_path {
+            let canonical_path_str = canonical_path.to_string_lossy().to_string();
+            if let Some(existing) = existing_by_path.get(&canonical_path_str)
+                && !existing.is_stale(file.size, file.mtime)
+            {
+                return Ok(FileProcess::Skipped(existing.id.clone()));
+            }
+        }
+
         let ingest = Self::build_ingest(
             provider,
-            &file.canonical_path,
+            &canonical_path,
             file.size,
             file.mtime,
             file.created_at,
@@ -1567,6 +1580,42 @@ mod tests {
         let (id, relative) = compute_session_id(&provider, file.path());
         assert_eq!(id, format!("{}/symlinked.jsonl", provider.name));
         assert_eq!(relative, "symlinked.jsonl");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indexer_preserves_canonical_paths_for_nested_symlinks() -> Result<()> {
+        use std::os::unix::fs as unix_fs;
+
+        let temp = TempDir::new()?;
+        let root = temp.child("root");
+        root.create_dir_all()?;
+        let real_dir = temp.child("real");
+        real_dir.create_dir_all()?;
+        let session_file = real_dir.child("conversation.jsonl");
+        session_file.write_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ping\"}}\n")?;
+        unix_fs::symlink(real_dir.path(), root.child("linked").path())?;
+
+        let config = config_from_provider(provider_with_root(root.path()));
+        let db_path = temp.child("tx.sqlite3");
+        let mut db = Database::open(db_path.path())?;
+
+        {
+            let mut indexer = Indexer::new(&mut db, &config);
+            let report = indexer.run()?;
+            assert_eq!(report.updated, 1);
+        }
+
+        let sessions = db.sessions_for_provider("codex")?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path, session_file.path().canonicalize()?);
+
+        let mut indexer = Indexer::new(&mut db, &config);
+        let report = indexer.run()?;
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(db.count_sessions()?, 1);
         Ok(())
     }
 

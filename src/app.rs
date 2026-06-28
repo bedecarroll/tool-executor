@@ -119,6 +119,11 @@ impl<'cli> App<'cli> {
 
         if term.is_none() {
             let mut payload = Vec::new();
+            if cmd.limit == Some(0) {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
             self.db
                 .visit_sessions(cmd.provider.as_deref(), true, since_epoch, |session| {
                     let summary =
