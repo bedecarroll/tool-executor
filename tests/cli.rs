@@ -555,6 +555,57 @@ fn search_without_term_lists_sessions() -> color_eyre::Result<()> {
 }
 
 #[test]
+fn search_without_term_zero_limit_returns_empty() -> color_eyre::Result<()> {
+    let temp = TempDir::new()?;
+    let data_dir = temp.child("data-root");
+    data_dir.create_dir_all()?;
+    let db_path = data_dir.child("tx.sqlite3");
+    let mut db = Database::open(db_path.path())?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let path = temp.child("recent.jsonl").path().to_path_buf();
+    let summary = SessionSummary {
+        id: "sess-recent".into(),
+        provider: "codex".into(),
+        wrapper: None,
+        model: None,
+        label: Some("Recent".into()),
+        thread_name: None,
+        path,
+        uuid: Some("uuid-recent".into()),
+        first_prompt: Some("recent prompt".into()),
+        actionable: true,
+        subagent: false,
+        created_at: Some(now - 10),
+        started_at: Some(now - 10),
+        last_active: Some(now - 5),
+        size: 1,
+        mtime: now - 5,
+    };
+    let mut message = MessageRecord::new(
+        summary.id.clone(),
+        0,
+        "user",
+        "recent prompt",
+        None,
+        Some(now - 10),
+    );
+    message.is_first = true;
+    db.upsert_session(&SessionIngest::new(summary, vec![message]))?;
+    drop(db);
+
+    let mut cmd = base_command(&temp);
+    let output = cmd
+        .env("TX_SKIP_INDEX", "1")
+        .args(["search", "--limit", "0"])
+        .output()?;
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed, json!([]));
+    temp.close()?;
+    Ok(())
+}
+
+#[test]
 fn search_without_term_excludes_subagent_sessions() -> color_eyre::Result<()> {
     let temp = TempDir::new()?;
     let codex_home = temp.child("codex-home");

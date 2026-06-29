@@ -44,6 +44,21 @@ pub struct Database {
     conn: Connection,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexedSession {
+    pub id: String,
+    pub path: PathBuf,
+    pub size: i64,
+    pub mtime: i64,
+}
+
+impl IndexedSession {
+    #[must_use]
+    pub const fn is_stale(&self, size: i64, mtime: i64) -> bool {
+        self.size != size || self.mtime != mtime
+    }
+}
+
 fn assert_isolated_test_db_path(path: &Path) -> Result<()> {
     if !is_test_harness_process() || test_db_path_is_isolated(path) {
         return Ok(());
@@ -590,6 +605,34 @@ impl Database {
         Ok(out)
     }
 
+    /// List the session fields needed to decide whether provider files changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be executed.
+    pub fn indexed_sessions_for_provider(&self, provider: &str) -> Result<Vec<IndexedSession>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT id, path, size, mtime
+            FROM sessions
+            WHERE provider = ?1
+            ",
+        )?;
+        let rows = stmt.query_map([provider], |row| {
+            Ok(IndexedSession {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                size: row.get(2)?,
+                mtime: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Fetch token usage events for sessions owned by the specified provider.
     ///
     /// # Errors
@@ -720,6 +763,58 @@ impl Database {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Visit filtered sessions in descending activity order until the visitor stops.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query execution fails or the visitor returns an error.
+    pub fn visit_sessions<F>(
+        &self,
+        provider: Option<&str>,
+        actionable_only: bool,
+        since_epoch: Option<i64>,
+        mut visitor: F,
+    ) -> Result<()>
+    where
+        F: FnMut(SessionQuery) -> Result<bool>,
+    {
+        let mut query = String::from(
+            "SELECT id, provider, wrapper, label, thread_name, first_prompt, actionable, subagent, last_active FROM sessions",
+        );
+        let mut clauses = Vec::new();
+        let mut params: Vec<SqlValue> = Vec::new();
+
+        if let Some(provider) = provider {
+            clauses.push("provider = ?");
+            params.push(SqlValue::from(provider.to_string()));
+        }
+
+        if actionable_only {
+            clauses.push("actionable = 1");
+        }
+
+        if let Some(since) = since_epoch {
+            clauses.push("last_active >= ?");
+            params.push(SqlValue::from(since));
+        }
+
+        if !clauses.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&clauses.join(" AND "));
+        }
+
+        query.push_str(" ORDER BY last_active DESC");
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let mut rows = stmt.query(params_from_iter(params.iter()))?;
+        while let Some(row) = rows.next()? {
+            if !visitor(map_query(row)?)? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Search sessions by first user prompt using a LIKE query.
@@ -1530,6 +1625,13 @@ mod tests {
         let sessions = db.sessions_for_provider("codex")?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "sess-1");
+
+        let indexed_sessions = db.indexed_sessions_for_provider("codex")?;
+        assert_eq!(indexed_sessions.len(), 1);
+        assert_eq!(indexed_sessions[0].id, "sess-1");
+        assert_eq!(indexed_sessions[0].path, PathBuf::from("sess-1.jsonl"));
+        assert!(indexed_sessions[0].size > 0);
+        assert_eq!(indexed_sessions[0].mtime, now);
         Ok(())
     }
 
@@ -1622,6 +1724,13 @@ mod tests {
         let limited = db.list_sessions(None, false, None, Some(1))?;
         assert_eq!(limited.len(), 1, "limit should restrict rows");
         assert_eq!(limited[0].id, "fresh");
+
+        let mut visited = Vec::new();
+        db.visit_sessions(Some("codex"), true, None, |session| {
+            visited.push(session.id);
+            Ok(false)
+        })?;
+        assert_eq!(visited, vec!["fresh"]);
         Ok(())
     }
 
@@ -2159,6 +2268,7 @@ mod tests {
 
         assert!(db.existing_by_path("sess-1.jsonl").is_err());
         assert!(db.sessions_for_provider("codex").is_err());
+        assert!(db.indexed_sessions_for_provider("codex").is_err());
         assert!(db.token_usage_for_provider("codex").is_err());
         assert!(db.user_message_timestamps("codex").is_err());
         assert!(db.session_summary_by_uuid("missing").is_err());
