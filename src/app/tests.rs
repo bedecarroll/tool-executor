@@ -442,9 +442,6 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
     script.write_str(
         "#!/bin/sh\nprintf '%s|%s' \"$TX_CAPTURE_STDIN_DATA\" \"$PLAN_ENV_TEST\" > \"$1\"\n",
     )?;
-    let perms = std::fs::Permissions::from_mode(0o755);
-    std::fs::set_permissions(script.path(), perms)?;
-
     let plan = PipelinePlan {
         pipeline: "internal capture-arg".into(),
         display: "log".into(),
@@ -452,6 +449,7 @@ fn execute_plan_exec_invocation_sets_capture_env() -> Result<()> {
         env: vec![("PLAN_ENV_TEST".into(), "expected".into())],
         invocation: Invocation::Exec {
             argv: vec![
+                "/bin/sh".into(),
                 script.path().display().to_string(),
                 log_path.path().display().to_string(),
             ],

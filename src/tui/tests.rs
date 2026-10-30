@@ -29,7 +29,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::MutexGuard;
 #[cfg(unix)]
 use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
@@ -50,7 +50,7 @@ use crate::prompts::PromptAssembler;
 use crate::session::{MessageRecord, SessionIngest, SessionSummary, Transcript};
 
 #[cfg(unix)]
-static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+use crate::test_support::ENV_LOCK;
 
 #[cfg(unix)]
 struct PathGuard {
@@ -61,7 +61,7 @@ struct PathGuard {
 #[cfg(unix)]
 impl PathGuard {
     fn push(temp: &TempDir) -> Self {
-        let lock = PATH_LOCK.lock().unwrap();
+        let lock = ENV_LOCK.lock().unwrap();
         let original = env::var("PATH").ok();
         let mut paths = vec![temp.path().to_path_buf()];
         if let Some(value) = &original {
