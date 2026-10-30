@@ -1154,8 +1154,10 @@ where
     Ok(self_update_message(did_update, &version))
 }
 
-#[cfg(all(not(test), not(coverage)))]
-fn apply_self_update_release(quiet: bool, target_tag: Option<&str>) -> Result<(bool, String)> {
+fn configure_self_updater(
+    quiet: bool,
+    target_tag: Option<&str>,
+) -> Result<self_update::backends::github::Update> {
     use self_update::backends::github::Update;
 
     const REPO_OWNER: &str = "bedecarroll";
@@ -1171,16 +1173,19 @@ fn apply_self_update_release(quiet: bool, target_tag: Option<&str>) -> Result<(b
         .show_download_progress(!quiet);
 
     if let Some(tag) = target_tag {
-        builder.target_version_tag(tag);
+        builder.release_tag(tag);
     }
 
-    let status = builder
-        .build()
-        .wrap_err("failed to configure self-updater")?
+    builder.build().wrap_err("failed to configure self-updater")
+}
+
+#[cfg(all(not(test), not(coverage)))]
+fn apply_self_update_release(quiet: bool, target_tag: Option<&str>) -> Result<(bool, String)> {
+    let status = configure_self_updater(quiet, target_tag)?
         .update()
         .wrap_err("failed to apply update")?;
 
-    Ok((status.updated(), status.version().to_string()))
+    Ok((status.is_updated(), status.version().to_string()))
 }
 
 #[cfg(any(test, coverage))]

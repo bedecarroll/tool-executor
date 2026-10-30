@@ -6,10 +6,6 @@ ignore = [
   # yaml-rust and bincode 1.x unmaintained, via syntect <- tui-markdown
   "RUSTSEC-2024-0320",
   "RUSTSEC-2025-0141",
-  # quick-xml DoS advisories reachable only via self_update's pinned 0.37 line;
-  # fix requires quick-xml >=0.41, blocked on a self_update release
-  "RUSTSEC-2026-0194",
-  "RUSTSEC-2026-0195",
 ]
 
 [licenses]
@@ -53,7 +49,6 @@ skip = [
   { name = "windows_i686_gnullvm", version = "=0.53.1" },
   { name = "windows_i686_msvc", version = "=0.52.6" },
   { name = "windows_i686_msvc", version = "=0.53.1" },
-  { name = "quick-xml", version = "=0.37.5" },
   { name = "itertools", version = "=0.13.0" },
   { name = "itertools", version = "=0.14.0" },
   { name = "webpki-roots", version = "=0.26.11" },

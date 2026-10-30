@@ -2563,3 +2563,19 @@ fn app_self_update_surfaces_test_backend_failure() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn updater_configuration_preserves_tag_and_quiet_mode() -> Result<()> {
+    use self_update::UpdateConfig;
+
+    for quiet in [false, true] {
+        for tag in [None, Some("v1.2.3")] {
+            let updater = configure_self_updater(quiet, tag)?;
+            assert_eq!(updater.release_tag(), tag);
+            assert_eq!(updater.bin_name(), "tx");
+            assert_eq!(updater.current_version(), env!("CARGO_PKG_VERSION"));
+            assert_eq!(updater.show_download_progress(), !quiet);
+        }
+    }
+    Ok(())
+}
